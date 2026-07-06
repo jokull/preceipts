@@ -1,6 +1,6 @@
-# receipts — local CI, proven by trees, merged by humans
+# preceipts — local CI, proven by trees, merged by humans
 
-*Working title: `receipts` (CLI: `receipts`). PRD v1 — 2026-07-06.*
+*Name: `preceipts` (CLI: `preceipts`). PRD v1 — 2026-07-06.*
 
 ## Problem
 
@@ -52,10 +52,10 @@ Why this is load-bearing:
   JSON line per receipt. Concurrent minting from multiple machines merges
   losslessly with the `cat_sort_uniq` notes-merge strategy.
 - **Logs** are content-addressed blobs kept reachable via `refs/receipts/logs/
-  <blob-sha>` refs. Receipts reference their log blob. `receipts gc --keep 30d`
+  <blob-sha>` refs. Receipts reference their log blob. `preceipts gc --keep 30d`
   prunes old log refs; receipt lines outlive their logs gracefully.
-- **Sync** is `git push`/`fetch` of those refs. `receipts sync` wraps
-  fetch + `notes merge` (cat_sort_uniq) + push; `receipts init` offers to add
+- **Sync** is `git push`/`fetch` of those refs. `preceipts sync` wraps
+  fetch + `notes merge` (cat_sort_uniq) + push; `preceipts init` offers to add
   the refspecs to the remote config so normal pushes carry receipts.
 
 ### Receipt line (JSONL)
@@ -73,46 +73,74 @@ Why this is load-bearing:
   "runner": { "name": "Jökull Sólberg", "email": "jokull@…", "host": "mbp.local", "agent": "claude-code/2.x" },
   "dirty": false,
   "log": "blob:1c9e…",
-  "config_hash": "d41d…"
+  "check_blob": "9a1f…"
 }
 ```
 
-`config_hash` fingerprints the check's definition so a changed command visibly
-invalidates old receipts. `runner.agent` distinguishes human runs from agent
-runs — receipts from agents are first-class, labeled, never privileged.
+`check_blob` records the blob sha of the check's script (see below), so a
+changed check definition is visibly distinguishable from an unchanged one.
+`runner.agent` distinguishes human runs from agent runs — receipts from agents
+are first-class, labeled, never privileged.
 
-## Config: `.receipts.toml` (committed)
+## Checks: executable files, not a workflow DSL
+
+We deliberately do **not** mirror GitHub Actions YAML. A GHA workflow is mostly
+environment setup (checkout, toolchain, dependency install, cache) around a few
+`run:` lines — and locally the environment already exists; that's the premise
+of the tool. What remains of a workflow *is* a shell script. So checks use the
+git-hooks model:
+
+```
+.preceipts/
+  checks/
+    typecheck        # executable; shebang decides interpreter (bash by default)
+    test
+    lint
+  config.toml        # the little that isn't the script itself
+```
+
+- **A check is any executable file.** Filename = check name. Exit 0 = pass.
+  Bash by default, but a shebang can point at bun, python, anything — no DSL,
+  no emulation layer, nothing to learn. Agents read and write these natively.
+- **Contract:** cwd = repo root; stdout/stderr captured and streamed;
+  `PRECEIPTS_CHECK`, `PRECEIPTS_TREE` provided in env. Checks run in parallel
+  by default (they're independent scripts, same as parallel GHA jobs).
+- **The tree hash covers the check definition for free.** Because
+  `.preceipts/checks/*` is committed, the working-tree hash a receipt is keyed
+  to *already includes the exact script that ran*. Edit a check and every prior
+  receipt stops matching current trees automatically — no invalidation logic,
+  it falls out of content addressing. The receipt additionally records the
+  script's blob sha (`check_blob`) so tooling can say "check definition
+  changed" rather than just "no receipt".
+- **GHA migration** is copying the `run:` lines into a script. A `preceipts
+  import` scaffolder that does this mechanically from `.github/workflows/` is
+  a v2 nicety, not a dependency.
+
+`config.toml` stays minimal — only what isn't expressible as the script itself:
 
 ```toml
-[check.typecheck]
-run = "pnpm typecheck"
-timeout = "10m"
-
-[check.test]
-run = "pnpm test"
-
-[check.lint]
-run = "pnpm exec oxlint"
-
 [required]
 checks = ["typecheck", "test", "lint"]   # what "green" means for `status`/`land`
+
+[check.test]
+timeout = "15m"                           # default 10m
 ```
 
 ## CLI surface (phase 1)
 
 ```
-receipts run [check…]        # run in current worktree; mint against working-tree hash;
+preceipts run [check…]        # run in current worktree; mint against working-tree hash;
                              # warn (not fail) on dirty worktree; stream output live
-receipts status [ref]        # receipt table for ref's tree vs required set; exit code
+preceipts status [ref]        # receipt table for ref's tree vs required set; exit code
                              # reflects greenness (scriptable) but nothing enforces it
-receipts log <check> [ref]   # stored log for that check/tree (tail of failures first)
-receipts land <branch> [--onto main] [--no-push]
+preceipts log <check> [ref]   # stored log for that check/tree (tail of failures first)
+preceipts land <branch> [--onto main] [--no-push]
                              # squash via commit-tree, embed receipt trailers in the
                              # message, ff base ref, push. If base moved: state it,
                              # offer rebase-first or land-anyway. Never blocks.
-receipts sync                # fetch + cat_sort_uniq merge + push of receipt refs
-receipts gc [--keep 30d]     # prune log refs
-receipts init                # write .receipts.toml stub, offer refspec config
+preceipts sync                # fetch + cat_sort_uniq merge + push of receipt refs
+preceipts gc [--keep 30d]     # prune log refs
+preceipts init                # write .preceipts/ stub, offer refspec config
 --json everywhere            # agents and the future TUI consume the same output
 ```
 
@@ -126,9 +154,9 @@ Receipts-Runner: jokull@mbp.local (claude-code)
 
 ## Agent workflow (the point of all this)
 
-Agent edits → `receipts run` → commits (tree now matches, receipts valid) →
+Agent edits → `preceipts run` → commits (tree now matches, receipts valid) →
 pushes branch + receipts refs. Human opens the cockpit (phase 2) or runs
-`receipts status branch`: green table, logs one keystroke away, `land` when
+`preceipts status branch`: green table, logs one keystroke away, `land` when
 satisfied. "Queue-merge" is the agent looping: rebase → `run` → `land`.
 
 ## Out of scope (phase 1)
@@ -152,11 +180,12 @@ satisfied. "Queue-merge" is the agent looping: rebase → `run` → `land`.
 
 ## Unresolved questions
 
-1. Name. `receipts` reads well as a concept ("show me the receipts") and as a
-   CLI. Alternatives: `vouch`, `landed`, `greenlight`.
-2. Log retention default (30d? size-capped?) and whether failure logs get
+1. ~~Name~~ — resolved: `preceipts` (PR + receipts).
+2. ~~Check definition~~ — resolved: executable files in `.preceipts/checks/`,
+   bash by default, no workflow DSL.
+3. Log retention default (30d? size-capped?) and whether failure logs get
    longer retention than success logs (probably yes).
-3. `land` when base moved: is "land anyway" allowed silently with a trailer
+4. `land` when base moved: is "land anyway" allowed silently with a trailer
    noting staleness, or always interactive? (Agents will want a
    `--allow-stale` flag either way.)
-4. Should `receipts run` auto-`sync` after minting, or is sync always explicit?
+5. Should `preceipts run` auto-`sync` after minting, or is sync always explicit?
