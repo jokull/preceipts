@@ -18,6 +18,8 @@ use serde::Deserialize;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HudSnapshot {
+    /// Wire contract field (the cockpit no longer lands; agents do).
+    #[allow(dead_code)]
     pub branch: Option<String>,
     pub base: String,
     pub dirty: bool,
@@ -369,75 +371,6 @@ impl RunSession {
             let _ = self.child.wait();
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Land: `preceipts-engine land <branch> --onto <base> --json`, off-thread.
-
-pub struct LandOutcome {
-    pub ok: bool,
-    pub message: String,
-}
-
-pub fn start_land(branch: String, onto: Option<String>) -> mpsc::Receiver<LandOutcome> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let engine = crate::preceipts::engine_binary();
-        let mut command = Command::new(engine);
-        command
-            .args(["land", &branch, "--json"])
-            .stdin(Stdio::null());
-        if let Some(onto) = onto.as_deref() {
-            command.args(["--onto", onto]);
-        }
-        let outcome = match command.output() {
-            Ok(output) if output.status.success() => {
-                let message = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                    .ok()
-                    .and_then(|v| {
-                        let commit = v.get("commit")?.as_str()?.get(..12)?.to_string();
-                        let base = v.get("base")?.as_str()?.to_string();
-                        let pushed = v.get("pushed")?.as_bool()?;
-                        Some(format!(
-                            "landed → {} as {}{}",
-                            base,
-                            commit,
-                            if pushed {
-                                " · pushed"
-                            } else {
-                                " · not pushed"
-                            }
-                        ))
-                    })
-                    .unwrap_or_else(|| "landed".to_string());
-                LandOutcome { ok: true, message }
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let message = stderr
-                    .lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .take(2)
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                LandOutcome {
-                    ok: false,
-                    message: if message.is_empty() {
-                        "land failed".to_string()
-                    } else {
-                        message
-                    },
-                }
-            }
-            Err(err) => LandOutcome {
-                ok: false,
-                message: format!("could not run engine: {err}"),
-            },
-        };
-        let _ = tx.send(outcome);
-    });
-    rx
 }
 
 /// "48s", "3m12s", "1h03m" — mirrors the engine's duration formatting.

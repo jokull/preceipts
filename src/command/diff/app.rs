@@ -294,7 +294,7 @@ fn sync_viewed_files_from_github(pr_info: &PrInfo, state: &mut AppState) {
 }
 
 fn run_app_internal(
-    options: DiffOptions,
+    mut options: DiffOptions,
     pr_info: Option<PrInfo>,
     file_diffs: Vec<super::types::FileDiff>,
     stacked_commits: Option<Vec<StackedCommitInfo>>,
@@ -322,17 +322,27 @@ fn run_app_internal(
             CommitReference::RangeToWorkingTree { from } => format!("{}..-", from),
         })
     };
+    let diff_ref_str = match &options.pr_scope_base {
+        Some(base) => Some(format!("PR: {base}…")),
+        None => diff_ref_str,
+    };
     state.set_diff_reference(diff_ref_str);
 
     // preceipts HUD: kick off the first snapshot before the TUI starts; the
     // footer picks it up when it lands. Base = the "from" side of the diff
     // reference when there is one, else the engine's default (main).
-    let hud_base = options.reference.as_ref().and_then(|r| match r {
-        CommitReference::Range { from, .. }
-        | CommitReference::TripleDots { from, .. }
-        | CommitReference::RangeToWorkingTree { from } => Some(from.clone()),
-        CommitReference::Single(_) => None,
-    });
+    let hud_base = if let Some(base) = &options.pr_scope_base {
+        // Auto PR scope: the reference's "from" is a merge-base sha, useless
+        // to `hud --base`; use the branch name the scope was derived from.
+        Some(base.strip_prefix("origin/").unwrap_or(base).to_string())
+    } else {
+        options.reference.as_ref().and_then(|r| match r {
+            CommitReference::Range { from, .. }
+            | CommitReference::TripleDots { from, .. }
+            | CommitReference::RangeToWorkingTree { from } => Some(from.clone()),
+            CommitReference::Single(_) => None,
+        })
+    };
     super::receipts::refresh(hud_base.clone());
     super::receipts::refresh_status();
 
@@ -386,9 +396,17 @@ fn run_app_internal(
     let mut pending_watch_event: Option<WatchEvent> = None;
     let mut pending_events: VecDeque<Event> = VecDeque::new();
     let mut send_annotations_on_exit = false;
-    // preceipts: at most one live check run + one land in flight at a time.
+    // preceipts: at most one live check run at a time. Landing is the coding
+    // agent's job (`preceipts land` via the engine) — the cockpit only views
+    // and monitors.
     let mut run_session: Option<super::receipts::RunSession> = None;
-    let mut land_rx: Option<std::sync::mpsc::Receiver<super::receipts::LandOutcome>> = None;
+    let mut last_status_refresh = std::time::Instant::now();
+    let mut last_hud_refresh = std::time::Instant::now();
+    type ReloadMsg = (
+        Vec<super::types::FileDiff>,
+        Option<std::collections::HashSet<String>>,
+    );
+    let mut reload_pending: Option<std::sync::mpsc::Receiver<ReloadMsg>> = None;
 
     'main: loop {
         if let Some(ref rx) = watch_rx {
@@ -410,40 +428,58 @@ fn run_app_internal(
                 super::receipts::refresh_status();
             }
         }
-        if let Some(outcome) = land_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            state.receipts_message = Some(format!(
-                "{} {}",
-                if outcome.ok { "✓" } else { "✗" },
-                outcome.message
-            ));
-            land_rx = None;
-            super::receipts::refresh(hud_base.clone());
+        // preceipts: receipts and refs change without any worktree event (an
+        // agent minting in another terminal, a sync, base moving) — refresh
+        // the snapshots on a timer so the HUD and rail never go stale.
+        if last_status_refresh.elapsed() >= Duration::from_secs(5) {
             super::receipts::refresh_status();
+            last_status_refresh = std::time::Instant::now();
+        }
+        if last_hud_refresh.elapsed() >= Duration::from_secs(15) {
+            super::receipts::refresh(hud_base.clone());
+            last_hud_refresh = std::time::Instant::now();
         }
 
         if state.needs_reload {
             super::receipts::refresh(hud_base.clone());
-            let file_diffs = if let Some(ref pr) = pr_info {
-                // In PR mode, reload from GitHub
-                match load_pr_file_diffs(pr) {
+            if let Some(ref pr) = pr_info {
+                state.needs_reload = false;
+                // In PR mode, reload from GitHub (rare; sync is acceptable)
+                let file_diffs = match load_pr_file_diffs(pr) {
                     Ok(diffs) => diffs,
                     Err(e) => {
                         eprintln!("Warning: failed to reload PR diffs: {}", e);
                         Vec::new()
                     }
-                }
-            } else {
-                load_file_diffs(&options, backend)
-            };
-
-            // Pass changed files to reload so it can unmark them from viewed
-            let changed_files = pending_watch_event.take().map(|e| e.changed_files);
-            state.reload(file_diffs, changed_files.as_ref());
-
-            // Re-sync viewed files from GitHub in PR mode
-            if let Some(ref pr) = pr_info {
+                };
+                let changed_files = pending_watch_event.take().map(|e| e.changed_files);
+                state.reload(file_diffs, changed_files.as_ref());
                 sync_viewed_files_from_github(pr, &mut state);
+            } else if reload_pending.is_none() {
+                // preceipts: reload OFF-THREAD. A synchronous reload of a big
+                // PR-scope diff blocks the loop for seconds, and watch mode
+                // fires constantly while an agent edits the repo — the old
+                // frame stays interactive until the fresh diff arrives.
+                state.needs_reload = false;
+                let opts = options.clone();
+                let changed_files = pending_watch_event.take().map(|e| e.changed_files);
+                let cwd = std::env::current_dir()?;
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let diffs = crate::vcs::get_backend(&cwd, None)
+                        .map(|backend| load_file_diffs(&opts, backend.as_ref()))
+                        .unwrap_or_default();
+                    let _ = tx.send((diffs, changed_files));
+                });
+                reload_pending = Some(rx);
             }
+            // else: a reload is in flight; needs_reload stays set and the
+            // next one starts when it lands (always with the latest options).
+        }
+        if let Some(outcome) = reload_pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            let (file_diffs, changed_files) = outcome;
+            state.reload(file_diffs, changed_files.as_ref());
+            reload_pending = None;
         }
 
         if state.file_diffs.is_empty() {
@@ -1290,10 +1326,7 @@ fn run_app_internal(
                         && state.receipts_panel
                         && matches!(
                             key.code,
-                            KeyCode::Char('r')
-                                | KeyCode::Char('L')
-                                | KeyCode::Char('R')
-                                | KeyCode::Esc
+                            KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Esc
                         ) =>
                 {
                     match key.code {
@@ -1316,54 +1349,6 @@ fn run_app_internal(
                                         state.receipts_message = Some(format!(
                                             "could not start preceipts-engine: {err}"
                                         ));
-                                    }
-                                }
-                            }
-                        }
-                        KeyCode::Char('L') => {
-                            let running = run_session
-                                .as_ref()
-                                .map(|s| s.is_running())
-                                .unwrap_or(false);
-                            if running {
-                                state.receipts_message =
-                                    Some("checks are running — wait for green".to_string());
-                            } else if land_rx.is_some() {
-                                // land already in flight
-                            } else {
-                                let hud = super::receipts::get();
-                                let status = super::receipts::status_get();
-                                match (hud, status) {
-                                    (Some(hud), Some(status)) if status.green => {
-                                        if !hud.land_fresh {
-                                            state.receipts_message = Some(format!(
-                                                "base moved — rebase & re-run, or `preceipts land {} --allow-stale` from a shell",
-                                                hud.branch.as_deref().unwrap_or("<branch>")
-                                            ));
-                                        } else if let Some(branch) = hud.branch {
-                                            let onto = hud
-                                                .base
-                                                .strip_prefix("origin/")
-                                                .unwrap_or(&hud.base)
-                                                .to_string();
-                                            state.receipts_message =
-                                                Some(format!("landing {branch} → {onto}…"));
-                                            land_rx = Some(super::receipts::start_land(
-                                                branch,
-                                                Some(onto),
-                                            ));
-                                        } else {
-                                            state.receipts_message =
-                                                Some("detached HEAD — cannot land".to_string());
-                                        }
-                                    }
-                                    (_, Some(_)) => {
-                                        state.receipts_message =
-                                            Some("not green — run checks first (r)".to_string());
-                                    }
-                                    _ => {
-                                        state.receipts_message =
-                                            Some("no receipts data yet".to_string());
                                     }
                                 }
                             }
@@ -1999,6 +1984,24 @@ fn run_app_internal(
                             state.receipts_panel = true;
                             super::receipts::refresh_status();
                         }
+                        KeyCode::Char('t') => {
+                            // preceipts: toggle diff scope — PR view (base vs
+                            // working tree) ⇄ uncommitted-only. Local diffs only.
+                            if pr_info.is_none() && !state.stacked_mode {
+                                if options.pr_scope_base.is_some() {
+                                    options.reference = None;
+                                    options.pr_scope_base = None;
+                                    state.set_diff_reference(Some("uncommitted".to_string()));
+                                } else if let Some((base, reference)) =
+                                    super::default_pr_reference(backend)
+                                {
+                                    options.reference = Some(reference);
+                                    state.set_diff_reference(Some(format!("PR: {base}…")));
+                                    options.pr_scope_base = Some(base);
+                                }
+                                state.needs_reload = true;
+                            }
+                        }
                         KeyCode::Char('s') => {
                             if !state.annotations.is_empty() {
                                 let n = state.annotations.len();
@@ -2340,9 +2343,8 @@ fn run_app_internal(
                                                 description: "Run checks, mint receipts",
                                             },
                                             KeyBind {
-                                                key: "L (rail open)",
-                                                description:
-                                                    "Land branch (squash + trailers + push)",
+                                                key: "t",
+                                                description: "Toggle scope: PR diff / uncommitted",
                                             },
                                         ],
                                     },

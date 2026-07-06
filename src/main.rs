@@ -130,23 +130,27 @@ async fn run() -> Result<(), LumenError> {
             detect_pr,
             file,
             watch,
+            no_watch,
             theme,
             stacked,
             focus,
             origin,
             wrap,
         } => {
+            // preceipts: watch is the default; --no-watch opts out.
+            let _ = watch; // superseded, kept for upstream flag compatibility
             let options = command::diff::DiffOptions {
                 reference,
                 pr,
                 detect_pr,
                 file,
-                watch,
+                watch: !no_watch,
                 theme: theme.or(config.theme.clone()),
                 stacked,
                 focus,
                 origin,
                 wrap: wrap || config.wrap.unwrap_or(false),
+                pr_scope_base: None,
             };
             command::diff::run_diff_ui(options, backend.as_ref())?;
         }

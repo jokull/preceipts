@@ -240,8 +240,21 @@ material for perf work if lumen's rendering ever needs it.
   keystroke away (follow mode while running). Greenlight state = required set
   green for the current tree, recomputed as receipts mint and as the worktree
   changes.
-- **One-motion land.** Green board → `l` → staleness dialog only if base
-  moved → squash + trailers + push. The cockpit never blocks; it informs.
+- **View + monitor, never mutate** (revised 2026-07-06, superseding
+  "one-motion land"). The cockpit is the coding agent's companion: the human
+  reviews the diff and watches receipts; the *agent* lands via
+  `preceipts land` (engine CLI). No land keybinding, no AI commands in the
+  TUI or `--help` — scope is scroll, search, monitor, run checks.
+- **Always current.** Watch mode is the default (`--no-watch` to opt out):
+  the diff reloads on file changes — off-thread, so a multi-second reload of
+  a big changeset never freezes the UI while an agent is editing. HUD and
+  receipt snapshots also refresh on a timer (status ~5s, HUD ~15s), because
+  receipts change with no worktree event at all (an agent minting in another
+  terminal, a sync, the base moving).
+- **PR diff by default, one key to switch.** Bare `preceipts` opens the PR
+  view — merge-base(origin/main | main | …/master, HEAD) → working tree —
+  because the unit of review is the branch, not the last save. `t` toggles
+  to uncommitted-only ("what did the agent just do?") and back.
 - **Vim-grammar navigation, `/` search first.** `/` opens incremental content
   search over the *entire* changeset (all files, not just mounted rows —
   search runs against the row plan, so it works with virtualized/lazy-parsed
@@ -334,12 +347,7 @@ user/agent action — `hud` reports staleness, it doesn't network.
 6. **HUD**: read-only and network-free — it reports fetch staleness rather
    than fetching; the base for conflict/freshness questions is the
    remote-tracking ref when present, the local branch otherwise.
-7. **Prepare phase** (2026-07-06, from trip dogfooding): format/codegen is
-   `[prepare]` — serial commands run before the receipt tree is computed,
-   with changed paths reported. Checks that mutate the worktree invalidate
-   the run (no receipts minted, honest error pointing at `[prepare]`);
-   minting is deferred until the tree is verified stable across the run.
-8. **Cockpit = lumen fork, one repo, one name** (2026-07-06). This repo is a
+7. **Cockpit = lumen fork, one repo, one name** (2026-07-06). This repo is a
    fork of jnsahaj/lumen (github.com/jokull/preceipts) with the engine folded
    in at `engine/` (history preserved via subtree). preceipts is a superset of
    lumen: its diff cockpit plus receipts. Binaries: `preceipts` (Rust cockpit;
@@ -349,3 +357,15 @@ user/agent action — `hud` reports staleness, it doesn't network.
    to minimize merge friction; only the `[[bin]]` is renamed. Earlier plans —
    hunk fork, then an own OpenTUI DiffSurface pane — are superseded (prototype
    evidence retained in the hunk fork as reference).
+
+8. **Prepare phase** (2026-07-06, from trip dogfooding): format/codegen is
+   `[prepare]` — serial commands run before the receipt tree is computed,
+   with changed paths reported. Checks that mutate the worktree invalidate
+   the run (no receipts minted, honest error pointing at `[prepare]`);
+   minting is deferred until the tree is verified stable across the run.
+9. **Cockpit scope: view + monitor** (2026-07-06, user decision). The TUI is
+   for reviewing the diff and monitoring receipts; landing is the coding
+   agent's job through the engine CLI. Lumen's AI commands and flags are
+   hidden from `--help` (still compiled, minimizing upstream divergence).
+   Defaults: PR diff scope, watch on, async reloads, timer-refreshed
+   HUD/status. `t` toggles PR ⇄ uncommitted scope.

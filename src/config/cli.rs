@@ -14,24 +14,27 @@ pub enum VcsOverride {
 
 #[derive(Parser)]
 #[command(name = "preceipts")]
-#[command(about = "preceipts — local CI receipts + review cockpit (engine subcommands: init, run, status, log, land, hud, sync, gc)", long_about = None)]
+#[command(about = "preceipts — the coding-agent PR companion: diff cockpit + local CI receipts", long_about = None)]
+#[command(
+    after_help = "Engine subcommands (delegated to preceipts-engine):\n  init, run, status, log, land, hud, sync, gc\n\nBare `preceipts` opens the cockpit: the PR diff (merge-base of origin/main\nvs the working tree), watching for changes. Keys: / search, R receipts rail,\nt toggle PR/uncommitted scope, ? all keybindings."
+)]
 #[command(version)]
 pub struct Cli {
     /// Path to configuration file eg: ./path/to/lumen.config.json
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub config: Option<String>,
 
-    #[arg(value_enum, short = 'p', long = "provider")]
+    #[arg(value_enum, short = 'p', long = "provider", hide = true)]
     pub provider: Option<ProviderType>,
 
-    #[arg(short = 'k', long = "api-key")]
+    #[arg(short = 'k', long = "api-key", hide = true)]
     pub api_key: Option<String>,
 
-    #[arg(short = 'm', long = "model")]
+    #[arg(short = 'm', long = "model", hide = true)]
     pub model: Option<String>,
 
     /// Version control system to use (auto-detected if not specified)
-    #[arg(value_enum, long = "vcs")]
+    #[arg(value_enum, long = "vcs", hide = true)]
     pub vcs: Option<VcsOverride>,
 
     #[command(subcommand)]
@@ -75,6 +78,7 @@ impl FromStr for ProviderType {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Explain the changes in a commit, or the current diff (default). Use --list to select commit interactively
+    #[command(hide = true)]
     Explain {
         /// Commit reference: SHA, HEAD, HEAD~3..HEAD, main..feature, main...feature, main..- (range + working tree)
         #[arg(value_parser = clap::value_parser!(CommitReference))]
@@ -93,19 +97,22 @@ pub enum Commands {
         list: bool,
     },
     /// List all commits in an interactive fuzzy-finder, and summarize the changes
+    #[command(hide = true)]
     List,
     /// Generate a commit message for the staged changes
+    #[command(hide = true)]
     Draft {
         /// Add context to communicate intent
         #[arg(short, long)]
         context: Option<String>,
     },
 
+    #[command(hide = true)]
     Operate {
         #[arg()]
         query: String,
     },
-    /// Launch interactive side-by-side diff viewer
+    /// Open the diff cockpit (this is the default when run with no arguments)
     Diff {
         /// Commit reference: SHA, HEAD, HEAD~3..HEAD, main..feature, main...feature
         /// Can also be a PR number or URL (e.g., 123 or https://github.com/owner/repo/pull/123)
@@ -124,9 +131,13 @@ pub enum Commands {
         #[arg(short, long)]
         file: Option<Vec<String>>,
 
-        /// Watch for file changes and auto-reload
-        #[arg(short, long)]
+        /// Watch for file changes and auto-reload (default: on)
+        #[arg(short, long, hide = true)]
         watch: bool,
+
+        /// Disable watch mode
+        #[arg(long = "no-watch")]
+        no_watch: bool,
 
         /// Color theme (e.g., dracula, nord, gruvbox-dark, catppuccin-mocha)
         #[arg(short, long)]
@@ -149,6 +160,7 @@ pub enum Commands {
         wrap: bool,
     },
     /// Interactively configure Lumen (provider, API key)
+    #[command(hide = true)]
     Configure,
 }
 

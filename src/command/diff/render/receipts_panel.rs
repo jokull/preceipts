@@ -158,7 +158,7 @@ pub fn render_receipts_panel(
         Line::from(vec![Span::styled(" running… · R close", muted)])
     } else {
         Line::from(vec![Span::styled(
-            " r run checks · L land · R close",
+            " r run checks · t scope · R close",
             muted,
         )])
     };

@@ -26,6 +26,7 @@ use spinoff::{spinners, Color, Spinner};
 use crate::commit_reference::CommitReference;
 use crate::vcs::VcsBackend;
 
+#[derive(Clone)]
 pub struct DiffOptions {
     pub reference: Option<CommitReference>,
     pub pr: Option<String>,
@@ -37,6 +38,29 @@ pub struct DiffOptions {
     pub focus: Option<String>,
     pub origin: Option<String>,
     pub wrap: bool,
+    /// preceipts: set when the reference was auto-derived as the PR view
+    /// (merge-base of this base vs the working tree). Names the base for the
+    /// footer label and the `t` scope toggle.
+    pub pr_scope_base: Option<String>,
+}
+
+/// preceipts: the default diff scope — the "PR view". merge-base(base, HEAD)
+/// → working tree, where base is the first of origin/main, main,
+/// origin/master, master that yields a merge-base. None when the repo has no
+/// usable base (the caller falls back to lumen's uncommitted-changes view).
+pub fn default_pr_reference(backend: &dyn VcsBackend) -> Option<(String, CommitReference)> {
+    for base in ["origin/main", "main", "origin/master", "master"] {
+        if let Ok(merge_base) = backend.get_merge_base(base, "HEAD") {
+            let trimmed = merge_base.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some((
+                    base.to_string(),
+                    CommitReference::RangeToWorkingTree { from: trimmed },
+                ));
+            }
+        }
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -409,6 +433,14 @@ pub fn run_diff_ui(mut options: DiffOptions, backend: &dyn VcsBackend) -> io::Re
                     process::exit(1);
                 }
             }
+        }
+    }
+
+    // preceipts: no reference means the PR view, not uncommitted-only.
+    if options.reference.is_none() {
+        if let Some((base, reference)) = default_pr_reference(backend) {
+            options.reference = Some(reference);
+            options.pr_scope_base = Some(base);
         }
     }
 
