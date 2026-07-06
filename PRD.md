@@ -159,14 +159,52 @@ pushes branch + receipts refs. Human opens the cockpit (phase 2) or runs
 `preceipts status branch`: green table, logs one keystroke away, `land` when
 satisfied. "Queue-merge" is the agent looping: rebase → `run` → `land`.
 
+## The cockpit (phase 2 — the product)
+
+The end state is a TUI that feels like a flight deck: the diff is the main
+stream, checks run live beside it, and greenlight-to-land is one motion.
+Built on the hunk fork (Pierre diff engine, session daemon, agent protocol).
+
+### Hard requirements
+
+- **100k+ line changesets, smooth.** Scroll ticks < 2ms at any scroll distance
+  and any stream size; first frame < 500ms regardless of changeset size.
+  This mandates the immediate-mode `DiffSurface` architecture (prototype
+  validated 2026-07-06: 0.26–0.43ms/tick on a 58k-row stream, scroll-distance-
+  and size-invariant — see hunk fork `benchmarks/diff-surface-proto/NOTES.md`)
+  plus **lazy per-file parse**: compute only per-file row *heights* up front
+  (cheap patch-text line counting for exact spacers + scrollbar), Pierre-parse
+  a file only when it approaches the viewport halo. Load is O(viewport),
+  never O(changeset).
+- **Live CI, inline.** Checks running in the engine stream into the checks
+  rail: per-check spinner, elapsed time, last output line inline; full log one
+  keystroke away (follow mode while running). Greenlight state = required set
+  green for the current tree, recomputed as receipts mint and as the worktree
+  changes.
+- **One-motion land.** Green board → `l` → staleness dialog only if base
+  moved → squash + trailers + push. The cockpit never blocks; it informs.
+
+### Engine ↔ cockpit interface
+
+`preceipts run --events` emits NDJSON on stdout as checks execute:
+
+```
+{"event":"check-started","check":"test","tree":"8f3a…","ts":…}
+{"event":"output","check":"test","chunk":"PASS src/core/…\n"}
+{"event":"check-finished","check":"test","ok":true,"exit":0,"duration_ms":…}
+{"event":"receipt-minted","check":"test","tree":"8f3a…","log":"blob:…"}
+```
+
+The cockpit imports the engine as a library (same Bun process) and consumes
+the same event objects; `--events` exists so *any* front-end — including an
+agent tailing progress — gets identical truth.
+
 ## Out of scope (phase 1)
 
 - Minting receipts for refs other than the current worktree (needs temp
   worktrees; revisit when agents want to prove branches they haven't checked out)
 - Path-filtered checks for monorepos (`paths = ["packages/api/**"]`) — v2
 - Signing — format reserves an optional `sig` field, nothing more
-- The TUI cockpit — phase 2, lands in the hunk fork; the engine exposes
-  `--json` and (later) a watch/daemon mode for it
 
 ## Phasing
 
@@ -174,18 +212,23 @@ satisfied. "Queue-merge" is the agent looping: rebase → `run` → `land`.
    binary — same stack as the hunk fork so the cockpit imports the engine as a
    library, not a subprocess.
 2. **Dogfood** in trip with agents minting receipts for a couple of weeks; the
-   trust/workflow model is the real bet, validate it before building UI.
-3. **Cockpit**: hunk fork grows a checks rail, log pager, and `land` action
-   wired to this engine.
+   trust/workflow model is the real bet, validate it in parallel with cockpit
+   work.
+3. **Cockpit** (see above): hunk fork — DiffSurface diff pane, checks rail,
+   log pager, `land` action wired to this engine.
 
-## Unresolved questions
+## Decisions log
 
-1. ~~Name~~ — resolved: `preceipts` (PR + receipts).
-2. ~~Check definition~~ — resolved: executable files in `.preceipts/checks/`,
-   bash by default, no workflow DSL.
-3. Log retention default (30d? size-capped?) and whether failure logs get
-   longer retention than success logs (probably yes).
-4. `land` when base moved: is "land anyway" allowed silently with a trailer
-   noting staleness, or always interactive? (Agents will want a
-   `--allow-stale` flag either way.)
-5. Should `preceipts run` auto-`sync` after minting, or is sync always explicit?
+1. **Name**: `preceipts` (PR + receipts).
+2. **Check definition**: executable files in `.preceipts/checks/`, bash by
+   default, no workflow DSL.
+3. **Log retention**: success logs 30d, failure logs 90d (`gc` defaults,
+   configurable). Stored logs capped at ~1MB as head 64KB + tail (the failure
+   tail is the valuable part). Receipt lines are permanent; they outlive logs.
+4. **Stale `land`**: interactive prompt on a TTY; `--allow-stale` proceeds
+   non-interactively and records a `Receipts-Stale: base moved <old>→<new>`
+   trailer so the history is honest. `--require-fresh` exits non-zero instead,
+   for scripts that want failure.
+5. **Sync**: explicit (`preceipts sync`); `run --sync` opts into push-after-
+   mint; `init` offers to add receipt refspecs to the remote so ordinary
+   `git push` carries receipts.
