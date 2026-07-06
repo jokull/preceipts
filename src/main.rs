@@ -15,11 +15,13 @@ mod commit_reference;
 mod config;
 mod error;
 mod git_entity;
+mod preceipts;
 mod provider;
 mod vcs;
 
 #[tokio::main]
 async fn main() {
+    preceipts::maybe_exec_engine();
     if let Err(e) = run().await {
         eprintln!("\x1b[91m\rerror:\x1b[0m {e}");
         process::exit(1);
@@ -27,7 +29,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), LumenError> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(preceipts::effective_args());
 
     let config = match LumenConfig::build(&cli) {
         Ok(config) => config,

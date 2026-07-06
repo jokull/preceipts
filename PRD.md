@@ -167,26 +167,30 @@ satisfied. "Queue-merge" is the agent looping: rebase → `run` → `land`.
 The end state is a TUI that feels like a flight deck: the diff is the main
 stream, checks run live beside it, and greenlight-to-land is one motion.
 
-**Built in this repo**, not as a hunk fork. Hunk (MIT) is a code quarry and a
-reference implementation: we harvest its diff stack (Pierre integration, the
-row-planning layer, theme model) and its session-daemon/agent-protocol ideas,
-but the cockpit's information architecture (checks rail, log pager, land flow)
-is its own product and owes hunk's "review-first diff viewer" definition
-nothing. The perf work already proven in the fork (60fps pacing, DiffSurface
-prototype, interaction-aware scheduling lessons) ports over as designs, not
-as merge commits.
+**Built as a lumen fork** (this repo; upstream jnsahaj/lumen, MIT, Rust +
+ratatui). Decided 2026-07-06 after hands-on evaluation: lumen already ships
+the commodity half of the cockpit — GitHub-PR-style split view with file tree,
+tree-sitter highlighting, `/` search with n/N, watch mode, stacked commits,
+PR integration, and an annotate-with-`i` → export-to-stdout agent loop — and
+its ratatui immediate-mode rendering is the same architecture class the
+DiffSurface prototype validated (opened a 166-file/41k-line diff instantly).
+What we add is the moat: the receipts rail, live check runs, the HUD footer,
+and one-motion land — all speaking to `preceipts-engine` via `--json` and
+`--events`. The earlier plan (own OpenTUI/DiffSurface pane; before that, a
+hunk fork) is superseded; hunk and the DiffSurface prototype remain reference
+material for perf work if lumen's rendering ever needs it.
 
 ### Hard requirements
 
 - **100k+ line changesets, smooth.** Scroll ticks < 2ms at any scroll distance
   and any stream size; first frame < 500ms regardless of changeset size.
-  This mandates the immediate-mode `DiffSurface` architecture (prototype
-  validated 2026-07-06: 0.26–0.43ms/tick on a 58k-row stream, scroll-distance-
-  and size-invariant — see hunk fork `benchmarks/diff-surface-proto/NOTES.md`)
-  plus **lazy per-file parse**: compute only per-file row *heights* up front
-  (cheap patch-text line counting for exact spacers + scrollbar), Pierre-parse
-  a file only when it approaches the viewport halo. Load is O(viewport),
-  never O(changeset).
+  Immediate-mode rendering (ratatui) satisfies the architecture mandate the
+  DiffSurface prototype established (0.26–0.43ms/tick on a 58k-row stream,
+  scroll-distance- and size-invariant — hunk fork
+  `benchmarks/diff-surface-proto/NOTES.md`); verified on a real 41k-line
+  changeset at adoption time. If lumen's load path ever turns O(changeset),
+  the lazy per-file parse design (heights up front, parse near the viewport
+  halo) is the fix to port.
 - **Live CI, inline.** Checks running in the engine stream into the checks
   rail: per-check spinner, elapsed time, last output line inline; full log one
   keystroke away (follow mode while running). Greenlight state = required set
@@ -213,9 +217,11 @@ as merge commits.
 {"event":"receipt-minted","check":"test","tree":"8f3a…","log":"blob:…"}
 ```
 
-The cockpit imports the engine as a library (same Bun process) and consumes
-the same event objects; `--events` exists so *any* front-end — including an
-agent tailing progress — gets identical truth.
+The cockpit (Rust) shells out to `preceipts-engine` and consumes these events
+over stdout; `--events` and `--json` are the whole contract, so *any*
+front-end — including an agent tailing progress — gets identical truth. The
+`preceipts` binary also passes engine subcommands straight through
+(`preceipts run` == `preceipts-engine run`), so there is one entry point.
 
 ### The footer HUD
 
@@ -256,14 +262,15 @@ user/agent action — `hud` reports staleness, it doesn't network.
 
 ## Phasing
 
-1. **Engine + CLI** (this PRD): Bun + TypeScript, `bun build --compile` single
-   binary — same stack as the hunk fork so the cockpit imports the engine as a
-   library, not a subprocess.
+1. **Engine + CLI** (done): Bun + TypeScript in `engine/`, `bun build
+   --compile` single binary `preceipts-engine`. The `--json`/`--events`
+   surface is the cockpit contract.
 2. **Dogfood** in trip with agents minting receipts for a couple of weeks; the
    trust/workflow model is the real bet, validate it in parallel with cockpit
    work.
-3. **Cockpit** (see above): built here — DiffSurface diff pane, checks rail,
-   log pager, `land` action wired to this engine.
+3. **Cockpit** (see above): lumen fork at the repo root — add the receipts
+   rail, live check runs (`run --events`), log pager, HUD footer, and `land`,
+   all via `preceipts-engine`.
 
 ## Decisions log
 
@@ -283,3 +290,13 @@ user/agent action — `hud` reports staleness, it doesn't network.
 6. **HUD**: read-only and network-free — it reports fetch staleness rather
    than fetching; the base for conflict/freshness questions is the
    remote-tracking ref when present, the local branch otherwise.
+7. **Cockpit = lumen fork, one repo, one name** (2026-07-06). This repo is a
+   fork of jnsahaj/lumen (github.com/jokull/preceipts) with the engine folded
+   in at `engine/` (history preserved via subtree). preceipts is a superset of
+   lumen: its diff cockpit plus receipts. Binaries: `preceipts` (Rust cockpit;
+   bare invocation on a TTY opens the diff view; engine subcommands exec
+   through to the engine) and `preceipts-engine` (Bun-compiled, discovered on
+   PATH or via `PRECEIPTS_ENGINE`). The Cargo *package* keeps upstream's name
+   to minimize merge friction; only the `[[bin]]` is renamed. Earlier plans —
+   hunk fork, then an own OpenTUI DiffSurface pane — are superseded (prototype
+   evidence retained in the hunk fork as reference).

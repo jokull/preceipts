@@ -13,8 +13,8 @@ pub enum VcsOverride {
 }
 
 #[derive(Parser)]
-#[command(name = "lumen")]
-#[command(about = "AI-powered CLI tool for git commit summaries", long_about = None)]
+#[command(name = "preceipts")]
+#[command(about = "preceipts — local CI receipts + review cockpit (engine subcommands: init, run, status, log, land, hud, sync, gc)", long_about = None)]
 #[command(version)]
 pub struct Cli {
     /// Path to configuration file eg: ./path/to/lumen.config.json
