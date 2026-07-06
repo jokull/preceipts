@@ -45,6 +45,8 @@ export { runChecks } from "./runner.ts";
 export type { RunOptions, RunResult } from "./runner.ts";
 export { computeStatus, resolveTree } from "./status.ts";
 export type { Status, StatusRow, StatusOptions, CheckState } from "./status.ts";
+export { computeHud } from "./hud.ts";
+export type { Hud, HudOptions } from "./hud.ts";
 export { land, buildTrailers } from "./land.ts";
 export type { LandOptions, LandResult, StaleInfo } from "./land.ts";
 export { sync } from "./sync.ts";

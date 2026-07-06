@@ -462,3 +462,94 @@ describe("honest errors", () => {
     expect(result.stdout).toContain("ran-under-bash 2");
   });
 });
+
+describe("hud", () => {
+  let repo: string;
+
+  async function hud(): Promise<Record<string, unknown> & { conflictFiles: string[] }> {
+    const result = await run(repo, ["hud", "--json"]);
+    expect(result.code).toBe(0);
+    return JSON.parse(result.stdout);
+  }
+
+  beforeAll(async () => {
+    const bare = join(scratch, "hud-remote.git");
+    await sh(scratch, ["git", "init", "-q", "--bare", "-b", "main", bare]);
+
+    repo = join(scratch, "hud-repo");
+    await initRepo(repo);
+    await sh(repo, ["git", "remote", "add", "origin", bare]);
+    await run(repo, ["init"]);
+    await writeCheck(repo, "ok", "#!/bin/bash\necho fine\n");
+    await writeFile(join(repo, ".preceipts", "config.toml"), '[required]\nchecks = ["ok"]\n');
+    await writeFile(join(repo, "base.txt"), "line1\nline2\n");
+    await commitAll(repo, "initial");
+    await sh(repo, ["git", "push", "-q", "origin", "main"]);
+
+    // A feature branch that edits base.txt — clean against origin/main for now.
+    await sh(repo, ["git", "checkout", "-q", "-b", "feature"]);
+    await writeFile(join(repo, "base.txt"), "feature-v1\nline2\n");
+    await commitAll(repo, "feature edit");
+  });
+
+  test("clean fresh branch: ahead, merge clean, land fresh, green after run", async () => {
+    expect((await run(repo, ["run"])).code).toBe(0);
+    const payload = await hud();
+    expect(payload["branch"]).toBe("feature");
+    expect(payload["base"]).toBe("origin/main");
+    expect(payload["ahead"]).toBe(1);
+    expect(payload["behind"]).toBe(0);
+    expect(payload["mergeClean"]).toBe(true);
+    expect(payload.conflictFiles).toEqual([]);
+    expect(payload["landFresh"]).toBe(true);
+    expect(payload["dirty"]).toBe(false);
+    expect(payload["green"]).toBe(true);
+    // Minted locally, never synced; and this repo has never fetched.
+    expect(payload["unsyncedReceipts"]).toBeGreaterThanOrEqual(1);
+    expect(payload["fetchAgeMs"]).toBeNull();
+  });
+
+  test("sync zeroes unsynced receipts and stamps fetch age", async () => {
+    expect((await run(repo, ["sync"])).code).toBe(0);
+    const payload = await hud();
+    expect(payload["unsyncedReceipts"]).toBe(0);
+    expect(typeof payload["fetchAgeMs"]).toBe("number");
+  });
+
+  test("base moving with a conflicting edit: behind, conflicts, stale land", async () => {
+    await sh(repo, ["git", "checkout", "-q", "main"]);
+    await writeFile(join(repo, "base.txt"), "main-v2\nline2\n");
+    await commitAll(repo, "main edit");
+    await sh(repo, ["git", "push", "-q", "origin", "main"]);
+    await sh(repo, ["git", "checkout", "-q", "feature"]);
+
+    const payload = await hud();
+    expect(payload["behind"]).toBe(1);
+    expect(payload["mergeClean"]).toBe(false);
+    expect(payload.conflictFiles).toEqual(["base.txt"]);
+    expect(payload["landFresh"]).toBe(false);
+  });
+
+  test("dirty worktree flips dirty and greenness follows the disk state", async () => {
+    await writeFile(join(repo, "scratch.txt"), "uncommitted\n");
+    const payload = await hud();
+    expect(payload["dirty"]).toBe(true);
+    expect(payload["green"]).toBe(false); // receipts were minted for the committed tree
+    await rm(join(repo, "scratch.txt"));
+  });
+
+  test("detached HEAD reports branch null", async () => {
+    await sh(repo, ["git", "checkout", "-q", "--detach"]);
+    const payload = await hud();
+    expect(payload["branch"]).toBeNull();
+    await sh(repo, ["git", "checkout", "-q", "feature"]);
+  });
+
+  test("human-readable output states the situation", async () => {
+    const result = await run(repo, ["hud"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("feature vs origin/main");
+    expect(result.stdout).toContain("CONFLICTS (1): base.txt");
+    expect(result.stdout).toContain("stale (base moved");
+  });
+});

@@ -51,7 +51,8 @@ export async function sync(root: string): Promise<SyncResult> {
   }
 
   const refspecs: string[] = [];
-  if ((await revParse(root, NOTES_REF)) !== null) refspecs.push(`${NOTES_REF}:${NOTES_REF}`);
+  const localNotes = await revParse(root, NOTES_REF);
+  if (localNotes !== null) refspecs.push(`${NOTES_REF}:${NOTES_REF}`);
   const logRefs = await git(["for-each-ref", "--format=%(refname)", `${LOG_REF_PREFIX}*`], {
     cwd: root,
   });
@@ -61,6 +62,11 @@ export async function sync(root: string): Promise<SyncResult> {
   if (refspecs.length > 0) {
     await gitOut(["push", "origin", ...refspecs], { cwd: root });
     pushed = true;
+    // The push succeeded, so origin's notes now equal ours — advance the
+    // tracking ref to match, so "unsynced" counts are honest immediately.
+    if (localNotes !== null) {
+      await gitOut(["update-ref", NOTES_REMOTE_TRACKING_REF, localNotes], { cwd: root });
+    }
   }
 
   return { fetched: true, merged, pushed };

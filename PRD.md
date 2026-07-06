@@ -134,6 +134,9 @@ preceipts run [check…]        # run in current worktree; mint against working-
 preceipts status [ref]        # receipt table for ref's tree vs required set; exit code
                              # reflects greenness (scriptable) but nothing enforces it
 preceipts log <check> [ref]   # stored log for that check/tree (tail of failures first)
+preceipts hud [--base main]   # one JSON payload of branch situational awareness —
+                             # conflicts vs base, ahead/behind, land freshness,
+                             # fetch age, unsynced receipts, worktree greenness
 preceipts land <branch> [--onto main] [--no-push]
                              # squash via commit-tree, embed receipt trailers in the
                              # message, ff base ref, push. If base moved: state it,
@@ -214,6 +217,36 @@ The cockpit imports the engine as a library (same Bun process) and consumes
 the same event objects; `--events` exists so *any* front-end — including an
 agent tailing progress — gets identical truth.
 
+### The footer HUD
+
+A persistent one-line (expandable) footer answering "what happens if I land
+right now?" — the situational awareness GitHub's PR page spreads across five
+widgets. Engine side it is `preceipts hud [--base main] --json`: one payload,
+consumed identically by the TUI footer, shell prompts, and agents.
+
+Fields (all computed read-only; nothing touches the worktree or index):
+
+- **Merge cleanliness** vs the base — `git merge-tree --write-tree` (in-memory
+  merge, git ≥ 2.38): clean / conflicted, with the conflicted file list.
+  The base is the *remote-tracking* ref when it exists (`origin/main`), local
+  branch otherwise — conflicts with where main actually is, not a stale local.
+- **Ahead/behind** the base (`rev-list --left-right --count`).
+- **Land freshness** — would the squash commit's tree be the proven tree?
+  True iff the base head *is* the merge-base (same predicate `land` uses).
+- **Fetch age** — how stale is our picture of the remote (FETCH_HEAD mtime;
+  null = never fetched). A "clean merge" verdict against a week-old
+  origin/main is worth flagging.
+- **Unsynced receipts** — count of local receipt lines origin doesn't have
+  yet (local notes vs the remote-tracking notes ref). Receipts that never
+  synced are receipts teammates can't see.
+- **Worktree coherence** — the working-tree hash, dirty flag, and the full
+  status table (rows + green) for that tree: do receipts speak to what's on
+  disk *right now*?
+
+The HUD never blocks anything (philosophy: inform, don't gate). The TUI
+recomputes it on filesystem/ref changes; the fetch itself stays a deliberate
+user/agent action — `hud` reports staleness, it doesn't network.
+
 ## Out of scope (phase 1)
 
 - Minting receipts for refs other than the current worktree (needs temp
@@ -247,3 +280,6 @@ agent tailing progress — gets identical truth.
 5. **Sync**: explicit (`preceipts sync`); `run --sync` opts into push-after-
    mint; `init` offers to add receipt refspecs to the remote so ordinary
    `git push` carries receipts.
+6. **HUD**: read-only and network-free — it reports fetch staleness rather
+   than fetching; the base for conflict/freshness questions is the
+   remote-tracking ref when present, the local branch otherwise.

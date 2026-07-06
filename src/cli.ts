@@ -6,6 +6,7 @@ import { PreceiptsError } from "./lib/errors.ts";
 import type { RunEvent } from "./lib/events.ts";
 import { gc } from "./lib/gc.ts";
 import { repoRoot } from "./lib/git.ts";
+import { computeHud } from "./lib/hud.ts";
 import { init } from "./lib/init.ts";
 import { land, type StaleInfo } from "./lib/land.ts";
 import { readLog, readReceipts } from "./lib/notes.ts";
@@ -25,6 +26,9 @@ Usage:
       --sync                                 push receipts after minting
   preceipts status [ref] [--json]            receipt table for ref's tree (default: working tree); exit 0 iff green
   preceipts log <check> [ref]                print the stored log for that check/tree
+  preceipts hud [--base main] [--json]       branch situational awareness: conflicts vs base,
+                                             ahead/behind, land freshness, fetch age,
+                                             unsynced receipts, worktree greenness
   preceipts land <branch> [options]          verify receipts, squash onto base, fast-forward, push
       --onto <base>                          base branch (default: main)
       --message <subject>                    squash commit subject
@@ -227,6 +231,52 @@ async function cmdLog(root: string, argv: string[]): Promise<number> {
 
 // ---------------------------------------------------------------------------
 
+async function cmdHud(root: string, argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      base: { type: "string", default: "main" },
+      json: { type: "boolean", default: false },
+    },
+    allowPositionals: false,
+  });
+  const hud = await computeHud(root, { base: values.base });
+
+  if (values.json) {
+    console.log(JSON.stringify(hud));
+    return 0;
+  }
+
+  const merge =
+    hud.mergeClean === true
+      ? "merge clean"
+      : hud.mergeClean === false
+        ? `CONFLICTS (${hud.conflictFiles.length}): ${hud.conflictFiles.slice(0, 5).join(", ")}${hud.conflictFiles.length > 5 ? ", …" : ""}`
+        : "merge: unknown";
+  const fetch =
+    hud.fetchAgeMs === null ? "never fetched" : `fetched ${formatDuration(hud.fetchAgeMs)} ago`;
+  const receipts = hud.green ? "green" : "not green";
+  const sync =
+    hud.unsyncedReceipts === null
+      ? "no origin"
+      : hud.unsyncedReceipts === 0
+        ? "receipts synced"
+        : `${hud.unsyncedReceipts} unsynced receipt line(s)`;
+
+  console.log(`${hud.branch ?? "(detached)"} vs ${hud.base} — ↑${hud.ahead} ↓${hud.behind}`);
+  console.log(`  ${merge}`);
+  console.log(
+    `  land: ${hud.landFresh ? "fresh (base is the merge-base)" : "stale (base moved — squash tree would be unproven)"}`,
+  );
+  console.log(
+    `  worktree ${hud.tree.slice(0, 12)}${hud.dirty ? " (dirty)" : ""} — receipts ${receipts}`,
+  );
+  console.log(`  ${fetch} · ${sync}`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+
 async function cmdLand(root: string, argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -340,6 +390,8 @@ export async function main(argv: string[]): Promise<number> {
       return cmdStatus(root, rest);
     case "log":
       return cmdLog(root, rest);
+    case "hud":
+      return cmdHud(root, rest);
     case "land":
       return cmdLand(root, rest);
     case "sync":
