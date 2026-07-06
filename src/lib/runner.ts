@@ -1,0 +1,191 @@
+import { hostname, userInfo } from "node:os";
+import { relative } from "node:path";
+import { CHECKS_DIR, DEFAULT_TIMEOUT_MS, listChecks, loadConfig, type CheckFile } from "./config.ts";
+import { PreceiptsError } from "./errors.ts";
+import type { RunEventHandler } from "./events.ts";
+import { git, gitOut } from "./git.ts";
+import { capLog } from "./log-cap.ts";
+import { appendReceiptLine, storeLog } from "./notes.ts";
+import { encodeReceipt, type Receipt, type Runner } from "./receipt.ts";
+import { computeWorkingTree, type WorkingTree } from "./tree-hash.ts";
+
+export interface RunOptions {
+  /** Check names to run; empty/omitted means every check in .preceipts/checks/. */
+  checks?: string[];
+  /** Value for runner.agent; callers usually pass process.env.PRECEIPTS_AGENT. */
+  agent?: string;
+  onEvent?: RunEventHandler;
+  /**
+   * Pre-computed working tree (from computeWorkingTree). Lets callers warn
+   * about a dirty worktree before checks start; omitted, it is computed here.
+   */
+  workingTree?: WorkingTree;
+}
+
+export interface RunResult {
+  workingTree: WorkingTree;
+  receipts: Receipt[];
+  /** True when every check passed. */
+  ok: boolean;
+}
+
+async function resolveRunnerIdentity(root: string, agent?: string): Promise<Runner> {
+  const [nameResult, emailResult] = await Promise.all([
+    git(["config", "user.name"], { cwd: root }),
+    git(["config", "user.email"], { cwd: root }),
+  ]);
+  const runner: Runner = {
+    name: nameResult.code === 0 ? nameResult.stdout.trim() : userInfo().username,
+    email: emailResult.code === 0 ? emailResult.stdout.trim() : "",
+    host: hostname(),
+  };
+  if (agent) runner.agent = agent;
+  return runner;
+}
+
+async function scriptHasShebang(path: string): Promise<boolean> {
+  const file = Bun.file(path);
+  const head = await file.slice(0, 2).text();
+  return head === "#!";
+}
+
+/** ISO timestamp truncated to whole seconds, matching the PRD's receipt example. */
+function isoNow(): string {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+interface CheckRun {
+  receipt: Receipt;
+}
+
+async function runOneCheck(
+  root: string,
+  check: CheckFile,
+  tree: string,
+  dirty: boolean,
+  runner: Runner,
+  timeoutMs: number,
+  onEvent: RunEventHandler,
+): Promise<CheckRun> {
+  const relPath = relative(root, check.path);
+  const checkBlob = (await gitOut(["hash-object", "-w", "--", check.path], { cwd: root })).trim();
+
+  const started = isoNow();
+  const startedAt = performance.now();
+  onEvent({ event: "check-started", check: check.name, tree, ts: started });
+
+  const argv = (await scriptHasShebang(check.path)) ? [check.path] : ["bash", check.path];
+  const proc = Bun.spawn(argv, {
+    cwd: root,
+    env: { ...process.env, PRECEIPTS_CHECK: check.name, PRECEIPTS_TREE: tree },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill("SIGKILL");
+  }, timeoutMs);
+
+  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder();
+  async function drain(stream: ReadableStream<Uint8Array>): Promise<void> {
+    for await (const chunk of stream) {
+      chunks.push(chunk);
+      onEvent({ event: "output", check: check.name, chunk: decoder.decode(chunk) });
+    }
+  }
+  await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
+  const rawExit = await proc.exited;
+  clearTimeout(timer);
+
+  const durationMs = Math.round(performance.now() - startedAt);
+  const exit = timedOut ? -1 : rawExit;
+  const ok = !timedOut && rawExit === 0;
+
+  if (timedOut) {
+    const note = `\n[preceipts] check "${check.name}" timed out after ${timeoutMs}ms and was killed\n`;
+    chunks.push(new TextEncoder().encode(note));
+    onEvent({ event: "output", check: check.name, chunk: note });
+  }
+
+  onEvent({ event: "check-finished", check: check.name, ok, exit, duration_ms: durationMs });
+
+  const logBytes = capLog(Buffer.concat(chunks));
+  const logSha = await storeLog(root, logBytes);
+
+  const receipt: Receipt = {
+    v: 1,
+    check: check.name,
+    cmd: relPath,
+    tree,
+    ok,
+    exit,
+    started,
+    duration_ms: durationMs,
+    runner,
+    dirty,
+    log: `blob:${logSha}`,
+    check_blob: checkBlob,
+  };
+  await appendReceiptLine(root, tree, encodeReceipt(receipt));
+  onEvent({ event: "receipt-minted", check: check.name, tree, log: receipt.log });
+  return { receipt };
+}
+
+/**
+ * Run checks in parallel against the current worktree and mint one receipt per
+ * check onto the working tree's hash. Streams progress through `onEvent`.
+ */
+export async function runChecks(root: string, options: RunOptions = {}): Promise<RunResult> {
+  const config = await loadConfig(root);
+  const available = await listChecks(root);
+  if (available.length === 0) {
+    throw new PreceiptsError(`no checks defined in ${CHECKS_DIR}/ — add an executable script there`);
+  }
+
+  let selected: CheckFile[];
+  if (options.checks && options.checks.length > 0) {
+    selected = options.checks.map((name) => {
+      const found = available.find((check) => check.name === name);
+      if (!found) {
+        const known = available.map((check) => check.name).join(", ");
+        throw new PreceiptsError(`unknown check "${name}" (available: ${known})`);
+      }
+      return found;
+    });
+  } else {
+    selected = available;
+  }
+
+  for (const check of selected) {
+    if (!check.executable) {
+      throw new PreceiptsError(
+        `check script ${relative(root, check.path)} is not executable — fix with: chmod +x ${relative(root, check.path)}`,
+      );
+    }
+  }
+
+  const workingTree = options.workingTree ?? (await computeWorkingTree(root));
+  const runner = await resolveRunnerIdentity(root, options.agent);
+  const onEvent: RunEventHandler = options.onEvent ?? (() => undefined);
+
+  const runs = await Promise.all(
+    selected.map((check) =>
+      runOneCheck(
+        root,
+        check,
+        workingTree.tree,
+        workingTree.dirty,
+        runner,
+        config.timeouts[check.name] ?? DEFAULT_TIMEOUT_MS,
+        onEvent,
+      ),
+    ),
+  );
+
+  const receipts = runs.map((run) => run.receipt);
+  return { workingTree, receipts, ok: receipts.every((receipt) => receipt.ok) };
+}
