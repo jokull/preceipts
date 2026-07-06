@@ -163,7 +163,15 @@ satisfied. "Queue-merge" is the agent looping: rebase → `run` → `land`.
 
 The end state is a TUI that feels like a flight deck: the diff is the main
 stream, checks run live beside it, and greenlight-to-land is one motion.
-Built on the hunk fork (Pierre diff engine, session daemon, agent protocol).
+
+**Built in this repo**, not as a hunk fork. Hunk (MIT) is a code quarry and a
+reference implementation: we harvest its diff stack (Pierre integration, the
+row-planning layer, theme model) and its session-daemon/agent-protocol ideas,
+but the cockpit's information architecture (checks rail, log pager, land flow)
+is its own product and owes hunk's "review-first diff viewer" definition
+nothing. The perf work already proven in the fork (60fps pacing, DiffSurface
+prototype, interaction-aware scheduling lessons) ports over as designs, not
+as merge commits.
 
 ### Hard requirements
 
@@ -183,6 +191,13 @@ Built on the hunk fork (Pierre diff engine, session daemon, agent protocol).
   changes.
 - **One-motion land.** Green board → `l` → staleness dialog only if base
   moved → squash + trailers + push. The cockpit never blocks; it informs.
+- **Vim-grammar navigation, `/` search first.** `/` opens incremental content
+  search over the *entire* changeset (all files, not just mounted rows —
+  search runs against the row plan, so it works with virtualized/lazy-parsed
+  content); smartcase; literal substring v1; `n`/`N` next/prev with wrap
+  indicator; match count ("3/47") in the status bar; all matches highlighted,
+  current match distinct; Esc restores the pre-search scroll position.
+  Searching a 100k-line changeset must stay under ~50ms per keystroke.
 
 ### Engine ↔ cockpit interface
 
@@ -214,7 +229,7 @@ agent tailing progress — gets identical truth.
 2. **Dogfood** in trip with agents minting receipts for a couple of weeks; the
    trust/workflow model is the real bet, validate it in parallel with cockpit
    work.
-3. **Cockpit** (see above): hunk fork — DiffSurface diff pane, checks rail,
+3. **Cockpit** (see above): built here — DiffSurface diff pane, checks rail,
    log pager, `land` action wired to this engine.
 
 ## Decisions log
