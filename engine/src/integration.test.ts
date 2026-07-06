@@ -697,3 +697,51 @@ describe("prepare phase", () => {
     expect(minted.tree).toBe(normalized.tree);
   });
 });
+
+describe("hud merge probe vs custom merge drivers", () => {
+  test("global-attributes merge driver is not invoked and nothing leaks", async () => {
+    const repo = join(scratch, "hud-merge-driver");
+    await initRepo(repo);
+    await sh(scratch, ["git", "init", "-q", "--bare", "-b", "main", join(scratch, "hud-md-remote.git")]);
+    await sh(repo, ["git", "remote", "add", "origin", join(scratch, "hud-md-remote.git")]);
+    await run(repo, ["init"]);
+    await writeCheck(repo, "ok", "#!/bin/bash\ntrue\n");
+    await writeFile(join(repo, ".preceipts", "config.toml"), '[required]\nchecks = ["ok"]\n');
+    await writeFile(join(repo, "base.txt"), "line1\nline2\n");
+    await commitAll(repo, "initial");
+    await sh(repo, ["git", "push", "-q", "origin", "main"]);
+
+    // Simulate the user-global `* merge=<driver>` setup (core.attributesFile
+    // is the same mechanism ~/.config/git/attributes uses). The driver leaves
+    // a marker so an invocation is detectable.
+    const attributes = join(repo, "..", "hud-md-attributes");
+    await writeFile(attributes, "* merge=leaky\n");
+    await sh(repo, ["git", "config", "core.attributesFile", attributes]);
+    await sh(repo, ["git", "config", "merge.leaky.name", "leaky test driver"]);
+    await sh(repo, ["git", "config", "merge.leaky.driver", "touch driver-was-invoked && false"]);
+
+    // Divergent edits to the same lines: the probe must do a plain textual
+    // merge (conflict), not consult the driver.
+    await sh(repo, ["git", "checkout", "-q", "-b", "feature"]);
+    await writeFile(join(repo, "base.txt"), "feature-v1\nline2\n");
+    await commitAll(repo, "feature edit");
+    await sh(repo, ["git", "checkout", "-q", "main"]);
+    await writeFile(join(repo, "base.txt"), "main-v2\nline2\n");
+    await commitAll(repo, "main edit");
+    await sh(repo, ["git", "push", "-q", "origin", "main"]);
+    await sh(repo, ["git", "checkout", "-q", "feature"]);
+
+    const result = await run(repo, ["hud", "--json"]);
+    expect(result.code).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.mergeClean).toBe(false);
+    expect(payload.conflictFiles).toEqual(["base.txt"]);
+
+    // Neither the driver marker nor merge-tree scratch files may appear.
+    expect(await Bun.file(join(repo, "driver-was-invoked")).exists()).toBe(false);
+    const leaked = (await sh(repo, ["git", "status", "--porcelain"]))
+      .split("\n")
+      .filter((line) => line.includes(".merge_file_") || line.includes("driver-was-invoked"));
+    expect(leaked).toEqual([]);
+  });
+});

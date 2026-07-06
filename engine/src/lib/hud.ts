@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { devNull } from "node:os";
 import { join } from "node:path";
 import { PreceiptsError } from "./errors.ts";
 import { catFileBatch, git, hasRemote, revParse } from "./git.ts";
@@ -58,8 +59,22 @@ async function mergeVerdict(
   baseSha: string,
   headSha: string,
 ): Promise<{ clean: boolean | null; conflictFiles: string[] }> {
+  // The probe is read-only, but custom merge drivers configured in the
+  // user-global attributes file (e.g. `* merge=mergiraf`) get invoked by
+  // merge-tree and leak scratch .merge_file_* files into the worktree root —
+  // mutating the very tree hash receipts key on. Disable the global
+  // attributes file for the probe (repo .gitattributes still apply); the
+  // verdict is then plain-git textual merge, which is the honest baseline.
   const result = await git(
-    ["merge-tree", "--write-tree", "--name-only", baseSha, headSha],
+    [
+      "-c",
+      `core.attributesFile=${devNull}`,
+      "merge-tree",
+      "--write-tree",
+      "--name-only",
+      baseSha,
+      headSha,
+    ],
     { cwd: root },
   );
   if (result.code === 0) return { clean: true, conflictFiles: [] };
