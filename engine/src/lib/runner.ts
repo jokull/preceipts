@@ -1,6 +1,13 @@
 import { hostname, userInfo } from "node:os";
 import { relative } from "node:path";
-import { CHECKS_DIR, DEFAULT_TIMEOUT_MS, listChecks, loadConfig, type CheckFile } from "./config.ts";
+import {
+  CHECKS_DIR,
+  DEFAULT_TIMEOUT_MS,
+  listChecks,
+  loadConfig,
+  type CheckFile,
+  type PrepareStep,
+} from "./config.ts";
 import { PreceiptsError } from "./errors.ts";
 import type { RunEventHandler } from "./events.ts";
 import { git, gitOut } from "./git.ts";
@@ -15,18 +22,27 @@ export interface RunOptions {
   /** Value for runner.agent; callers usually pass process.env.PRECEIPTS_AGENT. */
   agent?: string;
   onEvent?: RunEventHandler;
-  /**
-   * Pre-computed working tree (from computeWorkingTree). Lets callers warn
-   * about a dirty worktree before checks start; omitted, it is computed here.
-   */
-  workingTree?: WorkingTree;
+}
+
+export interface RunInvalidated {
+  /** Tree the checks ran against. */
+  before: string;
+  /** Tree the worktree held when they finished. */
+  after: string;
+  changed: string[];
 }
 
 export interface RunResult {
+  /** The (post-prepare) tree the checks ran against. */
   workingTree: WorkingTree;
+  /** Minted receipts; empty when the run was invalidated. */
   receipts: Receipt[];
-  /** True when every check passed. */
+  /** True when every check passed AND receipts were minted. */
   ok: boolean;
+  /** Paths the prepare phase normalized ([] when it changed nothing). */
+  prepareChanged: string[];
+  /** Set when the worktree changed during the run — nothing was minted. */
+  invalidated: RunInvalidated | null;
 }
 
 async function resolveRunnerIdentity(root: string, agent?: string): Promise<Runner> {
@@ -54,8 +70,66 @@ function isoNow(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }
 
-interface CheckRun {
-  receipt: Receipt;
+/**
+ * Run one prepare step via `bash -c`, streaming output. Prepare is
+ * normalization (format, codegen): mutating the worktree here is the point.
+ * A failing step aborts the whole run — an unnormalizable worktree has no
+ * honest tree to mint against.
+ */
+async function runPrepareStep(root: string, step: PrepareStep, onEvent: RunEventHandler): Promise<void> {
+  onEvent({ event: "prepare-started", step: step.name, ts: isoNow() });
+  const startedAt = performance.now();
+
+  const proc = Bun.spawn(["bash", "-c", step.cmd], {
+    cwd: root,
+    env: { ...process.env, PRECEIPTS_PREPARE: step.name },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill("SIGKILL");
+  }, step.timeoutMs);
+
+  const decoder = new TextDecoder();
+  async function drain(stream: ReadableStream<Uint8Array>): Promise<void> {
+    for await (const chunk of stream) {
+      onEvent({ event: "prepare-output", step: step.name, chunk: decoder.decode(chunk) });
+    }
+  }
+  await Promise.all([drain(proc.stdout), drain(proc.stderr)]);
+  const rawExit = await proc.exited;
+  clearTimeout(timer);
+
+  const durationMs = Math.round(performance.now() - startedAt);
+  const exit = timedOut ? -1 : rawExit;
+  const ok = !timedOut && rawExit === 0;
+  onEvent({ event: "prepare-finished", step: step.name, ok, exit, duration_ms: durationMs });
+
+  if (!ok) {
+    throw new PreceiptsError(
+      timedOut
+        ? `prepare step "${step.name}" timed out after ${step.timeoutMs}ms — no receipts minted`
+        : `prepare step "${step.name}" failed (exit ${exit}) — fix it or remove it from [prepare].commands; no receipts minted`,
+    );
+  }
+}
+
+/** Paths that differ between two trees (git diff-tree, recursive, names only). */
+async function treeChangedPaths(root: string, before: string, after: string): Promise<string[]> {
+  const result = await git(["diff-tree", "-r", "--name-only", before, after], { cwd: root });
+  if (result.code !== 0) return [];
+  return result.stdout.split("\n").filter((line) => line !== "");
+}
+
+/** A finished check whose receipt is NOT yet minted — minting waits for the
+ * post-run tree-stability verification. */
+interface PendingReceipt {
+  receipt: Omit<Receipt, "log">;
+  logBytes: Uint8Array;
 }
 
 async function runOneCheck(
@@ -66,7 +140,7 @@ async function runOneCheck(
   runner: Runner,
   timeoutMs: number,
   onEvent: RunEventHandler,
-): Promise<CheckRun> {
+): Promise<PendingReceipt> {
   const relPath = relative(root, check.path);
   const checkBlob = (await gitOut(["hash-object", "-w", "--", check.path], { cwd: root })).trim();
 
@@ -113,31 +187,33 @@ async function runOneCheck(
 
   onEvent({ event: "check-finished", check: check.name, ok, exit, duration_ms: durationMs });
 
-  const logBytes = capLog(Buffer.concat(chunks));
-  const logSha = await storeLog(root, logBytes);
-
-  const receipt: Receipt = {
-    v: 1,
-    check: check.name,
-    cmd: relPath,
-    tree,
-    ok,
-    exit,
-    started,
-    duration_ms: durationMs,
-    runner,
-    dirty,
-    log: `blob:${logSha}`,
-    check_blob: checkBlob,
+  return {
+    receipt: {
+      v: 1,
+      check: check.name,
+      cmd: relPath,
+      tree,
+      ok,
+      exit,
+      started,
+      duration_ms: durationMs,
+      runner,
+      dirty,
+      check_blob: checkBlob,
+    },
+    logBytes: capLog(Buffer.concat(chunks)),
   };
-  await appendReceiptLine(root, tree, encodeReceipt(receipt));
-  onEvent({ event: "receipt-minted", check: check.name, tree, log: receipt.log });
-  return { receipt };
 }
 
 /**
- * Run checks in parallel against the current worktree and mint one receipt per
- * check onto the working tree's hash. Streams progress through `onEvent`.
+ * The full run: prepare (serial normalization) → compute the receipt tree →
+ * checks in parallel → verify the worktree did not change under the checks →
+ * mint one receipt per check onto the tree.
+ *
+ * Prepare exists so formatting/codegen is orchestration, not a gate: a hook
+ * that rewrites files AFTER receipts are minted would make every receipt a
+ * lie about the commit. Mutation before the tree is computed is expected and
+ * reported; mutation during the checks invalidates the run — nothing mints.
  */
 export async function runChecks(root: string, options: RunOptions = {}): Promise<RunResult> {
   const config = await loadConfig(root);
@@ -168,10 +244,26 @@ export async function runChecks(root: string, options: RunOptions = {}): Promise
     }
   }
 
-  const workingTree = options.workingTree ?? (await computeWorkingTree(root));
-  const runner = await resolveRunnerIdentity(root, options.agent);
   const onEvent: RunEventHandler = options.onEvent ?? (() => undefined);
 
+  // Prepare: normalize the worktree BEFORE the receipt tree exists.
+  let prepareChanged: string[] = [];
+  if (config.prepare.length > 0) {
+    const before = await computeWorkingTree(root);
+    for (const step of config.prepare) {
+      await runPrepareStep(root, step, onEvent);
+    }
+    const after = await computeWorkingTree(root);
+    if (after.tree !== before.tree) {
+      prepareChanged = await treeChangedPaths(root, before.tree, after.tree);
+      onEvent({ event: "tree-normalized", tree: after.tree, changed: prepareChanged });
+    }
+  }
+
+  const workingTree = await computeWorkingTree(root);
+  onEvent({ event: "run-started", tree: workingTree.tree, dirty: workingTree.dirty });
+
+  const runner = await resolveRunnerIdentity(root, options.agent);
   const runs = await Promise.all(
     selected.map((check) =>
       runOneCheck(
@@ -186,6 +278,41 @@ export async function runChecks(root: string, options: RunOptions = {}): Promise
     ),
   );
 
-  const receipts = runs.map((run) => run.receipt);
-  return { workingTree, receipts, ok: receipts.every((receipt) => receipt.ok) };
+  // Receipts must describe a tree that actually held still while the checks
+  // read it. If it moved, minting anything would be a lie — for the before
+  // tree AND the after tree.
+  const finalTree = await computeWorkingTree(root);
+  if (finalTree.tree !== workingTree.tree) {
+    const changed = await treeChangedPaths(root, workingTree.tree, finalTree.tree);
+    onEvent({
+      event: "worktree-changed",
+      before: workingTree.tree,
+      after: finalTree.tree,
+      changed,
+    });
+    return {
+      workingTree,
+      receipts: [],
+      ok: false,
+      prepareChanged,
+      invalidated: { before: workingTree.tree, after: finalTree.tree, changed },
+    };
+  }
+
+  const receipts: Receipt[] = [];
+  for (const run of runs) {
+    const logSha = await storeLog(root, run.logBytes);
+    const receipt: Receipt = { ...run.receipt, log: `blob:${logSha}` };
+    await appendReceiptLine(root, workingTree.tree, encodeReceipt(receipt));
+    onEvent({ event: "receipt-minted", check: receipt.check, tree: workingTree.tree, log: receipt.log });
+    receipts.push(receipt);
+  }
+
+  return {
+    workingTree,
+    receipts,
+    ok: receipts.every((receipt) => receipt.ok),
+    prepareChanged,
+    invalidated: null,
+  };
 }

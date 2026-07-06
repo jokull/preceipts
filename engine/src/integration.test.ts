@@ -165,11 +165,12 @@ describe("full loop: init → run (fail) → fix → run (green) → land", () =
       .split("\n")
       .map((line) => JSON.parse(line));
     const kinds = events.map((event) => event.event);
-    expect(kinds[0]).toBe("check-started");
+    expect(kinds[0]).toBe("run-started");
+    expect(kinds).toContain("check-started");
     expect(kinds).toContain("output");
     expect(kinds).toContain("check-finished");
     expect(kinds.at(-1)).toBe("receipt-minted");
-    const started = events[0];
+    const started = events.find((event) => event.event === "check-started");
     expect(started.check).toBe("greet");
     expect(typeof started.tree).toBe("string");
     expect(typeof started.ts).toBe("string");
@@ -551,5 +552,148 @@ describe("hud", () => {
     expect(result.stdout).toContain("feature vs origin/main");
     expect(result.stdout).toContain("CONFLICTS (1): base.txt");
     expect(result.stdout).toContain("stale (base moved");
+  });
+});
+
+describe("prepare phase", () => {
+  test("prepare normalizes the worktree before the receipt tree is computed", async () => {
+    const repo = join(scratch, "prepare-normalize");
+    await initRepo(repo);
+    await run(repo, ["init"]);
+    // The gate passes only against normalized content — proof that checks ran
+    // AFTER prepare rewrote the file and receipts keyed to the rewritten tree.
+    await writeCheck(repo, "gate", "#!/bin/bash\ngrep -q formatted style.txt\n");
+    await writeFile(
+      join(repo, ".preceipts", "config.toml"),
+      '[required]\nchecks = ["gate"]\n\n[prepare]\ncommands = ["fmt"]\n\n[prepare.fmt]\ncmd = "echo formatted > style.txt"\n',
+    );
+    await writeFile(join(repo, "style.txt"), "unformatted\n");
+    await commitAll(repo, "unformatted state");
+
+    const result = await run(repo, ["run", "--json"]);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain("✓ prepare: fmt");
+    expect(result.stderr).toContain("prepare normalized the worktree");
+    expect(result.stderr).toContain("style.txt");
+    const summary = JSON.parse(result.stdout.trim().split("\n").at(-1)!);
+    expect(summary.ok).toBe(true);
+    expect(summary.prepareChanged).toEqual(["style.txt"]);
+    expect(summary.invalidated).toBeNull();
+
+    // Receipts describe the normalized (dirty) tree, and status agrees.
+    const status = JSON.parse((await run(repo, ["status", "--json"])).stdout);
+    expect(status.green).toBe(true);
+    expect(status.tree).toBe(summary.tree);
+
+    // Second run: already normalized, nothing to report.
+    const again = await run(repo, ["run"]);
+    expect(again.code).toBe(0);
+    expect(again.stderr).not.toContain("prepare normalized");
+  });
+
+  test("a check that mutates the worktree invalidates the run — no receipts", async () => {
+    const repo = join(scratch, "prepare-mutating-check");
+    await initRepo(repo);
+    await run(repo, ["init"]);
+    await writeCheck(repo, "mutator", "#!/bin/bash\necho oops > generated.txt\n");
+    await writeFile(
+      join(repo, ".preceipts", "config.toml"),
+      '[required]\nchecks = ["mutator"]\n',
+    );
+    await writeFile(join(repo, "x.txt"), "x\n");
+    await commitAll(repo, "initial");
+
+    const result = await run(repo, ["run", "--json"]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("worktree changed while checks ran");
+    expect(result.stderr).toContain("generated.txt");
+    expect(result.stderr).toContain("[prepare]");
+    const summary = JSON.parse(result.stdout.trim().split("\n").at(-1)!);
+    expect(summary.ok).toBe(false);
+    expect(summary.receipts).toEqual([]);
+    expect(summary.invalidated.changed).toEqual(["generated.txt"]);
+
+    // Nothing was minted for either tree.
+    const status = await run(repo, ["status", "--json"]);
+    const parsed = JSON.parse(status.stdout);
+    const row = parsed.rows.find((r: { check: string }) => r.check === "mutator");
+    expect(row.state).toBe("missing");
+  });
+
+  test("a failing prepare step aborts the run before any check", async () => {
+    const repo = join(scratch, "prepare-fails");
+    await initRepo(repo);
+    await run(repo, ["init"]);
+    await writeCheck(repo, "never", "#!/bin/bash\necho SHOULD-NOT-RUN\n");
+    await writeFile(
+      join(repo, ".preceipts", "config.toml"),
+      '[required]\nchecks = ["never"]\n\n[prepare]\ncommands = ["bad"]\n\n[prepare.bad]\ncmd = "exit 3"\n',
+    );
+    await writeFile(join(repo, "x.txt"), "x\n");
+    await commitAll(repo, "initial");
+
+    const result = await run(repo, ["run"]);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('prepare step "bad" failed (exit 3)');
+    expect(result.stdout).not.toContain("SHOULD-NOT-RUN");
+    const status = JSON.parse((await run(repo, ["status", "--json"])).stdout);
+    const row = status.rows.find((r: { check: string }) => r.check === "never");
+    expect(row.state).toBe("missing");
+  });
+
+  test("half-configured prepare is an error, not a silent skip", async () => {
+    const repo = join(scratch, "prepare-config-errors");
+    await initRepo(repo);
+    await run(repo, ["init"]);
+    await writeCheck(repo, "ok", "#!/bin/bash\ntrue\n");
+    await writeFile(join(repo, "x.txt"), "x\n");
+
+    await writeFile(
+      join(repo, ".preceipts", "config.toml"),
+      '[required]\nchecks = ["ok"]\n\n[prepare]\ncommands = ["ghost"]\n',
+    );
+    const listedWithoutTable = await run(repo, ["run"]);
+    expect(listedWithoutTable.code).not.toBe(0);
+    expect(listedWithoutTable.stderr).toContain('prepare step "ghost"');
+
+    await writeFile(
+      join(repo, ".preceipts", "config.toml"),
+      '[required]\nchecks = ["ok"]\n\n[prepare]\ncommands = []\n\n[prepare.orphan]\ncmd = "true"\n',
+    );
+    const tableWithoutListing = await run(repo, ["run"]);
+    expect(tableWithoutListing.code).not.toBe(0);
+    expect(tableWithoutListing.stderr).toContain("[prepare.orphan]");
+  });
+
+  test("--events streams the prepare lifecycle", async () => {
+    const repo = join(scratch, "prepare-events");
+    await initRepo(repo);
+    await run(repo, ["init"]);
+    await writeCheck(repo, "ok", "#!/bin/bash\ntrue\n");
+    await writeFile(
+      join(repo, ".preceipts", "config.toml"),
+      '[required]\nchecks = ["ok"]\n\n[prepare]\ncommands = ["touchit"]\n\n[prepare.touchit]\ncmd = "echo generated > out.txt"\n',
+    );
+    await writeFile(join(repo, "x.txt"), "x\n");
+    await commitAll(repo, "initial");
+
+    const result = await run(repo, ["run", "--events"]);
+    expect(result.code).toBe(0);
+    const events = result.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const kinds = events.map((event) => event.event);
+    expect(kinds[0]).toBe("prepare-started");
+    expect(kinds).toContain("prepare-finished");
+    expect(kinds).toContain("tree-normalized");
+    expect(kinds).toContain("run-started");
+    const normalized = events.find((event) => event.event === "tree-normalized");
+    expect(normalized.changed).toEqual(["out.txt"]);
+    const runStarted = events.find((event) => event.event === "run-started");
+    expect(runStarted.tree).toBe(normalized.tree);
+    // receipt keyed to the normalized tree
+    const minted = events.find((event) => event.event === "receipt-minted");
+    expect(minted.tree).toBe(normalized.tree);
   });
 });

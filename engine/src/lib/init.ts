@@ -13,6 +13,13 @@ checks = []
 # Per-check settings (timeout defaults to 10m):
 # [check.test]
 # timeout = "15m"
+
+# Normalization (format, codegen) runs serially BEFORE the receipt tree is
+# computed — checks must never mutate the worktree (that invalidates the run):
+# [prepare]
+# commands = ["format"]
+# [prepare.format]
+# cmd = "pnpm format"
 `;
 
 /**

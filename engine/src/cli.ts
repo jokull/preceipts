@@ -14,13 +14,14 @@ import { latestByCheck, logBlobSha } from "./lib/receipt.ts";
 import { runChecks } from "./lib/runner.ts";
 import { computeStatus, resolveTree } from "./lib/status.ts";
 import { sync } from "./lib/sync.ts";
-import { computeWorkingTree } from "./lib/tree-hash.ts";
 
 const USAGE = `preceipts — local CI, proven by trees, merged by humans
 
 Usage:
   preceipts init [--yes]                     scaffold .preceipts/, offer receipt refspecs on origin
-  preceipts run [check…] [options]           run checks here, mint receipts against the working tree
+  preceipts run [check…] [options]           prepare (format/codegen), then run checks and mint
+                                             receipts against the normalized working tree; fails
+                                             without minting if checks mutate the worktree
       --events                               stream NDJSON events on stdout
       --json                                 print a JSON summary at the end
       --sync                                 push receipts after minting
@@ -89,24 +90,63 @@ async function cmdInit(root: string, argv: string[]): Promise<number> {
 
 // ---------------------------------------------------------------------------
 
+function summarizePaths(changed: string[]): string {
+  const shown = changed.slice(0, 8).join(", ");
+  const more = changed.length > 8 ? `, +${changed.length - 8} more` : "";
+  return `${changed.length} file(s): ${shown}${more}`;
+}
+
 function makeStreamPrinter(): (event: RunEvent) => void {
   const partial = new Map<string, string>();
+  const flushLines = (label: string, chunk: string) => {
+    const buffered = (partial.get(label) ?? "") + chunk;
+    const lines = buffered.split("\n");
+    partial.set(label, lines.pop() ?? "");
+    for (const line of lines) console.log(`[${label}] ${line}`);
+  };
+  const flushRest = (label: string) => {
+    const rest = partial.get(label);
+    if (rest) console.log(`[${label}] ${rest}`);
+    partial.delete(label);
+  };
   return (event) => {
     switch (event.event) {
+      case "prepare-started":
+        console.error(`▶ prepare: ${event.step}`);
+        break;
+      case "prepare-output":
+        flushLines(`prepare:${event.step}`, event.chunk);
+        break;
+      case "prepare-finished": {
+        flushRest(`prepare:${event.step}`);
+        const mark = event.ok ? "✓" : "✗";
+        console.error(
+          `${mark} prepare: ${event.step} (exit ${event.exit}, ${formatDuration(event.duration_ms)})`,
+        );
+        break;
+      }
+      case "tree-normalized":
+        console.error(`prepare normalized the worktree — ${summarizePaths(event.changed)}`);
+        break;
+      case "run-started":
+        if (event.dirty) console.error(DIRTY_WARNING);
+        break;
+      case "worktree-changed":
+        console.error(
+          `✗ the worktree changed while checks ran (${event.before.slice(0, 12)} → ${event.after.slice(0, 12)}) — ${summarizePaths(event.changed)}`,
+        );
+        console.error(
+          "  no receipts minted. If a check formats or generates code, move that command to [prepare] in .preceipts/config.toml — prepare runs before the receipt tree is computed.",
+        );
+        break;
       case "check-started":
         console.error(`▶ ${event.check}`);
         break;
-      case "output": {
-        const buffered = (partial.get(event.check) ?? "") + event.chunk;
-        const lines = buffered.split("\n");
-        partial.set(event.check, lines.pop() ?? "");
-        for (const line of lines) console.log(`[${event.check}] ${line}`);
+      case "output":
+        flushLines(event.check, event.chunk);
         break;
-      }
       case "check-finished": {
-        const rest = partial.get(event.check);
-        if (rest) console.log(`[${event.check}] ${rest}`);
-        partial.delete(event.check);
+        flushRest(event.check);
         const mark = event.ok ? "✓" : "✗";
         console.error(`${mark} ${event.check} (exit ${event.exit}, ${formatDuration(event.duration_ms)})`);
         break;
@@ -128,9 +168,6 @@ async function cmdRun(root: string, argv: string[]): Promise<number> {
     allowPositionals: true,
   });
 
-  const workingTree = await computeWorkingTree(root);
-  if (workingTree.dirty) console.error(DIRTY_WARNING);
-
   const onEvent = values.events
     ? (event: RunEvent) => console.log(JSON.stringify(event))
     : makeStreamPrinter();
@@ -140,23 +177,27 @@ async function cmdRun(root: string, argv: string[]): Promise<number> {
     checks: positionals,
     ...(agent ? { agent } : {}),
     onEvent,
-    workingTree,
   });
 
   if (values.json) {
     console.log(
       JSON.stringify({
-        tree: workingTree.tree,
-        dirty: workingTree.dirty,
+        tree: result.workingTree.tree,
+        dirty: result.workingTree.dirty,
         ok: result.ok,
         receipts: result.receipts,
+        prepareChanged: result.prepareChanged,
+        invalidated: result.invalidated,
       }),
     );
   } else if (!values.events) {
-    const passed = result.receipts.filter((r) => r.ok).length;
-    console.error(
-      `\n${passed}/${result.receipts.length} checks passed · receipts minted for tree ${workingTree.tree.slice(0, 12)}${workingTree.dirty ? " (dirty)" : ""}`,
-    );
+    if (result.invalidated === null) {
+      const passed = result.receipts.filter((r) => r.ok).length;
+      console.error(
+        `\n${passed}/${result.receipts.length} checks passed · receipts minted for tree ${result.workingTree.tree.slice(0, 12)}${result.workingTree.dirty ? " (dirty)" : ""}`,
+      );
+    }
+    // The invalidated case already printed its explanation via the stream printer.
   }
 
   if (values.sync) {

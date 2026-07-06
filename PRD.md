@@ -126,6 +126,50 @@ checks = ["typecheck", "test", "lint"]   # what "green" means for `status`/`land
 timeout = "15m"                           # default 10m
 ```
 
+### The prepare phase: normalization is orchestration, not a gate
+
+Formatting and codegen cannot be ordinary checks. A check (or a hook it
+triggers) that rewrites files *after* the receipt tree is computed makes every
+receipt a lie about the eventual commit: checks proved tree A, the commit is
+tree B, and the gate correctly says "missing receipts". Discovered by
+dogfooding in trip — oxfmt in a pre-commit hook busted a run's receipts. The
+fix is first-class, not an agent instruction: **the tool makes the correct
+path the easy path.**
+
+```toml
+[prepare]
+commands = ["format", "sync-prompt"]      # serial, in this order
+
+[prepare.format]
+cmd = "pnpm format"                        # bash -c, from the repo root
+
+[prepare.sync-prompt]
+cmd = "pnpm --filter @trip/copilot sync-prompt"
+timeout = "5m"                             # default 10m, same as checks
+```
+
+`preceipts run` is therefore: **prepare (serial) → compute the receipt tree →
+checks (parallel) → verify the tree held still → mint.** Concretely:
+
+1. Prepare commands run serially; mutating the worktree here is the point.
+2. If they changed files, the changed paths are reported
+   (`tree-normalized` event; "prepare normalized the worktree — N file(s)").
+3. The receipt tree is computed *after* prepare (`run-started` event).
+4. Checks run against that normalized tree.
+5. The tree is recomputed when checks finish. If it changed — a check mutated
+   the worktree, or files were edited mid-run — the run is **invalid**:
+   nothing is minted (receipts would lie about the before *and* after trees),
+   exit is non-zero, and the message says to move mutating commands to
+   `[prepare]` (`worktree-changed` event).
+6. Receipts mint only for the verified-stable tree — minting is deferred to
+   the end of the run, never per-check.
+
+So `format --write` is prepare (local-CI orchestration); `format:check` is a
+check (a CI-style gate). A failing prepare step aborts the run before any
+check: an unnormalizable worktree has no honest tree to mint against. A
+half-configured `[prepare]` (listed name without a table, or a table not
+listed in `commands`) is an error, never a silent skip.
+
 ## CLI surface (phase 1)
 
 ```
@@ -290,7 +334,12 @@ user/agent action — `hud` reports staleness, it doesn't network.
 6. **HUD**: read-only and network-free — it reports fetch staleness rather
    than fetching; the base for conflict/freshness questions is the
    remote-tracking ref when present, the local branch otherwise.
-7. **Cockpit = lumen fork, one repo, one name** (2026-07-06). This repo is a
+7. **Prepare phase** (2026-07-06, from trip dogfooding): format/codegen is
+   `[prepare]` — serial commands run before the receipt tree is computed,
+   with changed paths reported. Checks that mutate the worktree invalidate
+   the run (no receipts minted, honest error pointing at `[prepare]`);
+   minting is deferred until the tree is verified stable across the run.
+8. **Cockpit = lumen fork, one repo, one name** (2026-07-06). This repo is a
    fork of jnsahaj/lumen (github.com/jokull/preceipts) with the engine folded
    in at `engine/` (history preserved via subtree). preceipts is a superset of
    lumen: its diff cockpit plus receipts. Binaries: `preceipts` (Rust cockpit;

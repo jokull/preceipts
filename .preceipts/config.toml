@@ -1,2 +1,8 @@
 [required]
 checks = ["fmt", "engine-test"]
+
+[prepare]
+commands = ["format"]
+
+[prepare.format]
+cmd = "cargo fmt"

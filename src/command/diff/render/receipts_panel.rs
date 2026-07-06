@@ -16,7 +16,8 @@ struct RowView {
     glyph: String,
     glyph_style: Style,
     check: String,
-    required: bool,
+    /// "required" | "extra" | "prepare"
+    tag: &'static str,
     state: String,
     state_style: Style,
     time: String,
@@ -40,27 +41,44 @@ pub fn render_receipts_panel(
     let status = receipts::status_get();
     let hud = receipts::get();
 
-    // Merge the status table with the live session: a live entry wins over
-    // the (pre-run) receipt state for that check.
+    // Merge the status table with the live session: prepare steps first (they
+    // run first), then checks — a live entry wins over the (pre-run) receipt
+    // state for that check.
     let mut rows: Vec<RowView> = Vec::new();
     let mut covered: Vec<&str> = Vec::new();
+    if let Some(session) = session {
+        for key in &session.order {
+            if let Some(name) = key.strip_prefix("prepare:") {
+                if let Some(live) = session.live.get(key) {
+                    rows.push(live_row(name, "prepare", live, good, bad, accent));
+                }
+            }
+        }
+    }
     if let Some(ref status) = status {
         for row in &status.rows {
             covered.push(row.check.as_str());
             let live = session.and_then(|s| s.live.get(&row.check));
             rows.push(match live {
-                Some(live) => live_row(&row.check, row.required, live, good, bad, accent),
+                Some(live) => live_row(
+                    &row.check,
+                    if row.required { "required" } else { "extra" },
+                    live,
+                    good,
+                    bad,
+                    accent,
+                ),
                 None => status_row(row, good, bad, warn, muted),
             });
         }
     }
     if let Some(session) = session {
-        for check in &session.order {
-            if covered.contains(&check.as_str()) {
+        for key in &session.order {
+            if key.starts_with("prepare:") || covered.contains(&key.as_str()) {
                 continue;
             }
-            if let Some(live) = session.live.get(check) {
-                rows.push(live_row(check, false, live, good, bad, accent));
+            if let Some(live) = session.live.get(key) {
+                rows.push(live_row(key, "extra", live, good, bad, accent));
             }
         }
     }
@@ -106,10 +124,7 @@ pub fn render_receipts_panel(
                 format!("{:<width$}  ", row.check, width = name_width),
                 Style::default().fg(t.ui.text_primary).bg(bg),
             ),
-            Span::styled(
-                format!("{:<9}", if row.required { "required" } else { "extra" }),
-                muted,
-            ),
+            Span::styled(format!("{:<9}", row.tag), muted),
             Span::styled(format!("{:<17}", row.state), row.state_style),
             Span::styled(format!("{:>8}  ", row.time), muted),
         ];
@@ -133,8 +148,10 @@ pub fn render_receipts_panel(
         ));
     }
 
-    // Hint / message line.
+    // Hint / message line: explicit messages (land results) win, then the
+    // run session's note (normalized / invalidated), then key hints.
     let running = session.map(|s| s.is_running()).unwrap_or(false);
+    let message = message.or_else(|| session.and_then(|s| s.note.as_deref()));
     let hint = if let Some(message) = message {
         Line::from(vec![Span::styled(format!(" {message}"), warn)])
     } else if running {
@@ -152,7 +169,7 @@ pub fn render_receipts_panel(
 
 fn live_row(
     check: &str,
-    required: bool,
+    tag: &'static str,
     live: &receipts::LiveCheck,
     good: Style,
     bad: Style,
@@ -166,7 +183,7 @@ fn live_row(
                 glyph: SPINNER[frame_index].to_string(),
                 glyph_style: accent,
                 check: check.to_string(),
-                required,
+                tag,
                 state: "running".to_string(),
                 state_style: accent,
                 time: receipts::format_ms(elapsed.as_millis() as u64),
@@ -177,20 +194,20 @@ fn live_row(
             glyph: "✓".to_string(),
             glyph_style: good,
             check: check.to_string(),
-            required,
+            tag,
             state: "ok".to_string(),
             state_style: good,
             time: live
                 .duration_ms
                 .map(receipts::format_ms)
                 .unwrap_or_default(),
-            detail: "receipt minted".to_string(),
+            detail: live.last_line.clone(),
         },
         LiveState::Failed => RowView {
             glyph: "✗".to_string(),
             glyph_style: bad,
             check: check.to_string(),
-            required,
+            tag,
             state: "fail".to_string(),
             state_style: bad,
             time: live
@@ -240,7 +257,7 @@ fn status_row(
         glyph: glyph.to_string(),
         glyph_style: style,
         check: row.check.clone(),
-        required: row.required,
+        tag: if row.required { "required" } else { "extra" },
         state: row.state.clone(),
         state_style: style,
         time: row

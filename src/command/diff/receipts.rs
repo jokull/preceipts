@@ -156,6 +156,25 @@ pub fn refresh_status() {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum RunEvent {
+    PrepareStarted {
+        step: String,
+    },
+    PrepareOutput {
+        step: String,
+        chunk: String,
+    },
+    PrepareFinished {
+        step: String,
+        ok: bool,
+        duration_ms: u64,
+    },
+    TreeNormalized {
+        changed: Vec<String>,
+    },
+    RunStarted,
+    WorktreeChanged {
+        changed: Vec<String>,
+    },
     CheckStarted {
         check: String,
     },
@@ -168,7 +187,9 @@ pub enum RunEvent {
         ok: bool,
         duration_ms: u64,
     },
-    ReceiptMinted,
+    ReceiptMinted {
+        check: String,
+    },
 }
 
 enum SessionMsg {
@@ -195,10 +216,12 @@ pub struct LiveCheck {
 pub struct RunSession {
     child: Child,
     rx: mpsc::Receiver<SessionMsg>,
-    /// Checks in the order they started.
+    /// Rows in the order they started; prepare steps are keyed "prepare:<name>".
     pub order: Vec<String>,
     pub live: HashMap<String, LiveCheck>,
     pub finished: bool,
+    /// Run-level message (prepare normalized files / run invalidated).
+    pub note: Option<String>,
 }
 
 impl RunSession {
@@ -230,7 +253,46 @@ impl RunSession {
             order: Vec::new(),
             live: HashMap::new(),
             finished: false,
+            note: None,
         })
+    }
+
+    fn begin(&mut self, key: String) {
+        self.order.push(key.clone());
+        self.live.insert(
+            key,
+            LiveCheck {
+                state: LiveState::Running,
+                started_at: Instant::now(),
+                duration_ms: None,
+                last_line: String::new(),
+                partial: String::new(),
+            },
+        );
+    }
+
+    fn append_output(&mut self, key: &str, chunk: &str) {
+        if let Some(entry) = self.live.get_mut(key) {
+            entry.partial.push_str(chunk);
+            if let Some(pos) = entry.partial.rfind('\n') {
+                let complete = &entry.partial[..pos];
+                if let Some(line) = complete.lines().rev().find(|l| !l.trim().is_empty()) {
+                    entry.last_line = line.trim_end().to_string();
+                }
+                entry.partial = entry.partial[pos + 1..].to_string();
+            }
+        }
+    }
+
+    fn finish(&mut self, key: &str, ok: bool, duration_ms: u64) {
+        if let Some(entry) = self.live.get_mut(key) {
+            entry.state = if ok {
+                LiveState::Passed
+            } else {
+                LiveState::Failed
+            };
+            entry.duration_ms = Some(duration_ms);
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -243,48 +305,52 @@ impl RunSession {
         let mut just_finished = false;
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
+                SessionMsg::Event(RunEvent::PrepareStarted { step }) => {
+                    self.begin(format!("prepare:{step}"));
+                }
+                SessionMsg::Event(RunEvent::PrepareOutput { step, chunk }) => {
+                    self.append_output(&format!("prepare:{step}"), &chunk);
+                }
+                SessionMsg::Event(RunEvent::PrepareFinished {
+                    step,
+                    ok,
+                    duration_ms,
+                }) => {
+                    self.finish(&format!("prepare:{step}"), ok, duration_ms);
+                }
+                SessionMsg::Event(RunEvent::TreeNormalized { changed }) => {
+                    self.note = Some(format!(
+                        "prepare normalized {} file(s) — receipts key to the normalized tree",
+                        changed.len()
+                    ));
+                }
+                SessionMsg::Event(RunEvent::RunStarted) => {}
+                SessionMsg::Event(RunEvent::WorktreeChanged { changed }) => {
+                    self.note = Some(format!(
+                        "✗ worktree changed during the run ({} file(s)) — no receipts minted; move mutating commands to [prepare]",
+                        changed.len()
+                    ));
+                }
                 SessionMsg::Event(RunEvent::CheckStarted { check }) => {
-                    self.order.push(check.clone());
-                    self.live.insert(
-                        check,
-                        LiveCheck {
-                            state: LiveState::Running,
-                            started_at: Instant::now(),
-                            duration_ms: None,
-                            last_line: String::new(),
-                            partial: String::new(),
-                        },
-                    );
+                    self.begin(check);
                 }
                 SessionMsg::Event(RunEvent::Output { check, chunk }) => {
-                    if let Some(entry) = self.live.get_mut(&check) {
-                        entry.partial.push_str(&chunk);
-                        if let Some(pos) = entry.partial.rfind('\n') {
-                            let complete = &entry.partial[..pos];
-                            if let Some(line) =
-                                complete.lines().rev().find(|l| !l.trim().is_empty())
-                            {
-                                entry.last_line = line.trim_end().to_string();
-                            }
-                            entry.partial = entry.partial[pos + 1..].to_string();
-                        }
-                    }
+                    self.append_output(&check, &chunk);
                 }
                 SessionMsg::Event(RunEvent::CheckFinished {
                     check,
                     ok,
                     duration_ms,
                 }) => {
+                    self.finish(&check, ok, duration_ms);
+                }
+                SessionMsg::Event(RunEvent::ReceiptMinted { check }) => {
+                    // Minting is deferred until the engine verifies the tree
+                    // held still — only then is "receipt minted" true.
                     if let Some(entry) = self.live.get_mut(&check) {
-                        entry.state = if ok {
-                            LiveState::Passed
-                        } else {
-                            LiveState::Failed
-                        };
-                        entry.duration_ms = Some(duration_ms);
+                        entry.last_line = "receipt minted".to_string();
                     }
                 }
-                SessionMsg::Event(RunEvent::ReceiptMinted) => {}
                 SessionMsg::Exited => {
                     let _ = self.child.wait();
                     self.finished = true;

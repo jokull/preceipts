@@ -19,7 +19,7 @@ export {
   CONFIG_FILE,
   DEFAULT_TIMEOUT_MS,
 } from "./config.ts";
-export type { Config, CheckFile } from "./config.ts";
+export type { Config, CheckFile, PrepareStep } from "./config.ts";
 export { computeWorkingTree } from "./tree-hash.ts";
 export type { WorkingTree } from "./tree-hash.ts";
 export {
@@ -36,13 +36,19 @@ export {
 export type {
   RunEvent,
   RunEventHandler,
+  PrepareStartedEvent,
+  PrepareOutputEvent,
+  PrepareFinishedEvent,
+  TreeNormalizedEvent,
+  RunStartedEvent,
+  WorktreeChangedEvent,
   CheckStartedEvent,
   OutputEvent,
   CheckFinishedEvent,
   ReceiptMintedEvent,
 } from "./events.ts";
 export { runChecks } from "./runner.ts";
-export type { RunOptions, RunResult } from "./runner.ts";
+export type { RunOptions, RunResult, RunInvalidated } from "./runner.ts";
 export { computeStatus, resolveTree } from "./status.ts";
 export type { Status, StatusRow, StatusOptions, CheckState } from "./status.ts";
 export { computeHud } from "./hud.ts";
