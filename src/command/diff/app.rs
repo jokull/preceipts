@@ -42,8 +42,8 @@ use super::git::{
 };
 use super::highlight;
 use super::render::{
-    render_diff, render_empty_state, truncate_path, FilePickerItem, KeyBind, KeyBindSection, Modal,
-    ModalContent, ModalFileStatus, ModalResult,
+    render_diff, render_empty_state, render_receipts_panel, truncate_path, FilePickerItem, KeyBind,
+    KeyBindSection, Modal, ModalContent, ModalFileStatus, ModalResult,
 };
 use super::state::{adjust_scroll_for_hunk, adjust_scroll_to_line, AppState, PendingKey};
 use super::theme;
@@ -334,6 +334,7 @@ fn run_app_internal(
         CommitReference::Single(_) => None,
     });
     super::receipts::refresh(hud_base.clone());
+    super::receipts::refresh_status();
 
     // Initialize stacked mode if commits were provided
     if let Some(commits) = stacked_commits {
@@ -385,6 +386,9 @@ fn run_app_internal(
     let mut pending_watch_event: Option<WatchEvent> = None;
     let mut pending_events: VecDeque<Event> = VecDeque::new();
     let mut send_annotations_on_exit = false;
+    // preceipts: at most one live check run + one land in flight at a time.
+    let mut run_session: Option<super::receipts::RunSession> = None;
+    let mut land_rx: Option<std::sync::mpsc::Receiver<super::receipts::LandOutcome>> = None;
 
     'main: loop {
         if let Some(ref rx) = watch_rx {
@@ -396,6 +400,25 @@ fn run_app_internal(
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {}
             }
+        }
+
+        // preceipts: stream run events into the rail; refresh snapshots when
+        // the run finishes (receipts just minted) or a land completes.
+        if let Some(ref mut session) = run_session {
+            if session.pump() {
+                super::receipts::refresh(hud_base.clone());
+                super::receipts::refresh_status();
+            }
+        }
+        if let Some(outcome) = land_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            state.receipts_message = Some(format!(
+                "{} {}",
+                if outcome.ok { "✓" } else { "✗" },
+                outcome.message
+            ));
+            land_rx = None;
+            super::receipts::refresh(hud_base.clone());
+            super::receipts::refresh_status();
         }
 
         if state.needs_reload {
@@ -451,7 +474,8 @@ fn run_app_internal(
             let row_offset = std::cell::Cell::new(0usize);
             let gaps_cell = std::cell::RefCell::new(Vec::new());
             let rects_cell = std::cell::RefCell::new(Vec::new());
-            let editor_rect_cell: std::cell::Cell<Option<ratatui::layout::Rect>> = std::cell::Cell::new(None);
+            let editor_rect_cell: std::cell::Cell<Option<ratatui::layout::Rect>> =
+                std::cell::Cell::new(None);
             terminal.draw(|frame| {
                 let (offset, gaps, rects, er) = render_diff(
                     frame,
@@ -581,6 +605,15 @@ fn run_app_internal(
                 }
 
                 *gaps_cell.borrow_mut() = gaps;
+                // preceipts receipts rail: docked above the footer, under modals.
+                if state.receipts_panel {
+                    render_receipts_panel(
+                        frame,
+                        frame.area(),
+                        run_session.as_ref(),
+                        state.receipts_message.as_deref(),
+                    );
+                }
                 // Editor is rendered inline by render_diff above; only the modal
                 // (annotations list, file picker, etc.) sits on top of everything.
                 if let Some(ref modal) = active_modal {
@@ -1249,6 +1282,95 @@ fn run_app_internal(
                         _ => {}
                     }
                 }
+                // preceipts rail keys — only a small set, so scrolling/search
+                // keep working while checks run behind the panel.
+                Event::Key(key)
+                    if key.kind == KeyEventKind::Press
+                        && active_modal.is_none()
+                        && state.receipts_panel
+                        && matches!(
+                            key.code,
+                            KeyCode::Char('r')
+                                | KeyCode::Char('L')
+                                | KeyCode::Char('R')
+                                | KeyCode::Esc
+                        ) =>
+                {
+                    match key.code {
+                        KeyCode::Char('R') | KeyCode::Esc => {
+                            state.receipts_panel = false;
+                            state.receipts_message = None;
+                        }
+                        KeyCode::Char('r') => {
+                            let running = run_session
+                                .as_ref()
+                                .map(|s| s.is_running())
+                                .unwrap_or(false);
+                            if !running {
+                                match super::receipts::RunSession::start() {
+                                    Ok(session) => {
+                                        run_session = Some(session);
+                                        state.receipts_message = None;
+                                    }
+                                    Err(err) => {
+                                        state.receipts_message = Some(format!(
+                                            "could not start preceipts-engine: {err}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char('L') => {
+                            let running = run_session
+                                .as_ref()
+                                .map(|s| s.is_running())
+                                .unwrap_or(false);
+                            if running {
+                                state.receipts_message =
+                                    Some("checks are running — wait for green".to_string());
+                            } else if land_rx.is_some() {
+                                // land already in flight
+                            } else {
+                                let hud = super::receipts::get();
+                                let status = super::receipts::status_get();
+                                match (hud, status) {
+                                    (Some(hud), Some(status)) if status.green => {
+                                        if !hud.land_fresh {
+                                            state.receipts_message = Some(format!(
+                                                "base moved — rebase & re-run, or `preceipts land {} --allow-stale` from a shell",
+                                                hud.branch.as_deref().unwrap_or("<branch>")
+                                            ));
+                                        } else if let Some(branch) = hud.branch {
+                                            let onto = hud
+                                                .base
+                                                .strip_prefix("origin/")
+                                                .unwrap_or(&hud.base)
+                                                .to_string();
+                                            state.receipts_message =
+                                                Some(format!("landing {branch} → {onto}…"));
+                                            land_rx = Some(super::receipts::start_land(
+                                                branch,
+                                                Some(onto),
+                                            ));
+                                        } else {
+                                            state.receipts_message =
+                                                Some("detached HEAD — cannot land".to_string());
+                                        }
+                                    }
+                                    (_, Some(_)) => {
+                                        state.receipts_message =
+                                            Some("not green — run checks first (r)".to_string());
+                                    }
+                                    _ => {
+                                        state.receipts_message =
+                                            Some("no receipts data yet".to_string());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 Event::Key(key) if key.kind == KeyEventKind::Press && active_modal.is_none() => {
                     if key.code != KeyCode::Char('g') {
                         state.pending_key = PendingKey::None;
@@ -1873,6 +1995,10 @@ fn run_app_internal(
                         KeyCode::Char('r') => {
                             state.needs_reload = true;
                         }
+                        KeyCode::Char('R') => {
+                            state.receipts_panel = true;
+                            super::receipts::refresh_status();
+                        }
                         KeyCode::Char('s') => {
                             if !state.annotations.is_empty() {
                                 let n = state.annotations.len();
@@ -1911,10 +2037,8 @@ fn run_app_internal(
                         }
                         KeyCode::Char('e') => {
                             if !state.file_diffs.is_empty() {
-                                let _ = execute!(
-                                    terminal.backend_mut(),
-                                    PopKeyboardEnhancementFlags
-                                );
+                                let _ =
+                                    execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
                                 execute!(
                                     terminal.backend_mut(),
                                     DisableMouseCapture,
@@ -1963,7 +2087,9 @@ fn run_app_internal(
                                 )?;
                                 let _ = execute!(
                                     terminal.backend_mut(),
-                                    PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+                                    PushKeyboardEnhancementFlags(
+                                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                                    )
                                 );
                                 terminal.clear()?;
                             }
@@ -2117,10 +2243,10 @@ fn run_app_internal(
                                                 key: "h/l or left/right",
                                                 description: "Scroll horizontally",
                                             },
-                                        KeyBind {
-                                            key: "w",
-                                            description: "Toggle watch mode",
-                                        },
+                                            KeyBind {
+                                                key: "w",
+                                                description: "Toggle watch mode",
+                                            },
                                             KeyBind {
                                                 key: "gg / G",
                                                 description: "Scroll to top / bottom",
@@ -2164,7 +2290,8 @@ fn run_app_internal(
                                             },
                                             KeyBind {
                                                 key: "ctrl+f",
-                                                description: "Global fuzzy search (all files, with preview)",
+                                                description:
+                                                    "Global fuzzy search (all files, with preview)",
                                             },
                                             KeyBind {
                                                 key: "n or down",
@@ -2201,6 +2328,24 @@ fn run_app_internal(
                                             },
                                         ],
                                     },
+                                    KeyBindSection {
+                                        title: "Receipts (preceipts)",
+                                        bindings: vec![
+                                            KeyBind {
+                                                key: "R",
+                                                description: "Toggle receipts rail",
+                                            },
+                                            KeyBind {
+                                                key: "r (rail open)",
+                                                description: "Run checks, mint receipts",
+                                            },
+                                            KeyBind {
+                                                key: "L (rail open)",
+                                                description:
+                                                    "Land branch (squash + trailers + push)",
+                                            },
+                                        ],
+                                    },
                                 ],
                             ));
                         }
@@ -2210,6 +2355,12 @@ fn run_app_internal(
                 _ => {}
             }
         }
+    }
+
+    // preceipts: don't leave a half-tracked check run behind — checks that
+    // already finished have their receipts minted; the in-flight one is killed.
+    if let Some(mut session) = run_session {
+        session.abort();
     }
 
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);

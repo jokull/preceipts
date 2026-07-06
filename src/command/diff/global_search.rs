@@ -449,4 +449,3 @@ impl GlobalSearchState {
         self.matcher = Some(matcher);
     }
 }
-

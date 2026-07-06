@@ -64,7 +64,8 @@ impl<'a> AnnotationEditor<'a> {
 
         let t = theme::get();
         self.textarea.set_cursor_line_style(Style::default());
-        self.textarea.set_cursor_style(Style::default().bg(t.ui.text_primary).fg(t.ui.bg));
+        self.textarea
+            .set_cursor_style(Style::default().bg(t.ui.text_primary).fg(t.ui.bg));
 
         self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
         self.textarea.move_cursor(tui_textarea::CursorMove::End);

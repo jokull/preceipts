@@ -859,7 +859,6 @@ fn apply_selection_to_spans<'a>(
     result
 }
 
-
 pub fn compute_line_stats(side_by_side: &[DiffLine]) -> LineStats {
     let mut added = 0;
     let mut removed = 0;
@@ -994,7 +993,13 @@ fn compute_target_index_ranges(
 ) -> Vec<(usize, usize, DiffPanelFocus)> {
     let mut ranges = Vec::new();
     for target in targets {
-        if let AnnotationTarget::LineRange { panel, start_line, end_line, .. } = target {
+        if let AnnotationTarget::LineRange {
+            panel,
+            start_line,
+            end_line,
+            ..
+        } = target
+        {
             let mut first_idx: Option<usize> = None;
             let mut last_idx: Option<usize> = None;
             for (idx, dl) in side_by_side.iter().enumerate() {
@@ -1548,7 +1553,10 @@ pub fn render_diff(
 
             // Check if this line is the end_line for any line-range slot
             for slot in &line_slots {
-                if let AnnotationTarget::LineRange { panel, end_line, .. } = slot.target() {
+                if let AnnotationTarget::LineRange {
+                    panel, end_line, ..
+                } = slot.target()
+                {
                     if diff_line.line_number(*panel) == Some(*end_line) {
                         let num_ann_lines = slot.height();
                         let line_pos = new_lines.len();
@@ -1723,7 +1731,10 @@ pub fn render_diff(
 
             // Check if this line is the end_line for any line-range slot
             for slot in &line_slots {
-                if let AnnotationTarget::LineRange { panel, end_line, .. } = slot.target() {
+                if let AnnotationTarget::LineRange {
+                    panel, end_line, ..
+                } = slot.target()
+                {
                     if diff_line.line_number(*panel) == Some(*end_line) {
                         let num_ann_lines = slot.height();
                         let line_pos = old_lines.len();
@@ -2190,7 +2201,10 @@ pub fn render_diff(
 
             // Check if this line is the end_line for any line-range slot
             for slot in &line_slots {
-                if let AnnotationTarget::LineRange { panel, end_line, .. } = slot.target() {
+                if let AnnotationTarget::LineRange {
+                    panel, end_line, ..
+                } = slot.target()
+                {
                     if diff_line.line_number(*panel) == Some(*end_line) {
                         let num_lines = slot.height();
 
@@ -2390,6 +2404,10 @@ pub fn render_diff(
         },
     );
 
-    (content_row_offset, overlay_gaps, annotation_rects, editor_rect)
+    (
+        content_row_offset,
+        overlay_gaps,
+        annotation_rects,
+        editor_rect,
+    )
 }
-

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Rust formatting — fast tripwire.
+set -euo pipefail
+cargo fmt --check

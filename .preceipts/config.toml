@@ -1,0 +1,2 @@
+[required]
+checks = ["fmt", "engine-test"]
