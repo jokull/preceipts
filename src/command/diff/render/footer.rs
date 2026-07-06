@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use ratatui::{prelude::*, widgets::Paragraph};
 
+use crate::command::diff::receipts;
 use crate::command::diff::search::{SearchMode, SearchState};
 use crate::command::diff::theme;
 use crate::command::diff::PrInfo;
@@ -82,6 +83,54 @@ pub fn truncate_path(path: &str, max_len: usize) -> String {
     } else {
         format!("{}{}", prefix, filename)
     }
+}
+
+/// preceipts HUD segment: branch situational awareness from the engine.
+/// Empty when there is no snapshot (no engine on PATH, or no .preceipts in
+/// this repo) — the footer then looks exactly like upstream lumen's.
+fn hud_spans(bg: Color) -> Vec<Span<'static>> {
+    let Some(hud) = receipts::get() else {
+        return Vec::new();
+    };
+    let t = theme::get();
+    let muted = Style::default().fg(t.ui.text_muted).bg(bg);
+    let good = Style::default().fg(t.ui.stats_added).bg(bg);
+    let bad = Style::default().fg(t.ui.stats_removed).bg(bg);
+    let warn = Style::default().fg(t.ui.watching).bg(bg);
+
+    let mut spans = vec![Span::styled(
+        if hud.green {
+            "receipts ✓".to_string()
+        } else {
+            "receipts ✗".to_string()
+        },
+        if hud.green { good } else { bad },
+    )];
+    spans.push(Span::styled(
+        format!(" · {} ↑{}↓{}", hud.base, hud.ahead, hud.behind),
+        muted,
+    ));
+    match hud.merge_clean {
+        Some(true) => spans.push(Span::styled(" · merge ✓".to_string(), good)),
+        Some(false) => spans.push(Span::styled(
+            format!(" · conflicts {}", hud.conflict_files.len()),
+            bad,
+        )),
+        None => {}
+    }
+    if !hud.land_fresh {
+        spans.push(Span::styled(" · stale".to_string(), warn));
+    }
+    if hud.dirty {
+        spans.push(Span::styled(" · dirty".to_string(), warn));
+    }
+    if let Some(unsynced) = hud.unsynced_receipts {
+        if unsynced > 0 {
+            spans.push(Span::styled(format!(" · {}⇡", unsynced), warn));
+        }
+    }
+    spans.push(Span::styled("  ".to_string(), muted));
+    spans
 }
 
 pub fn render_footer(frame: &mut Frame, footer_area: Rect, data: FooterData) {
@@ -233,7 +282,8 @@ pub fn render_footer(frame: &mut Frame, footer_area: Rect, data: FooterData) {
                 ),
             ]
         } else {
-            vec![
+            let mut spans = hud_spans(bg);
+            spans.extend(vec![
                 Span::styled(
                     if let Some(idx) = data.focused_hunk {
                         format!(
@@ -263,7 +313,8 @@ pub fn render_footer(frame: &mut Frame, footer_area: Rect, data: FooterData) {
                     " ? help ",
                     Style::default().fg(t.ui.text_muted).bg(bg),
                 ),
-            ]
+            ]);
+            spans
         };
 
         let left_line = Line::from(left_spans);

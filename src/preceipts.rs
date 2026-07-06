@@ -9,7 +9,7 @@ use std::process::Command;
 
 const ENGINE_SUBCOMMANDS: &[&str] = &["init", "run", "status", "log", "land", "hud", "sync", "gc"];
 
-fn engine_binary() -> String {
+pub fn engine_binary() -> String {
     std::env::var("PRECEIPTS_ENGINE").unwrap_or_else(|_| "preceipts-engine".to_string())
 }
 

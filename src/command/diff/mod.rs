@@ -1,5 +1,6 @@
 mod annotation;
 mod app;
+pub mod receipts;
 mod context;
 mod coordinates;
 mod diff_algo;

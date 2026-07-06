@@ -324,6 +324,17 @@ fn run_app_internal(
     };
     state.set_diff_reference(diff_ref_str);
 
+    // preceipts HUD: kick off the first snapshot before the TUI starts; the
+    // footer picks it up when it lands. Base = the "from" side of the diff
+    // reference when there is one, else the engine's default (main).
+    let hud_base = options.reference.as_ref().and_then(|r| match r {
+        CommitReference::Range { from, .. }
+        | CommitReference::TripleDots { from, .. }
+        | CommitReference::RangeToWorkingTree { from } => Some(from.clone()),
+        CommitReference::Single(_) => None,
+    });
+    super::receipts::refresh(hud_base.clone());
+
     // Initialize stacked mode if commits were provided
     if let Some(commits) = stacked_commits {
         state.init_stacked_mode(commits);
@@ -388,6 +399,7 @@ fn run_app_internal(
         }
 
         if state.needs_reload {
+            super::receipts::refresh(hud_base.clone());
             let file_diffs = if let Some(ref pr) = pr_info {
                 // In PR mode, reload from GitHub
                 match load_pr_file_diffs(pr) {
