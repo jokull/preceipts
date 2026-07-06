@@ -23,7 +23,7 @@ Usage:
       --events                               stream NDJSON events on stdout
       --json                                 print a JSON summary at the end
       --sync                                 push receipts after minting
-  preceipts status [ref] [--json]            receipt table for ref's tree (default HEAD); exit 0 iff green
+  preceipts status [ref] [--json]            receipt table for ref's tree (default: working tree); exit 0 iff green
   preceipts log <check> [ref]                print the stored log for that check/tree
   preceipts land <branch> [options]          verify receipts, squash onto base, fast-forward, push
       --onto <base>                          base branch (default: main)
@@ -171,7 +171,7 @@ async function cmdStatus(root: string, argv: string[]): Promise<number> {
     options: { json: { type: "boolean", default: false } },
     allowPositionals: true,
   });
-  const ref = positionals[0] ?? "HEAD";
+  const ref = positionals[0] ?? null; // default: the working tree — the same tree `run` mints against
   const status = await computeStatus(root, ref);
 
   if (values.json) {

@@ -137,9 +137,13 @@ describe("full loop: init → run (fail) → fix → run (green) → land", () =
     expect(summary.dirty).toBe(true);
     const headTree = (await sh(repo, ["git", "rev-parse", "HEAD^{tree}"])).trim();
     expect(summary.tree).not.toBe(headTree);
-    // status of HEAD still shows the old (failing) receipts
-    const status = await run(repo, ["status"]);
-    expect(status.code).toBe(1);
+    // default status inspects the working tree — the receipts just minted count
+    const worktreeStatus = await run(repo, ["status", "--json"]);
+    expect(worktreeStatus.code).toBe(0);
+    expect(JSON.parse(worktreeStatus.stdout).tree).toBe(summary.tree);
+    // explicit HEAD still shows the old (failing) receipts
+    const headStatus = await run(repo, ["status", "HEAD"]);
+    expect(headStatus.code).toBe(1);
   });
 
   test("committing exactly the tested state turns status green", async () => {
@@ -183,12 +187,14 @@ describe("full loop: init → run (fail) → fix → run (green) → land", () =
 
   test("editing a check marks its receipts stale-definition", async () => {
     await writeCheck(repo, "greet", "#!/bin/bash\necho hello-v2\nexit 0\n");
-    const result = await run(repo, ["status", "--json"]);
+    // inspect HEAD: its receipts exist but were minted by the old script — the
+    // worktree default would show "missing" (editing the check changed the tree)
+    const result = await run(repo, ["status", "HEAD", "--json"]);
     const status = JSON.parse(result.stdout);
     const greet = status.rows.find((row: { check: string }) => row.check === "greet");
     expect(greet.state).toBe("stale-definition");
     expect(status.green).toBe(false);
-    // restore
+    // restore: clean worktree again, default status == HEAD status, green
     await sh(repo, ["git", "checkout", "--", ".preceipts/checks/greet"]);
     expect(JSON.parse((await run(repo, ["status", "--json"])).stdout).green).toBe(true);
   });

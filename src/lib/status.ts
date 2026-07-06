@@ -3,6 +3,7 @@ import { CHECKS_DIR, loadConfig } from "./config.ts";
 import { PreceiptsError } from "./errors.ts";
 import { git } from "./git.ts";
 import { readReceipts } from "./notes.ts";
+import { computeWorkingTree } from "./tree-hash.ts";
 import { latestByCheck, type Receipt } from "./receipt.ts";
 
 export type CheckState = "ok" | "fail" | "missing" | "stale-definition";
@@ -70,15 +71,20 @@ function stateFor(receipt: Receipt | undefined, currentBlob: string | null): Che
  * Receipt table for a ref's tree against the required set. Required checks come
  * from the current worktree's config; "stale-definition" means the receipt's
  * check script no longer matches the current definition (see StatusOptions).
+ *
+ * ref = null means "the working tree as it stands" — the same tree hash `run`
+ * mints against. This is the CLI default: after `run` in a dirty worktree,
+ * `status` must agree with what was just minted (HEAD would say "missing").
+ * When the worktree is clean the two are identical.
  */
 export async function computeStatus(
   root: string,
-  ref: string,
+  ref: string | null,
   options: StatusOptions = {},
 ): Promise<Status> {
   const source = options.definitionSource ?? "worktree";
   const config = await loadConfig(root);
-  const tree = await resolveTree(root, ref);
+  const tree = ref === null ? (await computeWorkingTree(root)).tree : await resolveTree(root, ref);
   const receipts = latestByCheck(await readReceipts(root, tree));
 
   const names = [...config.required];
@@ -101,5 +107,5 @@ export async function computeStatus(
   }
 
   const green = rows.filter((row) => row.required).every((row) => row.state === "ok");
-  return { ref, tree, rows, green };
+  return { ref: ref ?? "worktree", tree, rows, green };
 }
