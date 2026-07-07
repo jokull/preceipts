@@ -42,6 +42,8 @@ pub struct Changeset {
     pub info: ScopeInfo,
     pub files: Vec<FileDiff>,
     pub workdir: PathBuf,
+    /// The repo's git dir (comment store and other review state live here).
+    pub git_dir: PathBuf,
 }
 
 impl Changeset {
@@ -54,6 +56,7 @@ impl Changeset {
             .workdir()
             .ok_or_else(|| CoreError::NotARepo(repo_path.to_path_buf()))?
             .to_path_buf();
+        let git_dir = repo.path().to_path_buf();
         let info = scope::resolve(&repo, scope)?;
         let entries = changed_files(&repo, &info)?;
 
@@ -87,12 +90,15 @@ impl Changeset {
                 hunks,
                 added,
                 removed,
+                old_text: old_content,
+                new_text: new_content,
             });
         }
         Ok(Changeset {
             info,
             files,
             workdir,
+            git_dir,
         })
     }
 

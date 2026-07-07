@@ -5674,7 +5674,10 @@ dependencies = [
 name = "preceipts-app"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui",
+ "notify",
+ "notify-debouncer-mini",
  "preceipts-core",
 ]
 
@@ -5684,10 +5687,29 @@ version = "0.1.0"
 dependencies = [
  "git2",
  "imara-diff 0.2.0",
+ "once_cell",
  "serde",
  "serde_json",
+ "streaming-iterator",
  "tempfile",
  "thiserror 1.0.65",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c-sharp",
+ "tree-sitter-css",
+ "tree-sitter-elixir",
+ "tree-sitter-go",
+ "tree-sitter-highlight",
+ "tree-sitter-html",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-md",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-toml-ng",
+ "tree-sitter-typescript",
+ "tree-sitter-zig",
 ]
 
 [[package]]

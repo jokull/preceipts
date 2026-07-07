@@ -66,6 +66,24 @@ runner, agent), live streaming output per row (disclosure triangle), run
 button (⌘R), and the run-level note line (normalized / invalidated / lock
 refusal). Statusbar chip is its summary; the panel is its detail.
 
+## Diff display algorithm (decided 2026-07-07)
+
+Three-pass, the GitHub/VS Code lineage: **histogram** line diff
+(imara-diff, git's default algorithm) → **similarity-gated line pairing**
+inside change blocks (order-preserving alignment; only lines that are
+plausibly "the same line edited" pair up — below the threshold they render
+as removal + addition) → **word-level intraline** ranges on paired lines
+(LCS over word tokens). All exact, all linear-ish, recomputed on every
+watch event without breaking a sweat.
+
+**difftastic (AST-aware) was evaluated and rejected as the engine**: its
+structural graph search degrades catastrophically on large changes
+(documented multi-GB/multi-minute cases; its own manual concedes the
+scaling limits and falls back to line diffs), which is fatal for a surface
+that recomputes 200-file monorepo diffs on watch events. If a per-file
+structural lens ever proves worth it, it can be an opt-in view — never the
+default path.
+
 ## GitHub integration (new)
 
 - **Auth**: OAuth device flow with a public client ID (native app, no
