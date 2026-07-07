@@ -745,3 +745,54 @@ describe("hud merge probe vs custom merge drivers", () => {
     expect(leaked).toEqual([]);
   });
 });
+
+describe("run lock", () => {
+  let repo: string;
+
+  beforeAll(async () => {
+    repo = join(scratch, "run-lock");
+    await initRepo(repo);
+    await mkdir(join(repo, ".preceipts", "checks"), { recursive: true });
+    await writeCheck(repo, "quick", "#!/bin/bash\nexit 0\n");
+    await writeFile(join(repo, ".preceipts", "config.toml"), '[required]\nchecks = ["quick"]\n');
+    await writeFile(join(repo, "file.txt"), "hello\n");
+    await commitAll(repo, "init");
+  });
+
+  test("a second concurrent run fails fast instead of racing", async () => {
+    await writeCheck(repo, "slow", "#!/bin/bash\nsleep 3\nexit 0\n");
+    const lockPath = join(repo, ".git", "preceipts-run.lock");
+
+    const first = Bun.spawn(["bun", CLI, "run", "slow"], {
+      cwd: repo,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // Wait for the first run to take the lock rather than guessing at startup time.
+    const deadline = Date.now() + 10_000;
+    while (!(await Bun.file(lockPath).exists())) {
+      if (Date.now() > deadline) throw new Error("first run never acquired the lock");
+      await Bun.sleep(50);
+    }
+
+    const second = await run(repo, ["run", "quick"]);
+    expect(second.code).not.toBe(0);
+    expect(second.stderr).toContain("another preceipts run is already in progress");
+
+    expect(await first.exited).toBe(0);
+    // The lock is released once the winning run finishes.
+    expect(await Bun.file(lockPath).exists()).toBe(false);
+  });
+
+  test("a stale lock from a dead process is taken over", async () => {
+    const dead = Bun.spawn(["true"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    await dead.exited;
+    const lockPath = join(repo, ".git", "preceipts-run.lock");
+    await writeFile(lockPath, String(dead.pid));
+
+    const result = await run(repo, ["run", "quick"]);
+    expect(result.code).toBe(0);
+    expect(await Bun.file(lockPath).exists()).toBe(false);
+  });
+});

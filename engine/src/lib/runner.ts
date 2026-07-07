@@ -1,5 +1,6 @@
+import { open, readFile, rm } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
-import { relative } from "node:path";
+import { join, relative } from "node:path";
 import {
   CHECKS_DIR,
   DEFAULT_TIMEOUT_MS,
@@ -215,7 +216,61 @@ async function runOneCheck(
  * lie about the commit. Mutation before the tree is computed is expected and
  * reported; mutation during the checks invalidates the run — nothing mints.
  */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * One run per worktree at a time. Two concurrent runs race each other's
+ * prepare mutations and duplicate every check; the second invocation (an
+ * agent's CLI run while the cockpit runs, or vice versa) must fail fast
+ * instead. The lock lives in the worktree's git dir so parallel worktrees
+ * of the same repo stay independent. A lock left by a dead process (kill -9,
+ * crash) is detected by pid and taken over.
+ */
+async function acquireRunLock(root: string): Promise<() => Promise<void>> {
+  const gitDir = await git(["rev-parse", "--absolute-git-dir"], { cwd: root });
+  if (gitDir.code !== 0) throw new PreceiptsError("not a git repository");
+  const lockPath = join(gitDir.stdout.trim(), "preceipts-run.lock");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const handle = await open(lockPath, "wx");
+      await handle.writeFile(String(process.pid));
+      await handle.close();
+      return async () => {
+        await rm(lockPath, { force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const raw = await readFile(lockPath, "utf8").catch(() => "");
+      const pid = Number.parseInt(raw.trim(), 10);
+      if (Number.isFinite(pid) && pid > 0 && isPidAlive(pid)) {
+        throw new PreceiptsError(
+          `another preceipts run is already in progress (pid ${pid}) — a second run would race prepare and duplicate checks on this worktree; wait for it or kill it`,
+        );
+      }
+      await rm(lockPath, { force: true }); // stale lock from a dead process
+    }
+  }
+  throw new PreceiptsError("could not acquire the run lock");
+}
+
 export async function runChecks(root: string, options: RunOptions = {}): Promise<RunResult> {
+  const releaseLock = await acquireRunLock(root);
+  try {
+    return await runChecksLocked(root, options);
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function runChecksLocked(root: string, options: RunOptions = {}): Promise<RunResult> {
   const config = await loadConfig(root);
   const available = await listChecks(root);
   if (available.length === 0) {

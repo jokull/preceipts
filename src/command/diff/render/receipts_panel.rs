@@ -92,11 +92,25 @@ pub fn render_receipts_panel(
     let title = match (&status, &hud) {
         (Some(status), hud) => {
             let dirty = hud.as_ref().map(|h| h.dirty).unwrap_or(false);
+            // Same three-way verdict as the footer: failed means a receipt
+            // for THIS tree says fail; unproven means the tree has moved on
+            // since the last receipts and nothing is proven yet.
+            let verdict = if status.green {
+                "green"
+            } else if status
+                .rows
+                .iter()
+                .any(|row| row.required && row.state == "fail")
+            {
+                "failed"
+            } else {
+                "unproven — no receipts for this tree"
+            };
             format!(
                 " receipts · tree {}{} · {} ",
                 &status.tree[..status.tree.len().min(12)],
                 if dirty { " (dirty)" } else { "" },
-                if status.green { "green" } else { "not green" },
+                verdict,
             )
         }
         _ => " receipts · no data (is .preceipts configured?) ".to_string(),

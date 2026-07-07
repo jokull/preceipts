@@ -98,14 +98,31 @@ fn hud_spans(bg: Color) -> Vec<Span<'static>> {
     let bad = Style::default().fg(t.ui.stats_removed).bg(bg);
     let warn = Style::default().fg(t.ui.watching).bg(bg);
 
-    let mut spans = vec![Span::styled(
-        if hud.green {
-            "receipts ✓".to_string()
-        } else {
-            "receipts ✗".to_string()
-        },
-        if hud.green { good } else { bad },
-    )];
+    // Three receipt states, because "✗" alone can't tell the reader what to
+    // do next: a check FAILED on this tree (fix it) vs. the tree simply has
+    // no receipts yet — it moved on since the last green run (re-run).
+    let failed = hud
+        .status
+        .as_ref()
+        .map(|status| {
+            status
+                .rows
+                .iter()
+                .filter(|row| row.required && row.state == "fail")
+                .count()
+        })
+        .unwrap_or(0);
+    let receipts_span = if hud.green {
+        Span::styled("receipts ✓".to_string(), good)
+    } else if failed > 0 {
+        Span::styled(format!("receipts ✗ {failed} failed"), bad)
+    } else if hud.status.is_some() {
+        Span::styled("receipts ∅ unproven".to_string(), warn)
+    } else {
+        // Older engine without status in the hud payload.
+        Span::styled("receipts ✗".to_string(), bad)
+    };
+    let mut spans = vec![receipts_span];
     spans.push(Span::styled(
         format!(" · {} ↑{}↓{}", hud.base, hud.ahead, hud.behind),
         muted,

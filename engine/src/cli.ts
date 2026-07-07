@@ -296,7 +296,19 @@ async function cmdHud(root: string, argv: string[]): Promise<number> {
         : "merge: unknown";
   const fetch =
     hud.fetchAgeMs === null ? "never fetched" : `fetched ${formatDuration(hud.fetchAgeMs)} ago`;
-  const receipts = hud.green ? "green" : "not green";
+  // "not green" hides the difference between a check that FAILED on this
+  // tree and a tree that simply has no receipts yet (it moved on after a
+  // merge/edit) — the reader's next action differs, so name the state.
+  const requiredRows = hud.status.rows.filter((row) => row.required);
+  const failedChecks = requiredRows.filter((row) => row.state === "fail").map((row) => row.check);
+  const unprovenChecks = requiredRows
+    .filter((row) => row.state !== "ok" && row.state !== "fail")
+    .map((row) => row.check);
+  const receipts = hud.green
+    ? "green"
+    : failedChecks.length > 0
+      ? `FAILED: ${failedChecks.join(", ")}`
+      : `unproven — no receipts for this tree (${unprovenChecks.join(", ")})`;
   const sync =
     hud.unsyncedReceipts === null
       ? "no origin"

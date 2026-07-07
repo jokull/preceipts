@@ -34,6 +34,10 @@ pub struct HudSnapshot {
     pub fetch_age_ms: Option<f64>,
     pub unsynced_receipts: Option<i64>,
     pub green: bool,
+    /// Receipt table for the working tree — lets the footer distinguish a
+    /// check that FAILED on this tree from a tree with no receipts yet.
+    #[serde(default)]
+    pub status: Option<StatusSnapshot>,
 }
 
 static HUD: RwLock<Option<HudSnapshot>> = RwLock::new(None);
@@ -219,6 +223,7 @@ pub enum RunEvent {
 
 enum SessionMsg {
     Event(RunEvent),
+    Stderr(String),
     Exited,
 }
 
@@ -247,6 +252,9 @@ pub struct RunSession {
     pub finished: bool,
     /// Run-level message (prepare normalized files / run invalidated).
     pub note: Option<String>,
+    /// Last non-empty stderr line — the engine's error when it refuses to
+    /// run at all (lock held, bad config), surfaced as the note on exit.
+    stderr_tail: Option<String>,
 }
 
 impl RunSession {
@@ -256,10 +264,21 @@ impl RunSession {
             .args(["run", "--events"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
         let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
         let (tx, rx) = mpsc::channel();
+        let err_tx = tx.clone();
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if !line.trim().is_empty() && err_tx.send(SessionMsg::Stderr(line)).is_err() {
+                    return;
+                }
+            }
+        });
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stdout);
             for line in reader.lines() {
@@ -279,6 +298,7 @@ impl RunSession {
             live: HashMap::new(),
             finished: false,
             note: None,
+            stderr_tail: None,
         })
     }
 
@@ -376,10 +396,22 @@ impl RunSession {
                         entry.last_line = "receipt minted".to_string();
                     }
                 }
+                SessionMsg::Stderr(line) => {
+                    self.stderr_tail = Some(line);
+                }
                 SessionMsg::Exited => {
-                    let _ = self.child.wait();
+                    let status = self.child.wait();
                     self.finished = true;
                     just_finished = true;
+                    // The engine refused to run (lock held, bad config): no
+                    // check ever started and it exited nonzero — its error
+                    // line is the only explanation the rail can show.
+                    let failed = status.map(|s| !s.success()).unwrap_or(true);
+                    if failed && self.live.is_empty() && self.note.is_none() {
+                        let err = self.stderr_tail.as_deref().unwrap_or("engine exited");
+                        self.note =
+                            Some(format!("✗ {}", err.trim_start_matches("preceipts: ")));
+                    }
                 }
             }
         }
