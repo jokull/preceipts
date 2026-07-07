@@ -19,6 +19,13 @@ final class CockpitViewController: NSSplitViewController {
     private var engine: EngineClient?
     private var hudTimer: Timer?
 
+    private var gh: GhClient?
+    private var commentStore: CommentStore?
+    private var commentStoreBranch: String?
+    private var prFeedback: PrFeedback?
+    private let feedbackPanel = FeedbackPanelViewController()
+    private var feedbackItem: NSSplitViewItem?
+
     deinit {
         hudTimer?.invalidate()
     }
@@ -47,8 +54,18 @@ final class CockpitViewController: NSSplitViewController {
         contentItem.minimumThickness = Metrics.surfaceMinWidth
         addSplitViewItem(contentItem)
 
+        // Feedback as an inspector pane: trailing material, collapsible.
+        let feedback = NSSplitViewItem(inspectorWithViewController: feedbackPanel)
+        feedback.minimumThickness = 320
+        feedback.maximumThickness = 560
+        feedback.canCollapse = true
+        feedback.isCollapsed = true
+        addSplitViewItem(feedback)
+        feedbackItem = feedback
+
         sidebar.delegate = self
         content.delegate = self
+        feedbackPanel.delegate = self
 
         requestReload()
     }
@@ -163,9 +180,83 @@ final class CockpitViewController: NSSplitViewController {
             updateWindowTitle(changeset)
             ensureEngine(changeset)
             refreshHud()
+            ensureCommentStore(changeset)
+            refreshFeedbackViews()
         case .failure(let error):
             content.showError(error.localizedDescription)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Feedback + drafts
+
+    private func ensureCommentStore(_ changeset: Changeset) {
+        if gh == nil {
+            gh = GhClient(workdir: changeset.workdir)
+        }
+        let branch = changeset.branch ?? "(detached)"
+        if commentStore == nil || commentStoreBranch != branch {
+            commentStore = try? CommentStore(gitDir: changeset.gitDir, branch: branch)
+            commentStoreBranch = branch
+        }
+    }
+
+    /// Panel list + surface badges from the current feedback and drafts —
+    /// anchors re-resolve against every new changeset.
+    private func refreshFeedbackViews() {
+        feedbackPanel.apply(feedback: prFeedback, drafts: commentStore?.comments ?? [])
+        var badges: [Int: Int] = [:]
+        guard let changeset else {
+            content.setCommentBadges([:])
+            return
+        }
+        for draft in commentStore?.comments ?? [] {
+            if let row = surface.anchorRow(
+                path: draft.path, line: draft.line, side: draft.side, changeset: changeset)
+            {
+                badges[row, default: 0] += 1
+            }
+        }
+        for comment in prFeedback?.comments ?? [] {
+            if let path = comment.path, let line = comment.line,
+                let row = surface.anchorRow(
+                    path: path, line: line, side: .new, changeset: changeset)
+            {
+                badges[row, default: 0] += 1
+            }
+        }
+        content.setCommentBadges(badges)
+    }
+
+    private func refreshFeedback() {
+        guard let gh else { return }
+        guard gh.available else {
+            feedbackPanel.showStatus(GhError.notInstalled.localizedDescription)
+            return
+        }
+        feedbackPanel.showStatus("Fetching PR feedback\u{2026}")
+        gh.fetchFeedback { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let feedback):
+                self.prFeedback = feedback
+                self.refreshFeedbackViews()
+            case .failure(let error):
+                self.feedbackPanel.showStatus(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func toggleFeedbackPanel(_ sender: Any?) {
+        guard let feedbackItem else { return }
+        feedbackItem.animator().isCollapsed.toggle()
+        if !feedbackItem.isCollapsed, prFeedback == nil {
+            refreshFeedback()
+        }
+    }
+
+    @objc func addComment(_ sender: Any?) {
+        content.composeComment()
     }
 
     // ------------------------------------------------------------------
@@ -250,6 +341,62 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
 
     func surface(_ surface: SurfaceViewController, didScrollToFile fileIndex: Int) {
         sidebar.highlight(fileIndex: fileIndex)
+    }
+
+    func surface(
+        _ surface: SurfaceViewController,
+        addDraft path: String, line: Int, side: CommentSide, lineText: String, body: String
+    ) {
+        try? commentStore?.add(
+            path: path, line: line, side: side, lineText: lineText, body: body)
+        refreshFeedbackViews()
+    }
+
+    func surfaceRequestsFeedbackPanel(_ surface: SurfaceViewController) {
+        if feedbackItem?.isCollapsed == true {
+            toggleFeedbackPanel(nil)
+        }
+    }
+}
+
+extension CockpitViewController: FeedbackPanelDelegate {
+    func feedbackPanelRequestsRefresh(_ panel: FeedbackPanelViewController) {
+        refreshFeedback()
+    }
+
+    func feedbackPanel(_ panel: FeedbackPanelViewController, scrollTo item: FeedbackItem) {
+        guard let changeset, let anchor = item.anchor,
+            let row = surface.anchorRow(
+                path: anchor.path, line: anchor.line, side: anchor.side, changeset: changeset)
+        else { return }
+        content.scrollToRow(row, centered: true)
+        content.selectRow(row)
+    }
+
+    func feedbackPanel(_ panel: FeedbackPanelViewController, deleteDraft id: UInt64) {
+        try? commentStore?.remove(id: id)
+        refreshFeedbackViews()
+    }
+
+    func feedbackPanel(
+        _ panel: FeedbackPanelViewController, anchorRowFor item: FeedbackItem
+    ) -> Int? {
+        guard let changeset, let anchor = item.anchor else { return nil }
+        guard
+            let row = surface.anchorRow(
+                path: anchor.path, line: anchor.line, side: anchor.side, changeset: changeset)
+        else { return nil }
+        // Drafts also go outdated when the anchored line's text changed.
+        if case .draft(let draft) = item,
+            case .line(let file, let hunk, let rowIndex) = surface.rows[row]
+        {
+            let diffRow = changeset.files[file].hunks[hunk].rows[rowIndex]
+            let current = draft.side == .new ? diffRow.new?.text : diffRow.old?.text
+            if current != draft.lineText {
+                return nil
+            }
+        }
+        return row
     }
 }
 

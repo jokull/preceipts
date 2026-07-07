@@ -12,6 +12,10 @@ final class DiffRowView: NSView {
     /// Active ⌘F query — occurrences get a highlight background.
     var findQuery: String?
     var isCurrentFindMatch = false
+    /// Row selection (for comment anchoring) — drawn as an accent edge bar.
+    var isRowSelected = false
+    /// Comments anchored to this row — drawn as a trailing badge.
+    var commentBadge = 0
 
     override var isFlipped: Bool { true }
 
@@ -32,6 +36,47 @@ final class DiffRowView: NSView {
             let fileDiff = changeset.files[file]
             drawLine(fileDiff.hunks[hunk].rows[row], file: fileDiff)
         }
+        if commentBadge > 0 {
+            drawCommentBadge()
+        }
+        if isRowSelected {
+            NSColor.controlAccentColor.setFill()
+            NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
+        }
+    }
+
+    private func drawCommentBadge() {
+        let text = NSAttributedString(
+            string: "\(commentBadge)",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 9, weight: .semibold),
+                .foregroundColor: NSColor.white,
+            ])
+        let textSize = text.size()
+        let iconSide: CGFloat = 9
+        let badge = NSRect(
+            x: bounds.width - textSize.width - iconSide - 26,
+            y: (bounds.height - 14) / 2,
+            width: textSize.width + iconSide + 16,
+            height: 14)
+        let path = NSBezierPath(
+            roundedRect: badge, xRadius: badge.height / 2, yRadius: badge.height / 2)
+        NSColor.controlAccentColor.withAlphaComponent(0.85).setFill()
+        path.fill()
+
+        let config = NSImage.SymbolConfiguration(pointSize: iconSide, weight: .medium)
+            .applying(.init(paletteColors: [.white]))
+        if let icon = NSImage(systemSymbolName: "text.bubble.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
+        {
+            icon.draw(
+                in: NSRect(
+                    x: badge.minX + 6, y: badge.midY - iconSide / 2,
+                    width: iconSide, height: iconSide))
+        }
+        text.draw(
+            at: NSPoint(
+                x: badge.minX + iconSide + 9, y: badge.midY - textSize.height / 2))
     }
 
     private func baseline(_ font: NSFont) -> CGFloat {

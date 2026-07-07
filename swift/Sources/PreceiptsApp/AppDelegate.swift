@@ -91,6 +91,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "g")
         previous.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(previous)
+        menu.addItem(.separator())
+        let comment = NSMenuItem(
+            title: "Add Comment\u{2026}",
+            action: #selector(CockpitViewController.addComment(_:)),
+            keyEquivalent: "m")
+        comment.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(comment)
         item.submenu = menu
         return item
     }
@@ -122,6 +129,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(CockpitViewController.toggleReceiptsPanel(_:)),
             keyEquivalent: "j")
         menu.addItem(receipts)
+        let feedback = NSMenuItem(
+            title: "Toggle Feedback Panel",
+            action: #selector(CockpitViewController.toggleFeedbackPanel(_:)),
+            keyEquivalent: "j")
+        feedback.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(feedback)
         menu.addItem(.separator())
         // ⌘R belongs to Run Checks (design keyboard map); watch mode makes
         // manual reload the exception.

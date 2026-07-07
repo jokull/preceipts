@@ -65,6 +65,25 @@ final class SurfaceTests: XCTestCase {
         XCTAssertTrue(surface.rows.isEmpty)
         XCTAssertNil(surface.fileIndex(atRow: 0))
     }
+
+    func testAnchorRowResolvesByPathLineAndSide() {
+        let changeset = makeChangeset([makeFile("a.swift"), makeFile("b.swift")])
+        let surface = Surface.build(changeset)
+        // b.swift's change row: old line 4, new line 4; addition: new line 5.
+        XCTAssertEqual(
+            surface.anchorRow(path: "b.swift", line: 4, side: .new, changeset: changeset), 6)
+        XCTAssertEqual(
+            surface.anchorRow(path: "b.swift", line: 5, side: .new, changeset: changeset), 7)
+        XCTAssertEqual(
+            surface.anchorRow(path: "a.swift", line: 4, side: .old, changeset: changeset), 2)
+        // Addition rows have no old side.
+        XCTAssertNil(
+            surface.anchorRow(path: "a.swift", line: 5, side: .old, changeset: changeset))
+        XCTAssertNil(
+            surface.anchorRow(path: "missing.swift", line: 1, side: .new, changeset: changeset))
+        XCTAssertNil(
+            surface.anchorRow(path: "a.swift", line: 99, side: .new, changeset: changeset))
+    }
 }
 
 final class FileTreeTests: XCTestCase {

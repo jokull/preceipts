@@ -8,6 +8,11 @@ import SwiftUI
 
 protocol SurfaceDelegate: AnyObject {
     func surface(_ surface: SurfaceViewController, didScrollToFile fileIndex: Int)
+    func surface(
+        _ surface: SurfaceViewController,
+        addDraft path: String, line: Int, side: CommentSide, lineText: String, body: String)
+    /// Double-click on a row with a comment badge.
+    func surfaceRequestsFeedbackPanel(_ surface: SurfaceViewController)
 }
 
 final class SurfaceViewController: NSViewController {
@@ -36,6 +41,10 @@ final class SurfaceViewController: NSViewController {
     private var findIndexGeneration = 0
     private var pendingFindQuery: String?
 
+    /// Surface row → number of comments anchored there (drafts + GitHub).
+    private var commentBadges: [Int: Int] = [:]
+    private var composePopover: NSPopover?
+
     // ------------------------------------------------------------------
     // View construction
 
@@ -53,6 +62,8 @@ final class SurfaceViewController: NSViewController {
         surfaceTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         surfaceTable.delegate = self
         surfaceTable.dataSource = self
+        surfaceTable.doubleAction = #selector(rowDoubleClicked(_:))
+        surfaceTable.target = self
 
         scroll.documentView = surfaceTable
         scroll.hasVerticalScroller = true
@@ -288,6 +299,69 @@ final class SurfaceViewController: NSViewController {
     }
 
     // ------------------------------------------------------------------
+    // Comments (drafts + badges)
+
+    func setCommentBadges(_ badges: [Int: Int]) {
+        guard badges != commentBadges else { return }
+        commentBadges = badges
+        refreshVisibleRows()
+    }
+
+    /// The (path, line, side, lineText) a composed comment would anchor
+    /// to: the selected row's new side when present, else its old side.
+    func selectedAnchor() -> (path: String, line: Int, side: CommentSide, lineText: String)? {
+        let row = surfaceTable.selectedRow
+        guard let changeset, row >= 0, row < surface.rows.count,
+            case .line(let file, let hunk, let rowIndex) = surface.rows[row]
+        else { return nil }
+        let fileDiff = changeset.files[file]
+        let diffRow = fileDiff.hunks[hunk].rows[rowIndex]
+        if let new = diffRow.new {
+            return (fileDiff.path, new.number, .new, new.text)
+        }
+        if let old = diffRow.old {
+            return (fileDiff.path, old.number, .old, old.text)
+        }
+        return nil
+    }
+
+    /// ⌘⇧M / Add Comment — popover composer on the selected row.
+    func composeComment() {
+        guard let anchor = selectedAnchor() else {
+            NSSound.beep()
+            return
+        }
+        composePopover?.close()
+        let popover = NSPopover()
+        popover.behavior = .transient
+        let composer = CommentComposerViewController(
+            anchor: "\(anchor.path):\(anchor.line)"
+        ) { [weak self, weak popover] body in
+            popover?.close()
+            guard let self, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return }
+            self.delegate?.surface(
+                self, addDraft: anchor.path, line: anchor.line, side: anchor.side,
+                lineText: anchor.lineText, body: body)
+        }
+        popover.contentViewController = composer
+        composePopover = popover
+        let rect = surfaceTable.rect(ofRow: surfaceTable.selectedRow)
+        popover.show(relativeTo: rect, of: surfaceTable, preferredEdge: .maxY)
+    }
+
+    func selectRow(_ row: Int) {
+        guard row >= 0, row < surface.rows.count else { return }
+        surfaceTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
+    @objc private func rowDoubleClicked(_ sender: Any?) {
+        let row = surfaceTable.clickedRow
+        guard row >= 0, commentBadges[row] != nil else { return }
+        delegate?.surfaceRequestsFeedbackPanel(self)
+    }
+
+    // ------------------------------------------------------------------
     // Find
 
     func openFind() {
@@ -341,23 +415,25 @@ final class SurfaceViewController: NSViewController {
         layoutTicks()
     }
 
-    /// Repaint materialized rows with the current find state — cheaper than
+    /// Repaint materialized rows with the current row state — cheaper than
     /// reloadData and keeps scroll position untouched.
     private func refreshVisibleRows() {
         surfaceTable.enumerateAvailableRowViews { [weak self] rowView, row in
             guard let self, let cell = rowView.view(atColumn: 0) as? DiffRowView else { return }
-            self.configureFindState(cell, row: row)
+            self.configureRowState(cell, row: row)
             cell.needsDisplay = true
         }
         stickyHeader.needsDisplay = true
     }
 
-    private func configureFindState(_ cell: DiffRowView, row: Int) {
+    private func configureRowState(_ cell: DiffRowView, row: Int) {
         let query = findBar.isOpen ? findBar.query : ""
         cell.findQuery = query.isEmpty ? nil : query
         cell.isCurrentFindMatch =
             !findMatches.isEmpty && findCurrent < findMatches.count
             && findMatches[findCurrent] == row
+        cell.isRowSelected = surfaceTable.selectedRow == row
+        cell.commentBadge = commentBadges[row] ?? 0
     }
 }
 
@@ -382,13 +458,92 @@ extension SurfaceViewController: NSTableViewDataSource, NSTableViewDelegate {
             }()
         cell.surfaceRow = surface.rows[row]
         cell.changeset = changeset
-        configureFindState(cell, row: row)
+        configureRowState(cell, row: row)
         cell.needsDisplay = true
         return cell
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        false
+        // Line rows select (comment anchoring); headers/gaps don't.
+        if case .line = surface.rows[row] {
+            return true
+        }
+        return false
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        refreshVisibleRows()
+    }
+}
+
+// ------------------------------------------------------------------
+// Comment composer popover
+
+private final class CommentComposerViewController: NSViewController {
+    private let anchor: String
+    private let onSave: (String) -> Void
+    private let textView: NSTextView
+    private let textScroll: NSScrollView
+
+    init(anchor: String, onSave: @escaping (String) -> Void) {
+        self.anchor = anchor
+        self.onSave = onSave
+        self.textScroll = NSTextView.scrollableTextView()
+        self.textView = textScroll.documentView as! NSTextView
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func loadView() {
+        let title = NSTextField(labelWithString: "Draft comment \u{00b7} \(anchor)")
+        title.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        title.lineBreakMode = .byTruncatingHead
+
+        textView.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
+        textView.isRichText = false
+        textView.textContainerInset = NSSize(width: 4, height: 6)
+        textScroll.borderType = .bezelBorder
+
+        let hint = NSTextField(labelWithString: "Never posted \u{2014} a note for your agent")
+        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        hint.textColor = .secondaryLabelColor
+
+        let save = NSButton(title: "Save Comment", target: self, action: #selector(save(_:)))
+        save.bezelStyle = .rounded
+        save.controlSize = .small
+        save.keyEquivalent = "\r"
+        save.keyEquivalentModifierMask = [.command]
+
+        let footer = NSStackView(views: [hint, NSView(), save])
+        footer.orientation = .horizontal
+        footer.spacing = Metrics.padding
+
+        let stack = NSStackView(views: [title, textScroll, footer])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = Metrics.padding
+        stack.edgeInsets = NSEdgeInsets(
+            top: Metrics.paddingWide, left: Metrics.paddingWide,
+            bottom: Metrics.paddingWide, right: Metrics.paddingWide)
+        self.view = stack
+        NSLayoutConstraint.activate([
+            stack.widthAnchor.constraint(equalToConstant: 420),
+            textScroll.heightAnchor.constraint(equalToConstant: 90),
+            textScroll.widthAnchor.constraint(
+                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
+            footer.widthAnchor.constraint(
+                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
+        ])
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(textView)
+    }
+
+    @objc private func save(_ sender: Any?) {
+        onSave(textView.string)
     }
 }
 

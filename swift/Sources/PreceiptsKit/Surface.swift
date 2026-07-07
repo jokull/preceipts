@@ -47,6 +47,28 @@ public struct Surface: Sendable {
         return Surface(rows: rows, fileAnchors: fileAnchors, hunkAnchors: hunkAnchors)
     }
 
+    /// Resolve a comment anchor (path + 1-based line + side) to its surface
+    /// row. Nil when the file isn't in the changeset or the line isn't in
+    /// any rendered hunk — the comment is outdated or outside the diff.
+    public func anchorRow(
+        path: String, line: Int, side: CommentSide, changeset: Changeset
+    ) -> Int? {
+        guard let fileIndex = changeset.files.firstIndex(where: { $0.path == path })
+        else { return nil }
+        let start = fileAnchors[fileIndex]
+        let end = fileIndex + 1 < fileAnchors.count ? fileAnchors[fileIndex + 1] : rows.count
+        let file = changeset.files[fileIndex]
+        for index in start..<end {
+            guard case .line(_, let hunk, let row) = rows[index] else { continue }
+            let diffRow = file.hunks[hunk].rows[row]
+            let candidate = side == .new ? diffRow.new : diffRow.old
+            if candidate?.number == line {
+                return index
+            }
+        }
+        return nil
+    }
+
     /// The file whose section contains `row` — the last anchor at or above
     /// it. Nil when the surface is empty or `row` precedes the first header.
     public func fileIndex(atRow row: Int) -> Int? {

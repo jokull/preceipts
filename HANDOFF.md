@@ -73,7 +73,13 @@ default branch `preceipts`). Everything committed and pushed.
    watch events + 45s timer), receipts panel ⌘J (run --events NDJSON
    streaming into disclosure rows), Run Checks ⌘R (Reload moved to
    ⌘⇧R). Deferred: chip click actions for fetch/sync.
-4. Feedback viewer + draft comments (port from git history, above).
+4. ~~Feedback viewer + draft comments~~ **done 2026-07-07**: Kit ports
+   of comments.rs/feedback.rs (CommentStore, clipboard digest,
+   parseFeedback) with tests; gh-CLI transport (GhClient, OAuth
+   replaces it in step 5); feedback inspector pane ⌘⇧J (filters,
+   copy/copy-all, click-to-anchor); drafts via row selection + ⌘⇧M
+   popover; gutter comment badges. Deferred: inline chips under
+   anchored rows (badges + panel for now), file filter in panel.
 5. GitHub OAuth device flow + Keychain.
 6. App bundle/icon/vendored libgit2/notarization via the vendored
    packaging skill.

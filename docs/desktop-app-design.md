@@ -230,6 +230,9 @@ semantic chrome colors, SF Symbols; Surface/FileTree/FindMatcher live
 in the Kit with tests) · 3) ~~engine integration~~ **done** (statusbar
 HUD chips as a SwiftUI island, receipts panel ⌘J streaming
 `run --events`, Run Checks ⌘R; chip click-to-fetch/sync deferred) ·
-4) feedback viewer + draft comments port (models exist in the Rust
-reference) · 5) GitHub OAuth + Keychain · 6) app bundle, icon, vendored
+4) ~~feedback viewer + draft comments~~ **done** (Kit ports of the
+models, gh-CLI transport pending OAuth, inspector pane ⌘⇧J with
+filters + copy digest, ⌘⇧M draft popover, gutter badges; inline
+anchor chips under rows deferred in favor of badges + panel) ·
+5) GitHub OAuth + Keychain · 6) app bundle, icon, vendored
 libgit2, notarization.
