@@ -1,4 +1,5 @@
 import AppKit
+import PreceiptsKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
@@ -10,10 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let repoPath =
-            CommandLine.arguments.dropFirst().first
-            ?? FileManager.default.currentDirectoryPath
-        let repo = URL(fileURLWithPath: repoPath)
+        guard let repo = resolveRepo() else {
+            NSApp.terminate(nil)
+            return
+        }
 
         cockpit = CockpitViewController(repo: repo)
 
@@ -38,6 +39,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    /// CLI argument → current directory (terminal launches) → open panel
+    /// (Finder launches, where cwd is "/"). Nil means quit.
+    private func resolveRepo() -> URL? {
+        if let argument = CommandLine.arguments.dropFirst().first(where: {
+            !$0.hasPrefix("-")
+        }) {
+            return URL(fileURLWithPath: argument)
+        }
+        let cwd = FileManager.default.currentDirectoryPath
+        if cwd != "/", (try? GitReader(path: URL(fileURLWithPath: cwd))) != nil {
+            return URL(fileURLWithPath: cwd)
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Open Repository"
+        panel.message = "Choose a git repository to review"
+        panel.prompt = "Open"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url
     }
 
     // ------------------------------------------------------------------

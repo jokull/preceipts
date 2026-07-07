@@ -87,8 +87,15 @@ default branch `preceipts`). Everything committed and pushed.
    (60s + focus polling), gh-CLI fallback when signed out. NOTE: user
    must create a GitHub OAuth app with device flow enabled and paste
    its client ID into Settings to sign in.
-6. App bundle/icon/vendored libgit2/notarization via the vendored
-   packaging skill.
+6. ~~App bundle/icon/vendored libgit2~~ **done 2026-07-07** via the
+   vendored packaging skill: `swift/Scripts/package_app.sh` (bundles
+   Preceipts.app, vendors the libgit2→llhttp/libssh2→openssl dylib
+   chain to @rpath, ad-hoc signs by default), `build_icon.sh` +
+   `generate_icon.swift` (programmatic One Dark diff/claw icon →
+   Icon.icns, committed), `compile_and_run.sh`, and the template
+   `setup_dev_signing.sh` / `sign-and-notarize.sh` (notarization needs
+   a Developer ID + App Store Connect key — not run). Finder launches
+   get an NSOpenPanel repo chooser. `swift/version.env` holds versions.
 
 ## Gotchas / environment
 
