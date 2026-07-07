@@ -4,7 +4,9 @@
 import Foundation
 
 public enum ChangesetLoader {
-    public static func load(repoPath: URL, scope: DiffScope) throws -> Changeset {
+    public static func load(
+        repoPath: URL, scope: DiffScope, highlighting: Bool = true
+    ) throws -> Changeset {
         let reader = try GitReader(path: repoPath)
         let workdir = try reader.workdir
         let head = try reader.headBranch()
@@ -21,7 +23,18 @@ public enum ChangesetLoader {
             baseCommit = git_oid_boxed(try reader.mergeBase(base.oid, head.oid))
         }
 
-        var files: [FileDiff] = []
+        // Sequential git pass (libgit2 objects are not thread-safe), then a
+        // parallel highlight pass — parsing every changed file dominates
+        // load time on large changesets when done serially.
+        struct Pending {
+            let file: FileDiff
+            let oldSource: String
+            let oldContent: String
+            let newContent: String
+            var oldHighlight: FileHighlight?
+            var newHighlight: FileHighlight?
+        }
+        var pending: [Pending] = []
         for entry in try reader.changedFiles(baseCommit: baseCommit.oid) {
             let oldSource = entry.oldPath ?? entry.path
             let (oldContent, oldBinary): (String, Bool)
@@ -49,16 +62,48 @@ public enum ChangesetLoader {
             if hunks.isEmpty && entry.status == .modified {
                 continue
             }
-            files.append(
-                FileDiff(
-                    path: entry.path,
-                    oldPath: entry.oldPath,
-                    status: entry.status,
-                    isBinary: isBinary,
-                    added: added,
-                    removed: removed,
-                    hunks: hunks
+            pending.append(
+                Pending(
+                    file: FileDiff(
+                        path: entry.path,
+                        oldPath: entry.oldPath,
+                        status: entry.status,
+                        isBinary: isBinary,
+                        added: added,
+                        removed: removed,
+                        hunks: hunks
+                    ),
+                    oldSource: oldSource,
+                    oldContent: oldContent,
+                    newContent: newContent
                 )
+            )
+        }
+
+        if highlighting {
+            pending.withUnsafeMutableBufferPointer { buffer in
+                DispatchQueue.concurrentPerform(iterations: buffer.count) { index in
+                    let item = buffer[index]
+                    guard !item.file.hunks.isEmpty else { return }
+                    buffer[index].oldHighlight = item.oldContent.isEmpty
+                        ? nil : Highlighter.highlight(item.oldContent, path: item.oldSource)
+                    buffer[index].newHighlight = item.newContent.isEmpty
+                        ? nil : Highlighter.highlight(item.newContent, path: item.file.path)
+                }
+            }
+        }
+
+        let files = pending.map { item in
+            FileDiff(
+                path: item.file.path,
+                oldPath: item.file.oldPath,
+                status: item.file.status,
+                isBinary: item.file.isBinary,
+                added: item.file.added,
+                removed: item.file.removed,
+                hunks: item.file.hunks,
+                oldHighlight: item.oldHighlight,
+                newHighlight: item.newHighlight
             )
         }
 

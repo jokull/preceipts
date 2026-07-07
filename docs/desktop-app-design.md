@@ -3,8 +3,12 @@
 *2026-07-07. Successor to the TUI cockpit (PRD decisions 10 + 11). Stack:
 **all-native Swift/AppKit** — the app owns UI *and* compute. libgit2 (C,
 in-process) provides git reads and line diffs (patience + indent-heuristic
-flags, the same xdiff lineage as git's histogram); SwiftTreeSitter provides
-highlighting; the display algorithm's novel passes (similarity-gated line
+flags, the same xdiff lineage as git's histogram); tree-sitter (C runtime
++ grammar SPM packages, used directly so byte offsets stay UTF-8 — the
+SwiftTreeSitter wrapper works in UTF-16) provides highlighting, with the
+Rust registry's queries ported verbatim and text predicates
+(#eq?/#match?/#any-of?) evaluated in Swift; the display algorithm's novel
+passes (similarity-gated line
 pairing → word-level intraline → segment composition) are Swift ports of
 the tested Rust originals; FSEvents drives watch-mode reloads
 (single-flight, coalesced); Keychain + URLSession handle GitHub. The diff
@@ -210,8 +214,10 @@ remappable the macOS way. `n/p/j/k/t/R` and friends are gone.
 Rust workspace (root TUI + `core/` + `app/` GPUI) — deprecated reference;
 delete when the Swift app reaches parity on the hard requirements.
 
-Sequencing from here: 1) SwiftTreeSitter highlighting (kit already
-renders segments; syntax spans plug into the same pipeline) · 2) ⌘F find
+Sequencing from here: 1) ~~tree-sitter highlighting~~ **done** (raw C
+API; per-file parallel in the loader; 512KB cap so generated giants
+render plain; same-node precedence verified against the Rust reference)
+· 2) ⌘F find
 + NSOutlineView file tree + sticky headers · 3) engine integration
 (receipts panel, statusbar HUD chips via `hud --json` / `run --events`)
 · 4) feedback viewer + draft comments port (models exist in the Rust

@@ -2,6 +2,7 @@
 // appearance adaptation comes with the design pass.
 
 import AppKit
+import PreceiptsKit
 
 enum Theme {
     static let bg = NSColor(srgbRed: 0.118, green: 0.133, blue: 0.153, alpha: 1)
@@ -28,5 +29,41 @@ enum Theme {
         case "D": return red
         default: return yellow
         }
+    }
+
+    // One Dark syntax palette, ported from the GPUI prototype
+    // (app/src/theme.rs). Kind indexes highlightNames; families map to
+    // colors, with variable.* refined by full name.
+    static func syntaxColor(_ kind: UInt8?) -> NSColor {
+        guard let kind, Int(kind) < highlightNames.count else { return fg }
+        let name = highlightNames[Int(kind)]
+        let family = name.split(separator: ".").first.map(String.init) ?? name
+        switch family {
+        case "keyword": return rgb(0xc678dd)
+        case "string": return rgb(0x98c379)
+        case "comment": return rgb(0x5c6370)
+        case "function", "constructor": return rgb(0x61afef)
+        case "type", "module", "label": return rgb(0xe5c07b)
+        case "number", "constant": return rgb(0xd19a66)
+        case "property", "attribute", "tag": return rgb(0xe06c75)
+        case "operator": return rgb(0x56b6c2)
+        case "punctuation": return rgb(0x9da5b4)
+        case "variable":
+            switch name {
+            case "variable.builtin": return rgb(0xe06c75)
+            case "variable.parameter", "variable.member": return rgb(0xd19a66)
+            default: return fg
+            }
+        default: return fg
+        }
+    }
+
+    private static func rgb(_ value: UInt32) -> NSColor {
+        NSColor(
+            srgbRed: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: 1
+        )
     }
 }

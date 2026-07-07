@@ -76,6 +76,9 @@ public struct FileDiff: Sendable {
     public let added: Int
     public let removed: Int
     public let hunks: [DiffHunk]
+    /// Syntax highlights per file version; nil = unsupported language.
+    public let oldHighlight: FileHighlight?
+    public let newHighlight: FileHighlight?
 
     public init(
         path: String,
@@ -84,7 +87,9 @@ public struct FileDiff: Sendable {
         isBinary: Bool,
         added: Int,
         removed: Int,
-        hunks: [DiffHunk]
+        hunks: [DiffHunk],
+        oldHighlight: FileHighlight? = nil,
+        newHighlight: FileHighlight? = nil
     ) {
         self.path = path
         self.oldPath = oldPath
@@ -93,6 +98,8 @@ public struct FileDiff: Sendable {
         self.added = added
         self.removed = removed
         self.hunks = hunks
+        self.oldHighlight = oldHighlight
+        self.newHighlight = newHighlight
     }
 }
 

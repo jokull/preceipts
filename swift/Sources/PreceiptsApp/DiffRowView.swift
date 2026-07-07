@@ -32,7 +32,8 @@ final class DiffRowView: NSView {
         case .gap(let skipped):
             drawGap(skipped)
         case .line(let file, let hunk, let row):
-            drawLine(changeset.files[file].hunks[hunk].rows[row])
+            let fileDiff = changeset.files[file]
+            drawLine(fileDiff.hunks[hunk].rows[row], file: fileDiff)
         }
     }
 
@@ -100,17 +101,17 @@ final class DiffRowView: NSView {
         drawText(text, x: 12)
     }
 
-    private func drawLine(_ row: DiffRow) {
+    private func drawLine(_ row: DiffRow, file: FileDiff) {
         let half = bounds.width / 2
         drawSide(
-            row, old: true,
+            row, file: file, old: true,
             rect: NSRect(x: 0, y: 0, width: half, height: bounds.height))
         drawSide(
-            row, old: false,
+            row, file: file, old: false,
             rect: NSRect(x: half, y: 0, width: bounds.width - half, height: bounds.height))
     }
 
-    private func drawSide(_ row: DiffRow, old: Bool, rect: NSRect) {
+    private func drawSide(_ row: DiffRow, file: FileDiff, old: Bool, rect: NSRect) {
         let line = old ? row.old : row.new
         let (lineBg, wordBg): (NSColor, NSColor)
         switch (row.kind, old, line != nil) {
@@ -135,11 +136,13 @@ final class DiffRowView: NSView {
         drawText(number, x: max(rect.minX + 2, numberX))
 
         let changed = old ? row.oldChanged : row.newChanged
+        let highlight = old ? file.oldHighlight : file.newHighlight
+        let syntax = highlight?.line(line.number) ?? []
         let text = NSMutableAttributedString()
-        for segment in lineSegments(line.text, syntax: [], changed: changed) {
+        for segment in lineSegments(line.text, syntax: syntax, changed: changed) {
             var attributes: [NSAttributedString.Key: Any] = [
                 .font: Theme.font,
-                .foregroundColor: Theme.fg,
+                .foregroundColor: Theme.syntaxColor(segment.kind),
             ]
             if segment.emphasized {
                 attributes[.backgroundColor] = wordBg
