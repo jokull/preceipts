@@ -27,6 +27,12 @@ final class SurfaceViewController: NSViewController {
     private var findCurrent = 0
     private var lastReportedFile = -1
 
+    /// Case folding is paid once per changeset, off the main thread; the
+    /// generation guard discards a stale index when reloads overlap.
+    private var findIndex: FindIndex?
+    private var findIndexGeneration = 0
+    private var pendingFindQuery: String?
+
     // ------------------------------------------------------------------
     // View construction
 
@@ -140,10 +146,28 @@ final class SurfaceViewController: NSViewController {
         lastReportedFile = -1
         surfaceTable.reloadData()
         updateStatusBar(changeset)
-        if findBar.isOpen {
-            updateFindMatches(findBar.query, keepPosition: true)
-        }
+        rebuildFindIndex(changeset: changeset, surface: surface)
         updateOverlays()
+    }
+
+    private func rebuildFindIndex(changeset: Changeset, surface: Surface) {
+        findIndex = nil
+        findIndexGeneration += 1
+        let generation = findIndexGeneration
+        if findBar.isOpen, !findBar.query.isEmpty {
+            pendingFindQuery = findBar.query
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let index = FindIndex(surface: surface, changeset: changeset)
+            DispatchQueue.main.async {
+                guard let self, self.findIndexGeneration == generation else { return }
+                self.findIndex = index
+                if let pending = self.pendingFindQuery {
+                    self.pendingFindQuery = nil
+                    self.updateFindMatches(pending, keepPosition: true)
+                }
+            }
+        }
     }
 
     func showError(_ message: String) {
@@ -284,10 +308,14 @@ final class SurfaceViewController: NSViewController {
     func findPrevious() { stepFindMatch(-1) }
 
     private func updateFindMatches(_ query: String, keepPosition: Bool = false) {
-        guard let changeset else { return }
+        guard let findIndex else {
+            // Index still building (fresh reload) — run when it lands.
+            pendingFindQuery = query
+            return
+        }
         let previous = keepPosition && findCurrent < findMatches.count
             ? findMatches[findCurrent] : nil
-        findMatches = FindMatcher.matches(query: query, surface: surface, changeset: changeset)
+        findMatches = findIndex.matches(query: query)
         findCurrent = 0
         if let previous, let nearest = findMatches.firstIndex(where: { $0 >= previous }) {
             findCurrent = nearest

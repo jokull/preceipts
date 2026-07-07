@@ -118,32 +118,32 @@ final class FindTests: XCTestCase {
 
     func testMatchesLineTextCaseInsensitive() {
         let surface = Surface.build(changeset)
-        let hits = FindMatcher.matches(query: "VALUE", surface: surface, changeset: changeset)
+        let hits = FindIndex(surface: surface, changeset: changeset).matches(query: "VALUE")
         // File 0's header path, both its line rows, and file 1's line rows.
         XCTAssertEqual(hits, [0, 2, 3, 6, 7])
     }
 
     func testMatchesHeaderOnPathOnly() {
         let surface = Surface.build(changeset)
-        let hits = FindMatcher.matches(query: "notes.md", surface: surface, changeset: changeset)
+        let hits = FindIndex(surface: surface, changeset: changeset).matches(query: "notes.md")
         XCTAssertEqual(hits, [4])
     }
 
     func testMatchesOldSideOfChangeRows() {
         let surface = Surface.build(changeset)
-        let hits = FindMatcher.matches(query: "= 1", surface: surface, changeset: changeset)
+        let hits = FindIndex(surface: surface, changeset: changeset).matches(query: "= 1")
         XCTAssertEqual(hits, [2, 6])
     }
 
     func testEmptyQueryMatchesNothing() {
         let surface = Surface.build(changeset)
         XCTAssertTrue(
-            FindMatcher.matches(query: "", surface: surface, changeset: changeset).isEmpty)
+            FindIndex(surface: surface, changeset: changeset).matches(query: "").isEmpty)
     }
 
     func testGapsNeverMatch() {
         let surface = Surface.build(changeset)
-        let hits = FindMatcher.matches(query: "unchanged", surface: surface, changeset: changeset)
+        let hits = FindIndex(surface: surface, changeset: changeset).matches(query: "unchanged")
         XCTAssertTrue(hits.isEmpty)
     }
 }
