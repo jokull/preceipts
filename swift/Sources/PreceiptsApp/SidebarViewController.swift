@@ -44,6 +44,12 @@ final class SidebarViewController: NSViewController {
     }
 
     func show(tree: [FileTreeNode]) {
+        // Watch-driven reloads must not yank the sidebar around: keep the
+        // scroll offset and the selection (path-keyed — indices shift).
+        let clip = outline.enclosingScrollView?.contentView
+        let scrollOrigin = clip?.bounds.origin
+        let selectedPath = (outline.item(atRow: outline.selectedRow) as? FileTreeNode)?.path
+
         roots = tree
         leaves.removeAll()
         var stack = tree
@@ -55,6 +61,23 @@ final class SidebarViewController: NSViewController {
         }
         outline.reloadData()
         outline.expandItem(nil, expandChildren: true)
+
+        if let selectedPath,
+            let node = leaves.values.first(where: { $0.path == selectedPath })
+        {
+            let row = outline.row(forItem: node)
+            if row >= 0 {
+                suppressSelectionCallback = true
+                outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                suppressSelectionCallback = false
+            }
+        }
+        if let clip, let scrollOrigin {
+            outline.layoutSubtreeIfNeeded()
+            let maxY = max(0, outline.frame.height - clip.bounds.height)
+            clip.scroll(to: NSPoint(x: scrollOrigin.x, y: min(scrollOrigin.y, maxY)))
+            outline.enclosingScrollView?.reflectScrolledClipView(clip)
+        }
     }
 
     /// Reflect the surface's current file without echoing back a scroll.
