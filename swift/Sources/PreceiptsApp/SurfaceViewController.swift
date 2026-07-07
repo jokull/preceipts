@@ -11,7 +11,7 @@ protocol SurfaceDelegate: AnyObject {
     func surface(
         _ surface: SurfaceViewController,
         addDraft path: String, line: Int, startLine: Int?, side: CommentSide,
-        lineText: String, body: String)
+        lineText: String, quote: String?, body: String)
     /// Double-click on a row with a comment badge — open its thread.
     func surface(_ surface: SurfaceViewController, openThreadAtRow row: Int)
 }
@@ -454,6 +454,8 @@ final class SurfaceViewController: NSViewController {
         let startLine: Int?
         let side: CommentSide
         let lineText: String
+        /// Full selected block (this side's lines), for the clipboard.
+        let quote: String?
         let rows: ClosedRange<Int>
     }
 
@@ -476,14 +478,18 @@ final class SurfaceViewController: NSViewController {
         // Side from the end row; the claw and GitHub both key on it.
         let side: CommentSide = lineRef(highRow, side: .new) != nil ? .new : .old
         guard let end = lineRef(highRow, side: side) else { return nil }
-        // Walk the range's rows for the first one with a number this side.
+        // Walk the range's rows for the first one with a number this side,
+        // gathering the block's text for the clipboard quote.
         var start: LineRef?
         var startRow = lowRow
+        var blockLines: [String] = []
         for row in lowRow...highRow {
             if let ref = lineRef(row, side: side) {
-                start = ref
-                startRow = row
-                break
+                if start == nil {
+                    start = ref
+                    startRow = row
+                }
+                blockLines.append(ref.text)
             }
         }
         guard let start else { return nil }
@@ -493,6 +499,7 @@ final class SurfaceViewController: NSViewController {
             startLine: start.number == end.number ? nil : start.number,
             side: side,
             lineText: end.text,
+            quote: blockLines.count > 1 ? blockLines.joined(separator: "\n") : nil,
             rows: startRow...highRow)
     }
 
@@ -519,7 +526,7 @@ final class SurfaceViewController: NSViewController {
             else { return }
             self.delegate?.surface(
                 self, addDraft: anchor.path, line: anchor.line, startLine: anchor.startLine,
-                side: anchor.side, lineText: anchor.lineText, body: body)
+                side: anchor.side, lineText: anchor.lineText, quote: anchor.quote, body: body)
         }
         popover.contentViewController = composer
         composePopover = popover

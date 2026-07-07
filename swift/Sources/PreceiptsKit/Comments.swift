@@ -24,8 +24,11 @@ public struct LocalComment: Codable, Sendable, Identifiable {
     public let startLine: Int?
     public let side: CommentSide
     /// The anchored (end) line's text when the comment was written —
-    /// quoted in the clipboard format and used to flag outdated later.
+    /// used to flag the draft as outdated later.
     public let lineText: String
+    /// The full selected block for multi-line drafts — what the clipboard
+    /// quotes. Nil falls back to `lineText`.
+    public let quote: String?
     public var body: String
     /// Unix seconds; display formatting is the UI's job.
     public let createdAt: UInt64
@@ -37,7 +40,7 @@ public struct LocalComment: Codable, Sendable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, path, line, side, body
+        case id, path, line, side, body, quote
         case startLine = "start_line"
         case lineText = "line_text"
         case createdAt = "created_at"
@@ -48,32 +51,49 @@ public struct LocalComment: Codable, Sendable, Identifiable {
 /// of origin (local draft or GitHub).
 public struct CommentContext {
     public let path: String
+    /// Anchor line (range end for multi-line comments).
     public let line: Int
+    /// Range start for multi-line comments; nil for single-line.
+    public let startLine: Int?
+    /// The quoted code — may span multiple lines for range comments.
     public let lineText: String
     public let body: String
     /// Nil for local drafts; "octocat" / "coderabbit[bot]" for GitHub.
     public let author: String?
 
-    public init(path: String, line: Int, lineText: String, body: String, author: String?) {
+    public init(
+        path: String, line: Int, startLine: Int? = nil, lineText: String,
+        body: String, author: String?
+    ) {
         self.path = path
         self.line = line
+        self.startLine = startLine
         self.lineText = lineText
         self.body = body
         self.author = author
     }
 }
 
-/// One comment as a markdown block with file:line context:
+/// One comment as a markdown block with file:line(-range) context:
 ///
-///     apps/next/components/foo.tsx:123
-///     > const x = useMemo(...)
-///     This memo is unnecessary — props are primitives.
+///     apps/next/components/foo.tsx:120-123
+///     > for (const a of xs) {
+///     >   total += a.price
+///     > }
+///     This loop belongs in the reducer.
 ///
 public func formatComment(_ comment: CommentContext) -> String {
-    var out = "\(comment.path):\(comment.line)\n"
-    let quoted = comment.lineText.trimmingTrailingWhitespace()
-    if !quoted.trimmingCharacters(in: .whitespaces).isEmpty {
-        out += "> \(quoted)\n"
+    var out = "\(comment.path):"
+    if let start = comment.startLine, start != comment.line {
+        out += "\(min(start, comment.line))\u{2013}\(max(start, comment.line))\n"
+    } else {
+        out += "\(comment.line)\n"
+    }
+    for quoteLine in comment.lineText.split(separator: "\n", omittingEmptySubsequences: false) {
+        let quoted = String(quoteLine).trimmingTrailingWhitespace()
+        if !quoted.trimmingCharacters(in: .whitespaces).isEmpty {
+            out += "> \(quoted)\n"
+        }
     }
     if let author = comment.author {
         out += "\u{2014} \(author): "
@@ -142,7 +162,7 @@ public final class CommentStore {
     @discardableResult
     public func add(
         path: String, line: Int, startLine: Int? = nil, side: CommentSide,
-        lineText: String, body: String
+        lineText: String, quote: String? = nil, body: String
     ) throws -> LocalComment {
         data.nextId += 1
         let comment = LocalComment(
@@ -152,6 +172,7 @@ public final class CommentStore {
             startLine: startLine,
             side: side,
             lineText: lineText,
+            quote: quote,
             body: body,
             createdAt: UInt64(Date().timeIntervalSince1970))
         data.branches[branch, default: []].append(comment)
@@ -178,8 +199,8 @@ public final class CommentStore {
         formatDigest(
             comments.map {
                 CommentContext(
-                    path: $0.path, line: $0.line, lineText: $0.lineText,
-                    body: $0.body, author: nil)
+                    path: $0.path, line: $0.line, startLine: $0.startLine,
+                    lineText: $0.quote ?? $0.lineText, body: $0.body, author: nil)
             })
     }
 

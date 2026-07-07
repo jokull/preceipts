@@ -92,12 +92,26 @@ final class GitHubClient {
         async let reviewComments = paginated("\(base)/pulls/\(status.number)/comments")
         async let reviews = paginated("\(base)/pulls/\(status.number)/reviews")
         async let conversation = paginated("\(base)/issues/\(status.number)/comments")
+        async let resolution = reviewThreadResolution(repo: repo, number: status.number)
         let comments = try await parseFeedback(
             reviewComments: reviewComments,
             reviews: reviews,
             conversation: conversation)
         return PrFeedback(
-            number: status.number, title: status.title, url: status.url, comments: comments)
+            number: status.number, title: status.title, url: status.url, comments: comments,
+            resolvedRootIds: (try? await resolution) ?? [])
+    }
+
+    private func reviewThreadResolution(repo: GitHubRepo, number: Int) async throws -> Set<Int> {
+        var request = URLRequest(url: URL(string: "https://api.github.com/graphql")!)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "query": reviewThreadResolutionQuery,
+            "variables": ["owner": repo.owner, "name": repo.name, "number": number],
+        ])
+        let (data, response) = try await session.data(for: request)
+        try Self.checkStatus(response, data: data)
+        return try parseReviewThreadResolution(data)
     }
 
     /// Follow Link rel="next" and splice the page arrays — the same
@@ -144,6 +158,19 @@ final class GitHubClient {
         return nil
     }
 }
+
+/// Shared by the signed-in client and the gh fallback (`gh api graphql`).
+let reviewThreadResolutionQuery = """
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100) {
+            nodes { isResolved comments(first: 1) { nodes { databaseId } } }
+          }
+        }
+      }
+    }
+    """
 
 enum GitHubError: LocalizedError {
     case unauthorized

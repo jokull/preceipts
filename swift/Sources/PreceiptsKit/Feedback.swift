@@ -47,6 +47,7 @@ public struct FeedbackComment: Sendable, Equatable {
         CommentContext(
             path: path ?? "(conversation)",
             line: line ?? 0,
+            startLine: startLine,
             lineText: lineText,
             body: body,
             author: author)
@@ -58,12 +59,19 @@ public struct PrFeedback: Sendable {
     public let title: String
     public let url: String
     public let comments: [FeedbackComment]
+    /// Root comment ids of resolved review threads (GraphQL-only data;
+    /// empty when the transport couldn't fetch it).
+    public let resolvedRootIds: Set<Int>
 
-    public init(number: Int, title: String, url: String, comments: [FeedbackComment]) {
+    public init(
+        number: Int, title: String, url: String, comments: [FeedbackComment],
+        resolvedRootIds: Set<Int> = []
+    ) {
         self.number = number
         self.title = title
         self.url = url
         self.comments = comments
+        self.resolvedRootIds = resolvedRootIds
     }
 
     /// "Copy all" for whatever subset the UI filtered down to.
@@ -153,6 +161,31 @@ public func parseFeedback(
     }
 
     return out.sorted { $0.createdAt < $1.createdAt }
+}
+
+/// Root comment ids of resolved review threads, from the GraphQL
+/// `reviewThreads { isResolved comments(first: 1) { databaseId } }`
+/// response (REST has no resolution data). Transport-agnostic: both the
+/// signed-in client and `gh api graphql` return this exact shape.
+public func parseReviewThreadResolution(_ data: Data) throws -> Set<Int> {
+    guard
+        let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let repository = ((root["data"] as? [String: Any])?["repository"]) as? [String: Any],
+        let threads = (((repository["pullRequest"] as? [String: Any])?["reviewThreads"])
+            as? [String: Any])?["nodes"] as? [[String: Any]]
+    else {
+        return []
+    }
+    var resolved: Set<Int> = []
+    for thread in threads where thread["isResolved"] as? Bool == true {
+        if let comments = (thread["comments"] as? [String: Any])?["nodes"]
+            as? [[String: Any]],
+            let id = comments.first?["databaseId"] as? Int
+        {
+            resolved.insert(id)
+        }
+    }
+    return resolved
 }
 
 // ------------------------------------------------------------------

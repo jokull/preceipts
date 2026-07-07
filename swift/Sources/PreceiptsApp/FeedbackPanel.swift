@@ -39,7 +39,8 @@ enum FeedbackNavItem {
         case .draft(let draft):
             return [
                 CommentContext(
-                    path: draft.path, line: draft.line, lineText: draft.lineText,
+                    path: draft.path, line: draft.line, startLine: draft.startLine,
+                    lineText: draft.quote ?? draft.lineText,
                     body: draft.body, author: nil)
             ]
         }
@@ -63,13 +64,14 @@ final class FeedbackPanelViewController: NSViewController {
     private var feedback: PrFeedback?
     private var drafts: [LocalComment] = []
 
-    // Filters
-    private var authorFilter: AuthorFilter = .all
-    private var showOutdated = true
-
-    private enum AuthorFilter: Int {
-        case all, humans, bots
-    }
+    // Filters: author radio group + two visibility checkboxes. Resolved
+    // threads hide by default (they're settled); outdated show flagged.
+    private let authorControl = NSSegmentedControl(
+        labels: ["All", "Humans", "Bots"], trackingMode: .selectOne, target: nil, action: nil)
+    private let resolvedToggle = NSButton(
+        checkboxWithTitle: "Show resolved", target: nil, action: nil)
+    private let outdatedToggle = NSButton(
+        checkboxWithTitle: "Show outdated", target: nil, action: nil)
 
     // Outline model: groups of rows.
     private final class Group {
@@ -84,9 +86,11 @@ final class FeedbackPanelViewController: NSViewController {
     private final class Row {
         let item: FeedbackNavItem
         let outdated: Bool
-        init(item: FeedbackNavItem, outdated: Bool) {
+        let resolved: Bool
+        init(item: FeedbackNavItem, outdated: Bool, resolved: Bool) {
             self.item = item
             self.outdated = outdated
+            self.resolved = resolved
         }
     }
 
@@ -122,37 +126,40 @@ final class FeedbackPanelViewController: NSViewController {
         copyAll.action = #selector(copyAllClicked(_:))
         copyAll.toolTip = "Copy all visible comments as a by-file digest"
 
-        let filter = NSPopUpButton()
-        filter.pullsDown = true
-        filter.isBordered = false
-        filter.controlSize = .small
-        let filterMenu = NSMenu()
-        let iconItem = NSMenuItem()
-        iconItem.image = NSImage(
-            systemSymbolName: "line.3.horizontal.decrease.circle",
-            accessibilityDescription: "filter")
-        filterMenu.addItem(iconItem)  // pull-down title slot
-        for (title, tag) in [("All Authors", 0), ("Humans", 1), ("Bots", 2)] {
-            let item = NSMenuItem(
-                title: title, action: #selector(authorFilterChanged(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = tag
-            filterMenu.addItem(item)
-        }
-        filterMenu.addItem(.separator())
-        let outdatedItem = NSMenuItem(
-            title: "Show Outdated", action: #selector(toggleOutdated(_:)), keyEquivalent: "")
-        outdatedItem.target = self
-        filterMenu.addItem(outdatedItem)
-        filter.menu = filterMenu
-        filter.toolTip = "Filter feedback"
+        authorControl.selectedSegment = 0
+        authorControl.controlSize = .small
+        authorControl.segmentDistribution = .fillEqually
+        authorControl.target = self
+        authorControl.action = #selector(filtersChanged(_:))
 
-        let header = NSStackView(views: [prTitle, NSView(), filter, copyAll, refresh])
+        for toggle in [resolvedToggle, outdatedToggle] {
+            toggle.controlSize = .small
+            toggle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            toggle.target = self
+            toggle.action = #selector(filtersChanged(_:))
+        }
+        resolvedToggle.state = .off
+        resolvedToggle.toolTip = "Include threads resolved on GitHub"
+        outdatedToggle.state = .on
+        outdatedToggle.toolTip = "Include comments whose anchor no longer matches the diff"
+
+        let header = NSStackView(views: [prTitle, NSView(), copyAll, refresh])
         header.orientation = .horizontal
         header.spacing = Metrics.unit
         header.edgeInsets = NSEdgeInsets(
             top: Metrics.padding, left: Metrics.paddingWide,
             bottom: 0, right: Metrics.padding)
+
+        let toggles = NSStackView(views: [resolvedToggle, outdatedToggle, NSView()])
+        toggles.orientation = .horizontal
+        toggles.spacing = Metrics.paddingWide
+
+        let filters = NSStackView(views: [authorControl, toggles])
+        filters.orientation = .vertical
+        filters.alignment = .leading
+        filters.spacing = Metrics.unit + 2
+        filters.edgeInsets = NSEdgeInsets(
+            top: 0, left: Metrics.paddingWide, bottom: 0, right: Metrics.paddingWide)
 
         let column = NSTableColumn(identifier: .init("nav"))
         column.resizingMask = .autoresizingMask
@@ -184,7 +191,7 @@ final class FeedbackPanelViewController: NSViewController {
             top: 0, left: Metrics.paddingWide, bottom: Metrics.padding,
             right: Metrics.paddingWide)
 
-        let stack = NSStackView(views: [header, scroll, statusWrap])
+        let stack = NSStackView(views: [header, filters, scroll, statusWrap])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = Metrics.unit
@@ -192,6 +199,7 @@ final class FeedbackPanelViewController: NSViewController {
         self.view = stack
         NSLayoutConstraint.activate([
             header.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            filters.widthAnchor.constraint(equalTo: stack.widthAnchor),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             statusWrap.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
@@ -258,9 +266,9 @@ final class FeedbackPanelViewController: NSViewController {
         var conversation: [Row] = []
 
         for thread in FeedbackThread.group(feedback?.comments ?? []) {
-            switch authorFilter {
-            case .humans where thread.root.isBot: continue
-            case .bots where !thread.root.isBot: continue
+            switch authorControl.selectedSegment {
+            case 1 where thread.root.isBot: continue
+            case 2 where !thread.root.isBot: continue
             default: break
             }
             let item = FeedbackNavItem.thread(thread)
@@ -268,8 +276,10 @@ final class FeedbackPanelViewController: NSViewController {
                 thread.root.outdated
                 || (item.anchor != nil
                     && delegate?.feedbackPanel(self, anchorRowFor: item) == nil)
-            if outdated, !showOutdated { continue }
-            let row = Row(item: item, outdated: outdated)
+            if outdated, outdatedToggle.state == .off { continue }
+            let resolved = feedback?.resolvedRootIds.contains(thread.root.id) ?? false
+            if resolved, resolvedToggle.state == .off { continue }
+            let row = Row(item: item, outdated: outdated, resolved: resolved)
             if let path = thread.root.path {
                 fileGroups[path, default: []].append(row)
             } else {
@@ -286,7 +296,7 @@ final class FeedbackPanelViewController: NSViewController {
                         let item = FeedbackNavItem.draft(draft)
                         let outdated =
                             delegate?.feedbackPanel(self, anchorRowFor: item) == nil
-                        return Row(item: item, outdated: outdated)
+                        return Row(item: item, outdated: outdated, resolved: false)
                     }))
         }
         for path in fileGroups.keys.sorted() {
@@ -317,19 +327,7 @@ final class FeedbackPanelViewController: NSViewController {
         delegate?.feedbackPanelRequestsRefresh(self)
     }
 
-    @objc private func authorFilterChanged(_ sender: NSMenuItem) {
-        authorFilter = AuthorFilter(rawValue: sender.tag) ?? .all
-        sender.menu?.items.forEach { item in
-            if item.action == #selector(authorFilterChanged(_:)) {
-                item.state = item.tag == sender.tag ? .on : .off
-            }
-        }
-        rebuild()
-    }
-
-    @objc private func toggleOutdated(_ sender: NSMenuItem) {
-        showOutdated.toggle()
-        sender.state = showOutdated ? .on : .off
+    @objc private func filtersChanged(_ sender: Any?) {
         rebuild()
     }
 
@@ -424,7 +422,7 @@ extension FeedbackPanelViewController: NSOutlineViewDataSource, NSOutlineViewDel
         let cell =
             outline.makeView(withIdentifier: identifier, owner: nil) as? FeedbackNavCellView
             ?? FeedbackNavCellView(identifier: identifier)
-        cell.configure(row.item, outdated: row.outdated)
+        cell.configure(row.item, outdated: row.outdated, resolved: row.resolved)
         return cell
     }
 
@@ -477,7 +475,7 @@ private final class FeedbackNavCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func configure(_ item: FeedbackNavItem, outdated: Bool) {
+    func configure(_ item: FeedbackNavItem, outdated: Bool, resolved: Bool) {
         switch item {
         case .draft(let draft):
             icon.image = NSImage(
@@ -507,7 +505,15 @@ private final class FeedbackNavCellView: NSTableCellView {
             if let state = thread.root.state, !state.isEmpty {
                 parts.append(state.lowercased().replacingOccurrences(of: "_", with: " "))
             }
+            if resolved {
+                parts.append("resolved")
+            }
             detail.stringValue = parts.joined(separator: "  ")
+            if resolved {
+                icon.image = NSImage(
+                    systemSymbolName: "checkmark.circle", accessibilityDescription: "resolved")
+                icon.contentTintColor = .systemGreen
+            }
         }
         detail.textColor = outdated ? .systemOrange : .secondaryLabelColor
         toolTip = firstLine(item.contexts.first?.body ?? "")

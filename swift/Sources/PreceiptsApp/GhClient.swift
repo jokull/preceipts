@@ -33,7 +33,10 @@ final class GhClient {
 
     /// Fetch feedback for the PR associated with the current branch.
     /// Completion on the main thread. No-ops when a fetch is in flight.
-    func fetchFeedback(completion: @escaping (Result<PrFeedback, Error>) -> Void) {
+    /// `repo` enables the review-thread resolution lookup (GraphQL).
+    func fetchFeedback(
+        repo: GitHubRepo?, completion: @escaping (Result<PrFeedback, Error>) -> Void
+    ) {
         guard let binary else {
             completion(.failure(GhError.notInstalled))
             return
@@ -42,7 +45,7 @@ final class GhClient {
         fetchInFlight = true
         let workdir = workdir
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let result = Result { try Self.fetch(binary: binary, workdir: workdir) }
+            let result = Result { try Self.fetch(binary: binary, workdir: workdir, repo: repo) }
             DispatchQueue.main.async {
                 self?.fetchInFlight = false
                 completion(result)
@@ -50,7 +53,7 @@ final class GhClient {
         }
     }
 
-    private static func fetch(binary: URL, workdir: URL) throws -> PrFeedback {
+    private static func fetch(binary: URL, workdir: URL, repo: GitHubRepo?) throws -> PrFeedback {
         let view = try run(
             binary: binary, workdir: workdir,
             arguments: ["pr", "view", "--json", "number,title,url"])
@@ -74,7 +77,25 @@ final class GhClient {
             reviewComments: normalizeSeams(try api("pulls/\(number)/comments")),
             reviews: normalizeSeams(try api("pulls/\(number)/reviews")),
             conversation: normalizeSeams(try api("issues/\(number)/comments")))
-        return PrFeedback(number: number, title: title, url: url, comments: comments)
+
+        // Resolution is GraphQL-only; best-effort, empty on any failure.
+        var resolved: Set<Int> = []
+        if let repo,
+            let data = try? run(
+                binary: binary, workdir: workdir,
+                arguments: [
+                    "api", "graphql",
+                    "-f", "query=\(reviewThreadResolutionQuery)",
+                    "-F", "owner=\(repo.owner)",
+                    "-F", "name=\(repo.name)",
+                    "-F", "number=\(number)",
+                ])
+        {
+            resolved = (try? parseReviewThreadResolution(data)) ?? []
+        }
+        return PrFeedback(
+            number: number, title: title, url: url, comments: comments,
+            resolvedRootIds: resolved)
     }
 
     /// PR association for the current branch — the signed-out titlebar

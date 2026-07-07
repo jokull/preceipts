@@ -28,6 +28,24 @@ final class CommentFormatTests: XCTestCase {
         XCTAssertEqual(text, "a.ts:1\nnote\n")
     }
 
+    func testFormatMultiLineRangeQuotesEveryLine() {
+        let text = formatComment(
+            CommentContext(
+                path: "a.ts", line: 107, startLine: 104,
+                lineText: "for (const x of xs) {\n  total += x\n}",
+                body: "move to reducer", author: nil))
+        XCTAssertEqual(
+            text,
+            """
+            a.ts:104\u{2013}107
+            > for (const x of xs) {
+            >   total += x
+            > }
+            move to reducer
+
+            """)
+    }
+
     func testDigestGroupsByFile() {
         let digest = formatDigest([
             CommentContext(path: "b.ts", line: 2, lineText: "y", body: "second", author: nil),
@@ -100,6 +118,27 @@ final class CommentStoreTests: XCTestCase {
         XCTAssertTrue(digest.contains("## src/hot.swift"))
         XCTAssertTrue(digest.contains("src/hot.swift:88"))
         XCTAssertTrue(digest.contains("> for x in xs {"))
+    }
+
+    func testMultiLineDraftDigestQuotesTheBlock() throws {
+        let gitDir = try makeGitDir()
+        defer { try? FileManager.default.removeItem(at: gitDir) }
+        let store = try CommentStore(gitDir: gitDir, branch: "b")
+        try store.add(
+            path: "a.tsx", line: 107, startLine: 104, side: .new,
+            lineText: "}",
+            quote: "function f() {\n  work()\n}",
+            body: "extract this")
+        let digest = store.digest()
+        XCTAssertTrue(digest.contains("a.tsx:104\u{2013}107"))
+        XCTAssertTrue(digest.contains("> function f() {"))
+        XCTAssertTrue(digest.contains(">   work()"))
+        XCTAssertTrue(digest.contains("> }"))
+
+        // And the quote survives a store reopen.
+        let reopened = try CommentStore(gitDir: gitDir, branch: "b")
+        XCTAssertEqual(reopened.comments[0].quote, "function f() {\n  work()\n}")
+        XCTAssertEqual(reopened.comments[0].lineRange, 104...107)
     }
 }
 
@@ -235,6 +274,19 @@ final class FeedbackParseTests: XCTestCase {
             reviewComments: empty, reviews: reviews, conversation: conversation)
         XCTAssertEqual(comments.map(\.author), ["a", "z"])
         XCTAssertEqual(comments[1].kind, .conversation)
+    }
+
+    func testParseReviewThreadResolution() throws {
+        let json = Data(
+            """
+            {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+              {"isResolved": true, "comments": {"nodes": [{"databaseId": 11}]}},
+              {"isResolved": false, "comments": {"nodes": [{"databaseId": 22}]}},
+              {"isResolved": true, "comments": {"nodes": [{"databaseId": 33}]}}
+            ]}}}}}
+            """.utf8)
+        XCTAssertEqual(try parseReviewThreadResolution(json), [11, 33])
+        XCTAssertEqual(try parseReviewThreadResolution(Data("{}".utf8)), [])
     }
 
     func testLastHunkLineTrailingNewline() {

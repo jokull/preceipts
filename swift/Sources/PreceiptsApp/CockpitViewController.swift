@@ -317,7 +317,7 @@ final class CockpitViewController: NSSplitViewController {
                 "Sign in to GitHub in Settings (\u{2318},) \u{2014} or install the gh CLI")
             return
         }
-        gh.fetchFeedback { [weak self] result in
+        gh.fetchFeedback(repo: changeset?.githubRepo) { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let feedback):
@@ -428,11 +428,11 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
     func surface(
         _ surface: SurfaceViewController,
         addDraft path: String, line: Int, startLine: Int?, side: CommentSide,
-        lineText: String, body: String
+        lineText: String, quote: String?, body: String
     ) {
         try? commentStore?.add(
             path: path, line: line, startLine: startLine, side: side,
-            lineText: lineText, body: body)
+            lineText: lineText, quote: quote, body: body)
         refreshFeedbackViews()
     }
 
