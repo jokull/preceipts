@@ -1,8 +1,22 @@
-// v0 theme: One Dark-adjacent, matching the GPUI prototype. System
-// appearance adaptation comes with the design pass.
+// Two regimes (docs/modern-macos-feel.md): the diff surface keeps its own
+// One Dark palette (content is ours); all chrome — sidebar, toolbar,
+// statusbar, find bar — uses semantic system colors so it tracks
+// light/dark/accent and Tahoe materials.
 
 import AppKit
 import PreceiptsKit
+
+/// Chrome layout tokens — 4pt grid, no arbitrary values inline.
+enum Metrics {
+    static let unit: CGFloat = 4
+    static let padding: CGFloat = 8
+    static let paddingWide: CGFloat = 12
+    static let statusBarHeight: CGFloat = 28
+    static let findBarHeight: CGFloat = 36
+    static let sidebarMinWidth: CGFloat = 200
+    static let sidebarInitialWidth: CGFloat = 260
+    static let surfaceMinWidth: CGFloat = 480
+}
 
 enum Theme {
     static let bg = NSColor(srgbRed: 0.118, green: 0.133, blue: 0.153, alpha: 1)

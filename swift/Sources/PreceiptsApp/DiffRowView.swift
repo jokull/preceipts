@@ -6,15 +6,12 @@
 import AppKit
 import PreceiptsKit
 
-enum SurfaceRow {
-    case fileHeader(file: Int)
-    case gap(skipped: Int)
-    case line(file: Int, hunk: Int, row: Int)
-}
-
 final class DiffRowView: NSView {
     var surfaceRow: SurfaceRow?
     var changeset: Changeset?
+    /// Active ⌘F query — occurrences get a highlight background.
+    var findQuery: String?
+    var isCurrentFindMatch = false
 
     override var isFlipped: Bool { true }
 
@@ -88,7 +85,32 @@ final class DiffRowView: NSView {
                     attributes: [.font: Theme.font, .foregroundColor: Theme.fgMuted]
                 ))
         }
+        applyFindHighlight(text)
         drawText(text, x: 12)
+    }
+
+    /// Paint ⌘F occurrences over an already-composed row string. Character
+    /// content matches the source text, so NSString range search lines up.
+    private func applyFindHighlight(_ text: NSMutableAttributedString) {
+        guard let findQuery, !findQuery.isEmpty else { return }
+        let haystack = text.string as NSString
+        var searchRange = NSRange(location: 0, length: haystack.length)
+        while searchRange.length > 0 {
+            let found = haystack.range(of: findQuery, options: [.caseInsensitive], range: searchRange)
+            guard found.location != NSNotFound else { break }
+            if isCurrentFindMatch {
+                text.addAttributes(
+                    [.backgroundColor: NSColor.findHighlightColor, .foregroundColor: NSColor.black],
+                    range: found)
+            } else {
+                text.addAttribute(
+                    .backgroundColor,
+                    value: NSColor.findHighlightColor.withAlphaComponent(0.35),
+                    range: found)
+            }
+            let next = found.location + found.length
+            searchRange = NSRange(location: next, length: haystack.length - next)
+        }
     }
 
     private func drawGap(_ skipped: Int) {
@@ -149,6 +171,7 @@ final class DiffRowView: NSView {
             }
             text.append(NSAttributedString(string: segment.text, attributes: attributes))
         }
+        applyFindHighlight(text)
         let textRect = NSRect(
             x: rect.minX + Self.gutterWidth,
             y: 0,

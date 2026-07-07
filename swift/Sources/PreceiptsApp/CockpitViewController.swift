@@ -1,24 +1,24 @@
-// The cockpit: file sidebar + one scroll surface + statusbar. State and
-// loading discipline (single-flight coalesced reloads) live here.
+// The cockpit brain: owns repo state and the single-flight coalesced
+// reload discipline (the TUI storm lesson), splits into the file-tree
+// sidebar and the diff surface, and carries the window toolbar (scope
+// control, reload). Standard chrome primitives → Tahoe treatment for free.
 
 import AppKit
 import PreceiptsKit
 
-final class CockpitViewController: NSViewController {
+final class CockpitViewController: NSSplitViewController {
     private let repo: URL
     private var scope: DiffScope = .branch
     private var changeset: Changeset?
-    private var surface: [SurfaceRow] = []
-    private var fileAnchors: [Int] = []
+    private var surface: Surface = .empty
 
     private var reloadInFlight = false
     private var reloadQueued = false
     private var watcher: Watcher?
 
-    private let sidebarTable = NSTableView()
-    private let surfaceTable = NSTableView()
-    private let statusLeft = NSTextField(labelWithString: "loading\u{2026}")
-    private let statusRight = NSTextField(labelWithString: "")
+    private let sidebar = SidebarViewController()
+    private let content = SurfaceViewController()
+    private var scopeControl: NSSegmentedControl?
 
     init(repo: URL) {
         self.repo = repo
@@ -27,119 +27,101 @@ final class CockpitViewController: NSViewController {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    // ------------------------------------------------------------------
-    // View construction
-
-    override func loadView() {
-        let root = NSView()
-        root.wantsLayer = true
-        root.layer?.backgroundColor = Theme.bg.cgColor
-
-        let sidebarScroll = makeTable(
-            sidebarTable, identifier: "files", delegate: self, dataSource: self)
-        sidebarTable.action = #selector(sidebarClicked(_:))
-        sidebarTable.target = self
-        sidebarScroll.hasVerticalScroller = true
-
-        let surfaceScroll = makeTable(
-            surfaceTable, identifier: "surface", delegate: self, dataSource: self)
-        surfaceScroll.hasVerticalScroller = true
-
-        let split = NSSplitView()
-        split.isVertical = true
-        split.dividerStyle = .thin
-        split.addArrangedSubview(sidebarScroll)
-        split.addArrangedSubview(surfaceScroll)
-        split.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
-
-        let statusBar = NSView()
-        statusBar.wantsLayer = true
-        statusBar.layer?.backgroundColor = Theme.bgPanel.cgColor
-        for label in [statusLeft, statusRight] {
-            label.font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
-            label.textColor = Theme.fgMuted
-            label.lineBreakMode = .byTruncatingTail
-            label.translatesAutoresizingMaskIntoConstraints = false
-            statusBar.addSubview(label)
-        }
-        statusLeft.textColor = Theme.accent
-
-        split.translatesAutoresizingMaskIntoConstraints = false
-        statusBar.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(split)
-        root.addSubview(statusBar)
-
-        NSLayoutConstraint.activate([
-            split.topAnchor.constraint(equalTo: root.topAnchor),
-            split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            split.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            split.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
-            statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            statusBar.heightAnchor.constraint(equalToConstant: 24),
-            statusLeft.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 10),
-            statusLeft.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
-            statusRight.trailingAnchor.constraint(
-                equalTo: statusBar.trailingAnchor, constant: -10),
-            statusRight.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
-            statusLeft.trailingAnchor.constraint(
-                lessThanOrEqualTo: statusRight.leadingAnchor, constant: -12),
-        ])
-
-        self.view = root
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let split = self.view.subviews.first as? NSSplitView else { return }
-            split.setPosition(260, ofDividerAt: 0)
-        }
-    }
-
-    private func makeTable(
-        _ table: NSTableView,
-        identifier: String,
-        delegate: NSTableViewDelegate,
-        dataSource: NSTableViewDataSource
-    ) -> NSScrollView {
-        let column = NSTableColumn(
-            identifier: NSUserInterfaceItemIdentifier(rawValue: identifier))
-        column.resizingMask = .autoresizingMask
-        table.addTableColumn(column)
-        table.headerView = nil
-        table.rowHeight = Theme.rowHeight
-        table.intercellSpacing = .zero
-        table.backgroundColor = identifier == "files" ? Theme.bgPanel : Theme.bg
-        table.selectionHighlightStyle = .regular
-        table.style = .plain
-        table.delegate = delegate
-        table.dataSource = dataSource
-        table.allowsEmptySelection = true
-
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.drawsBackground = true
-        scroll.backgroundColor = table.backgroundColor
-        // The column tracks the table width so rows always fill.
-        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        column.width = 800
-        return scroll
-    }
-
     override func viewDidLoad() {
         super.viewDidLoad()
+        splitView.autosaveName = "PreceiptsCockpitSplit"
+
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        sidebarItem.minimumThickness = Metrics.sidebarMinWidth
+        sidebarItem.preferredThicknessFraction = 0.2
+        addSplitViewItem(sidebarItem)
+
+        let contentItem = NSSplitViewItem(viewController: content)
+        contentItem.minimumThickness = Metrics.surfaceMinWidth
+        addSplitViewItem(contentItem)
+
+        sidebar.delegate = self
+        content.delegate = self
+
         requestReload()
     }
 
     // ------------------------------------------------------------------
-    // Loading (single-flight, coalesced — the TUI storm lesson)
+    // Toolbar
+
+    private enum ToolbarID {
+        static let scope = NSToolbarItem.Identifier("preceipts.scope")
+        static let reload = NSToolbarItem.Identifier("preceipts.reload")
+    }
+
+    func makeToolbar() -> NSToolbar {
+        let toolbar = NSToolbar(identifier: "preceipts.main")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        return toolbar
+    }
+
+    // ------------------------------------------------------------------
+    // Actions (responder chain targets for menus + toolbar)
 
     @objc func reload(_ sender: Any?) {
         requestReload()
     }
 
     @objc func toggleScope(_ sender: Any?) {
-        scope = scope == .branch ? .uncommitted : .branch
+        setScope(scope == .branch ? .uncommitted : .branch)
+    }
+
+    @objc func selectBranchScope(_ sender: Any?) {
+        setScope(.branch)
+    }
+
+    @objc func selectUncommittedScope(_ sender: Any?) {
+        setScope(.uncommitted)
+    }
+
+    @objc private func scopeControlChanged(_ sender: NSSegmentedControl) {
+        setScope(sender.selectedSegment == 0 ? .branch : .uncommitted)
+    }
+
+    private func setScope(_ newScope: DiffScope) {
+        guard scope != newScope else { return }
+        scope = newScope
+        scopeControl?.selectedSegment = newScope == .branch ? 0 : 1
         requestReload()
     }
+
+    @objc func openFind(_ sender: Any?) {
+        content.openFind()
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        content.findNext()
+    }
+
+    @objc func findPrevious(_ sender: Any?) {
+        content.findPrevious()
+    }
+
+    @objc func nextFile(_ sender: Any?) {
+        content.stepFile(1)
+    }
+
+    @objc func previousFile(_ sender: Any?) {
+        content.stepFile(-1)
+    }
+
+    @objc func nextHunk(_ sender: Any?) {
+        content.stepHunk(1)
+    }
+
+    @objc func previousHunk(_ sender: Any?) {
+        content.stepHunk(-1)
+    }
+
+    // ------------------------------------------------------------------
+    // Loading (single-flight, coalesced)
 
     private func requestReload() {
         if reloadInFlight {
@@ -167,30 +149,13 @@ final class CockpitViewController: NSViewController {
         switch result {
         case .success(let changeset):
             self.changeset = changeset
-            rebuildSurface(changeset)
+            surface = Surface.build(changeset)
             ensureWatcher(changeset)
-            sidebarTable.reloadData()
-            surfaceTable.reloadData()
-            updateStatusBar(changeset)
+            content.show(changeset: changeset, surface: surface)
+            sidebar.show(tree: FileTree.build(changeset.files))
+            updateWindowTitle(changeset)
         case .failure(let error):
-            statusLeft.stringValue = error.localizedDescription
-        }
-    }
-
-    private func rebuildSurface(_ changeset: Changeset) {
-        surface.removeAll()
-        fileAnchors.removeAll()
-        for (fileIndex, file) in changeset.files.enumerated() {
-            fileAnchors.append(surface.count)
-            surface.append(.fileHeader(file: fileIndex))
-            for (hunkIndex, hunk) in file.hunks.enumerated() {
-                if hunk.skippedBefore > 0 {
-                    surface.append(.gap(skipped: hunk.skippedBefore))
-                }
-                for rowIndex in hunk.rows.indices {
-                    surface.append(.line(file: fileIndex, hunk: hunkIndex, row: rowIndex))
-                }
-            }
+            content.showError(error.localizedDescription)
         }
     }
 
@@ -201,96 +166,72 @@ final class CockpitViewController: NSViewController {
         }
     }
 
-    private func updateStatusBar(_ changeset: Changeset) {
-        let scopeLabel: String
-        switch changeset.scope {
-        case .branch: scopeLabel = "Branch diff: \(changeset.baseName)"
-        case .uncommitted: scopeLabel = "Uncommitted"
-        }
-        statusLeft.stringValue = "\(scopeLabel)   \(changeset.branch ?? "(detached)")"
-        statusRight.stringValue =
-            "\(changeset.files.count) files  +\(changeset.totalAdded) \u{2212}\(changeset.totalRemoved)   \u{2318}\u{21e7}D scope"
-    }
-
-    @objc private func sidebarClicked(_ sender: Any?) {
-        let row = sidebarTable.clickedRow
-        guard row >= 0, row < fileAnchors.count else { return }
-        surfaceTable.scrollRowToVisible(fileAnchors[row])
-        // Put the header at the top when there's room below.
-        if let scroll = surfaceTable.enclosingScrollView {
-            let y = CGFloat(fileAnchors[row]) * (Theme.rowHeight)
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
-            scroll.reflectScrolledClipView(scroll.contentView)
-        }
+    private func updateWindowTitle(_ changeset: Changeset) {
+        guard let window = view.window else { return }
+        window.title = repo.lastPathComponent
+        window.subtitle = changeset.branch ?? "detached HEAD"
     }
 }
 
 // ------------------------------------------------------------------
-// Tables
+// Sidebar ⇄ surface (two views of one model)
 
-extension CockpitViewController: NSTableViewDataSource, NSTableViewDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView === sidebarTable {
-            return changeset?.files.count ?? 0
+extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
+    func sidebar(_ sidebar: SidebarViewController, didSelectFile fileIndex: Int) {
+        content.scrollToFile(fileIndex)
+    }
+
+    func surface(_ surface: SurfaceViewController, didScrollToFile fileIndex: Int) {
+        sidebar.highlight(fileIndex: fileIndex)
+    }
+}
+
+// ------------------------------------------------------------------
+// Toolbar delegate
+
+extension CockpitViewController: NSToolbarDelegate {
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [
+            .toggleSidebar, .sidebarTrackingSeparator, ToolbarID.scope, .flexibleSpace,
+            ToolbarID.reload,
+        ]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(
+        _ toolbar: NSToolbar,
+        itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
+        willBeInsertedIntoToolbar flag: Bool
+    ) -> NSToolbarItem? {
+        switch itemIdentifier {
+        case ToolbarID.scope:
+            let control = NSSegmentedControl(
+                labels: ["Branch diff", "Uncommitted"],
+                trackingMode: .selectOne,
+                target: self,
+                action: #selector(scopeControlChanged(_:)))
+            control.selectedSegment = scope == .branch ? 0 : 1
+            scopeControl = control
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.view = control
+            item.label = "Scope"
+            item.toolTip = "Diff scope (\u{2318}\u{21e7}D)"
+            return item
+        case ToolbarID.reload:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.image = NSImage(
+                systemSymbolName: "arrow.clockwise", accessibilityDescription: "reload")
+            item.label = "Reload"
+            item.toolTip = "Reload the diff (\u{2318}R)"
+            item.isBordered = true
+            item.target = self
+            item.action = #selector(reload(_:))
+            return item
+        default:
+            return nil
         }
-        return surface.count
-    }
-
-    func tableView(
-        _ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int
-    ) -> NSView? {
-        if tableView === sidebarTable {
-            return sidebarCell(row: row)
-        }
-        return surfaceCell(row: row)
-    }
-
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        tableView === sidebarTable
-    }
-
-    private func sidebarCell(row: Int) -> NSView? {
-        guard let file = changeset?.files[row] else { return nil }
-        let identifier = NSUserInterfaceItemIdentifier("file-cell")
-        let cell =
-            sidebarTable.makeView(withIdentifier: identifier, owner: nil) as? NSTextField
-            ?? {
-                let field = NSTextField(labelWithString: "")
-                field.identifier = identifier
-                field.font = Theme.font
-                field.lineBreakMode = .byTruncatingHead
-                return field
-            }()
-        let text = NSMutableAttributedString()
-        text.append(
-            NSAttributedString(
-                string: " \(file.status.rawValue) ",
-                attributes: [
-                    .font: Theme.font,
-                    .foregroundColor: Theme.statusColor(file.status.rawValue),
-                ]
-            ))
-        text.append(
-            NSAttributedString(
-                string: file.path,
-                attributes: [.font: Theme.font, .foregroundColor: Theme.fg]
-            ))
-        cell.attributedStringValue = text
-        return cell
-    }
-
-    private func surfaceCell(row: Int) -> NSView? {
-        let identifier = NSUserInterfaceItemIdentifier("diff-row")
-        let cell =
-            surfaceTable.makeView(withIdentifier: identifier, owner: nil) as? DiffRowView
-            ?? {
-                let view = DiffRowView()
-                view.identifier = identifier
-                return view
-            }()
-        cell.surfaceRow = surface[row]
-        cell.changeset = changeset
-        cell.needsDisplay = true
-        return cell
     }
 }

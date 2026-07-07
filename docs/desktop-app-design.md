@@ -224,8 +224,10 @@ feedback panel, draft comments) — read them with
 Sequencing from here: 1) ~~tree-sitter highlighting~~ **done** (raw C
 API; per-file parallel in the loader; 512KB cap so generated giants
 render plain; same-node precedence verified against the Rust reference)
-· 2) ⌘F find
-+ NSOutlineView file tree + sticky headers · 3) engine integration
+· 2) ~~⌘F find + NSOutlineView file tree + sticky headers + modern
+chrome~~ **done** (NSSplitViewController sidebar, unified toolbar,
+semantic chrome colors, SF Symbols; Surface/FileTree/FindMatcher live
+in the Kit with tests) · 3) engine integration
 (receipts panel, statusbar HUD chips via `hud --json` / `run --events`)
 · 4) feedback viewer + draft comments port (models exist in the Rust
 reference) · 5) GitHub OAuth + Keychain · 6) app bundle, icon, vendored

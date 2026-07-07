@@ -63,10 +63,11 @@ default branch `preceipts`). Everything committed and pushed.
 ## Next work (design-doc sequencing)
 
 1. ~~tree-sitter highlighting~~ **done**.
-2. ⌘F find + NSOutlineView file tree + sticky file headers — while
-   adopting the modern-macos-feel.md chrome recommendations
-   (NSSplitViewController sidebar, NSToolbar, semantic colors for
-   chrome, SF Symbols).
+2. ~~⌘F find + NSOutlineView file tree + sticky file headers + modern
+   chrome (NSSplitViewController sidebar, unified NSToolbar, semantic
+   chrome colors, SF Symbols)~~ **done 2026-07-07**. Surface/FileTree/
+   FindMatcher are Kit models with tests; chrome is semantic, the diff
+   surface keeps One Dark (two-regime split per modern-macos-feel.md).
 3. Engine integration: statusbar HUD chips (`preceipts-engine hud
    --json`), receipts panel (`run --events` NDJSON), single-flight
    discipline (already the pattern in CockpitViewController).

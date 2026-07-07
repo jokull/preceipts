@@ -21,6 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = repo.lastPathComponent
         window.subtitle = "preceipts"
         window.contentViewController = cockpit
+        window.toolbarStyle = .unified
+        window.toolbar = cockpit.makeToolbar()
         window.center()
         window.setFrameAutosaveName("PreceiptsMainWindow")
         window.makeKeyAndOrderFront(nil)
@@ -33,43 +35,124 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    // ------------------------------------------------------------------
+    // Menus — every binding lives here so it's discoverable and
+    // remappable the macOS way (docs/desktop-app-design.md keyboard map).
+
     private func buildMenu() {
         let mainMenu = NSMenu()
+        mainMenu.addItem(appMenuItem())
+        mainMenu.addItem(editMenuItem())
+        mainMenu.addItem(viewMenuItem())
+        mainMenu.addItem(goMenuItem())
+        NSApp.mainMenu = mainMenu
+    }
 
-        let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu()
-        appMenu.addItem(
+    private func appMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu()
+        menu.addItem(
             withTitle: "About preceipts",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
-            keyEquivalent: ""
-        )
-        appMenu.addItem(.separator())
-        appMenu.addItem(
+            keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(
             withTitle: "Quit preceipts",
             action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        )
-        appMenuItem.submenu = appMenu
-        mainMenu.addItem(appMenuItem)
+            keyEquivalent: "q")
+        item.submenu = menu
+        return item
+    }
 
-        let viewMenuItem = NSMenuItem()
-        let viewMenu = NSMenu(title: "View")
-        let scopeItem = NSMenuItem(
+    private func editMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Edit")
+        // Standard text actions so the find field behaves like a Mac field.
+        menu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        menu.addItem(
+            withTitle: "Select All",
+            action: #selector(NSText.selectAll(_:)),
+            keyEquivalent: "a")
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: "Find\u{2026}",
+            action: #selector(CockpitViewController.openFind(_:)),
+            keyEquivalent: "f")
+        menu.addItem(
+            withTitle: "Find Next",
+            action: #selector(CockpitViewController.findNext(_:)),
+            keyEquivalent: "g")
+        let previous = NSMenuItem(
+            title: "Find Previous",
+            action: #selector(CockpitViewController.findPrevious(_:)),
+            keyEquivalent: "g")
+        previous.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(previous)
+        item.submenu = menu
+        return item
+    }
+
+    private func viewMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "View")
+        menu.addItem(
+            withTitle: "Toggle Sidebar",
+            action: #selector(NSSplitViewController.toggleSidebar(_:)),
+            keyEquivalent: "b")
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: "Branch Diff",
+            action: #selector(CockpitViewController.selectBranchScope(_:)),
+            keyEquivalent: "1")
+        menu.addItem(
+            withTitle: "Uncommitted",
+            action: #selector(CockpitViewController.selectUncommittedScope(_:)),
+            keyEquivalent: "2")
+        let toggleScope = NSMenuItem(
             title: "Toggle Diff Scope",
             action: #selector(CockpitViewController.toggleScope(_:)),
-            keyEquivalent: "d"
-        )
-        scopeItem.keyEquivalentModifierMask = [.command, .shift]
-        viewMenu.addItem(scopeItem)
-        let reloadItem = NSMenuItem(
-            title: "Reload",
+            keyEquivalent: "d")
+        toggleScope.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(toggleScope)
+        menu.addItem(.separator())
+        menu.addItem(
+            withTitle: "Reload",
             action: #selector(CockpitViewController.reload(_:)),
-            keyEquivalent: "r"
-        )
-        viewMenu.addItem(reloadItem)
-        viewMenuItem.submenu = viewMenu
-        mainMenu.addItem(viewMenuItem)
+            keyEquivalent: "r")
+        item.submenu = menu
+        return item
+    }
 
-        NSApp.mainMenu = mainMenu
+    private func goMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Go")
+        let bindings:
+            [(String, Selector, String, NSEvent.ModifierFlags)] = [
+                (
+                    "Next File", #selector(CockpitViewController.nextFile(_:)),
+                    "\u{F701}", [.command, .control]
+                ),
+                (
+                    "Previous File", #selector(CockpitViewController.previousFile(_:)),
+                    "\u{F700}", [.command, .control]
+                ),
+                (
+                    "Next Hunk", #selector(CockpitViewController.nextHunk(_:)),
+                    "\u{F701}", [.option]
+                ),
+                (
+                    "Previous Hunk", #selector(CockpitViewController.previousHunk(_:)),
+                    "\u{F700}", [.option]
+                ),
+            ]
+        for (title, action, key, modifiers) in bindings {
+            let entry = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            entry.keyEquivalentModifierMask = modifiers
+            menu.addItem(entry)
+        }
+        item.submenu = menu
+        return item
     }
 }
