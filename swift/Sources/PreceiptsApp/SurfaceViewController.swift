@@ -8,12 +8,24 @@ import SwiftUI
 
 protocol SurfaceDelegate: AnyObject {
     func surface(_ surface: SurfaceViewController, didScrollToFile fileIndex: Int)
-    func surface(
-        _ surface: SurfaceViewController,
-        addDraft path: String, line: Int, startLine: Int?, side: CommentSide,
-        lineText: String, quote: String?, body: String)
-    /// Double-click on a row with a comment badge — open its thread.
+    /// Drag-release / double-click / ⌘⇧M on a line range — open the tear
+    /// in compose mode for this anchor.
+    func surface(_ surface: SurfaceViewController, composeFor anchor: DraftAnchor)
+    /// Double-click on a row with an anchored thread — open it.
     func surface(_ surface: SurfaceViewController, openThreadAtRow row: Int)
+}
+
+/// What a composed comment anchors to: contiguous line rows of one file,
+/// end line + optional start line, new side preferred.
+struct DraftAnchor {
+    let path: String
+    let line: Int
+    let startLine: Int?
+    let side: CommentSide
+    let lineText: String
+    /// Full selected block (this side's lines), for the clipboard.
+    let quote: String?
+    let rows: ClosedRange<Int>
 }
 
 final class SurfaceViewController: NSViewController {
@@ -42,24 +54,22 @@ final class SurfaceViewController: NSViewController {
     private var findIndexGeneration = 0
     private var pendingFindQuery: String?
 
-    /// Surface row → number of comments anchored there (drafts + GitHub).
+    /// Surface row → number of comments anchored there (drafts + GitHub);
+    /// not drawn — routes double-clicks to threads. Discovery lives in
+    /// the file tree bubbles and the navigator.
     private var commentBadges: [Int: Int] = [:]
-    private var composePopover: NSPopover?
-    /// Live claw while drag-selecting a range or composing — takes
-    /// precedence over the open thread's claw.
+    /// Live claw while drag-selecting a range — previews the would-be
+    /// comment anchor; outranks the open tear's claw.
     private var previewClaw: (rows: ClosedRange<Int>, side: CommentSide)?
     private var dragSelecting = false
 
-    /// The open thread. Anchored threads tear the diff open below their
-    /// range (full-width inline conversation + claw); unanchored ones
-    /// (reviews, conversation comments) use a floating card pinned under
-    /// the toolbar. One thread at a time.
-    private let threadCard = ThreadCardView()
+    /// The thread area: one tear at a time. Anchored threads tear below
+    /// their range; the PR conversation tears in above the first file
+    /// (afterSurfaceRow == -1).
     private let tearView = ThreadTearView()
     private var tear: (afterSurfaceRow: Int, height: CGFloat)?
     private var threadOpen = false
     private var threadAnchor: (rows: ClosedRange<Int>, side: CommentSide)?
-    private var threadCardHeight: CGFloat = 0
     var onThreadDismissed: (() -> Void)?
 
     // ------------------------------------------------------------------
@@ -143,12 +153,9 @@ final class SurfaceViewController: NSViewController {
         ])
         stickyHeader.isHidden = true
         ticks.isHidden = true
-        threadCard.isHidden = true
-        threadCard.onClose = { [weak self] in self?.dismissThread(notify: true) }
         tearView.onClose = { [weak self] in self?.dismissThread(notify: true) }
         container.clipsToBounds = true
         container.addSubview(stickyHeader)
-        container.addSubview(threadCard)
         container.addSubview(ticks)
 
         let statusBar = makeStatusBar()
@@ -306,19 +313,7 @@ final class SurfaceViewController: NSViewController {
         } else {
             stickyHeader.isHidden = true
         }
-        layoutThreadCard()
         layoutTicks()
-    }
-
-    /// Unanchored threads only (reviews/conversation): a card pinned
-    /// under the sticky header. Anchored threads tear the diff instead.
-    private func layoutThreadCard() {
-        guard threadOpen, tear == nil else { return }
-        threadCard.frame = NSRect(
-            x: scroll.frame.width - ThreadCardView.width - 24,
-            y: rowHeight + Metrics.unit,
-            width: ThreadCardView.width,
-            height: threadCardHeight)
     }
 
     private func layoutTicks() {
@@ -389,35 +384,38 @@ final class SurfaceViewController: NSViewController {
     }
 
     // ------------------------------------------------------------------
-    // Open thread (one conversation at a time)
+    // The thread area (one tear at a time)
 
-    /// Anchored: tear the diff open below `anchorRows` with a full-width
-    /// conversation, claw around the range. Unanchored: floating card.
-    func presentThread(
-        _ model: ThreadCardModel, anchorRows: ClosedRange<Int>?, side: CommentSide
+    /// Anchored: tear below `anchorRows`, claw around the range.
+    /// Unanchored (`anchorRows` nil): the PR conversation, torn in above
+    /// the first file.
+    func presentTear(
+        _ content: TearContent, handlers: TearHandlers,
+        anchorRows: ClosedRange<Int>?, side: CommentSide
     ) {
-        dismissThread(notify: false)
         threadOpen = true
+        previewClaw = nil
+        threadAnchor = anchorRows.map { ($0, side) }
+        let height = tearView.prepare(
+            content, handlers: handlers, width: surfaceTable.frame.width)
+        tear = (afterSurfaceRow: anchorRows?.upperBound ?? -1, height: height)
+        surfaceTable.reloadData()
         if let anchorRows {
-            threadAnchor = (anchorRows, side)
-            let height = tearView.prepare(model, width: surfaceTable.frame.width)
-            tear = (afterSurfaceRow: anchorRows.upperBound, height: height)
-            surfaceTable.reloadData()
             scrollToRow(anchorRows.lowerBound, centered: true)
         } else {
-            threadAnchor = nil
-            threadCardHeight = threadCard.show(model)
-            threadCard.isHidden = false
-            layoutThreadCard()
+            scroll.contentView.scroll(to: .zero)
+            scroll.reflectScrolledClipView(scroll.contentView)
         }
         refreshVisibleRows()
+        DispatchQueue.main.async { [weak self] in
+            self?.tearView.focusComposerIfRequested()
+        }
     }
 
     func dismissThread(notify: Bool = false) {
         guard threadOpen else { return }
         threadOpen = false
         threadAnchor = nil
-        threadCard.isHidden = true
         if tear != nil {
             tear = nil
             surfaceTable.reloadData()
@@ -443,20 +441,6 @@ final class SurfaceViewController: NSViewController {
         guard badges != commentBadges else { return }
         commentBadges = badges
         refreshVisibleRows()
-    }
-
-    /// What a composed comment would anchor to, from the current
-    /// (possibly multi-row) selection: contiguous line rows of one file,
-    /// end line + optional start line, new side preferred.
-    private struct DraftAnchor {
-        let path: String
-        let line: Int
-        let startLine: Int?
-        let side: CommentSide
-        let lineText: String
-        /// Full selected block (this side's lines), for the clipboard.
-        let quote: String?
-        let rows: ClosedRange<Int>
     }
 
     private func selectionAnchor() -> DraftAnchor? {
@@ -503,35 +487,13 @@ final class SurfaceViewController: NSViewController {
             rows: startRow...highRow)
     }
 
-    /// ⌘⇧M / Add Comment / drag-release — popover composer on the
-    /// selected range, claw previewing the anchor while it's open.
+    /// ⌘⇧M / Add Comment / drag-release — tear opens in compose mode.
     func composeComment() {
         guard let anchor = selectionAnchor() else {
             NSSound.beep()
             return
         }
-        composePopover?.close()
-        previewClaw = (anchor.rows, anchor.side)
-        refreshVisibleRows()
-
-        let range = anchor.startLine.map { "\($0)\u{2013}\(anchor.line)" } ?? "\(anchor.line)"
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.delegate = self
-        let composer = CommentComposerViewController(
-            anchor: "\(anchor.path):\(range)"
-        ) { [weak self, weak popover] body in
-            popover?.close()
-            guard let self, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else { return }
-            self.delegate?.surface(
-                self, addDraft: anchor.path, line: anchor.line, startLine: anchor.startLine,
-                side: anchor.side, lineText: anchor.lineText, quote: anchor.quote, body: body)
-        }
-        popover.contentViewController = composer
-        composePopover = popover
-        let rect = surfaceTable.rect(ofRow: tableRow(forSurfaceRow: anchor.rows.upperBound))
-        popover.show(relativeTo: rect, of: surfaceTable, preferredEdge: .maxY)
+        delegate?.surface(self, composeFor: anchor)
     }
 
     func selectRow(_ row: Int) {
@@ -627,7 +589,6 @@ final class SurfaceViewController: NSViewController {
             !findMatches.isEmpty && findCurrent < findMatches.count
             && findMatches[findCurrent] == row
         cell.isRowSelected = surfaceTable.selectedRowIndexes.contains(tableRow(forSurfaceRow: row))
-        cell.commentBadge = commentBadges[row] ?? 0
         // Live drag/compose preview wins over the open thread's claw.
         let span = previewClaw ?? threadAnchor
         if let span, span.rows.contains(row) {
@@ -719,89 +680,11 @@ extension SurfaceViewController: NSTableViewDataSource, NSTableViewDelegate {
             dragSelecting = false
             if selectedLineRows().count > 1 {
                 composeComment()
-            } else if composePopover?.isShown != true {
+            } else {
                 previewClaw = nil
             }
         }
         refreshVisibleRows()
-    }
-}
-
-extension SurfaceViewController: NSPopoverDelegate {
-    func popoverDidClose(_ notification: Notification) {
-        previewClaw = nil
-        refreshVisibleRows()
-    }
-}
-
-// ------------------------------------------------------------------
-// Comment composer popover
-
-private final class CommentComposerViewController: NSViewController {
-    private let anchor: String
-    private let onSave: (String) -> Void
-    private let textView: NSTextView
-    private let textScroll: NSScrollView
-
-    init(anchor: String, onSave: @escaping (String) -> Void) {
-        self.anchor = anchor
-        self.onSave = onSave
-        self.textScroll = NSTextView.scrollableTextView()
-        self.textView = textScroll.documentView as! NSTextView
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-
-    override func loadView() {
-        let title = NSTextField(labelWithString: "Draft comment \u{00b7} \(anchor)")
-        title.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        title.lineBreakMode = .byTruncatingHead
-
-        textView.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
-        textView.isRichText = false
-        textView.textContainerInset = NSSize(width: 4, height: 6)
-        textScroll.borderType = .bezelBorder
-
-        let hint = NSTextField(labelWithString: "Never posted \u{2014} a note for your agent")
-        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
-        hint.textColor = .secondaryLabelColor
-
-        let save = NSButton(title: "Save Comment", target: self, action: #selector(save(_:)))
-        save.bezelStyle = .rounded
-        save.controlSize = .small
-        save.keyEquivalent = "\r"
-        save.keyEquivalentModifierMask = [.command]
-
-        let footer = NSStackView(views: [hint, NSView(), save])
-        footer.orientation = .horizontal
-        footer.spacing = Metrics.padding
-
-        let stack = NSStackView(views: [title, textScroll, footer])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = Metrics.padding
-        stack.edgeInsets = NSEdgeInsets(
-            top: Metrics.paddingWide, left: Metrics.paddingWide,
-            bottom: Metrics.paddingWide, right: Metrics.paddingWide)
-        self.view = stack
-        NSLayoutConstraint.activate([
-            stack.widthAnchor.constraint(equalToConstant: 420),
-            textScroll.heightAnchor.constraint(equalToConstant: 90),
-            textScroll.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
-            footer.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
-        ])
-    }
-
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        view.window?.makeFirstResponder(textView)
-    }
-
-    @objc private func save(_ sender: Any?) {
-        onSave(textView.string)
     }
 }
 

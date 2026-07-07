@@ -18,6 +18,8 @@ final class SidebarViewController: NSViewController {
     /// Leaf nodes by file index, for selection-follows-scroll.
     private var leaves: [Int: FileTreeNode] = [:]
     private var suppressSelectionCallback = false
+    /// path → unresolved threads + drafts anchored in that file.
+    private var commentCounts: [String: Int] = [:]
 
     override func loadView() {
         let column = NSTableColumn(identifier: .init("file"))
@@ -44,12 +46,6 @@ final class SidebarViewController: NSViewController {
     }
 
     func show(tree: [FileTreeNode]) {
-        // Watch-driven reloads must not yank the sidebar around: keep the
-        // scroll offset and the selection (path-keyed — indices shift).
-        let clip = outline.enclosingScrollView?.contentView
-        let scrollOrigin = clip?.bounds.origin
-        let selectedPath = (outline.item(atRow: outline.selectedRow) as? FileTreeNode)?.path
-
         roots = tree
         leaves.removeAll()
         var stack = tree
@@ -59,6 +55,23 @@ final class SidebarViewController: NSViewController {
             }
             stack.append(contentsOf: node.children)
         }
+        reloadPreservingState()
+    }
+
+    /// Feedback bubbles: unresolved threads + drafts per file path.
+    func updateCommentCounts(_ counts: [String: Int]) {
+        guard counts != commentCounts else { return }
+        commentCounts = counts
+        reloadPreservingState()
+    }
+
+    private func reloadPreservingState() {
+        // Watch-driven reloads must not yank the sidebar around: keep the
+        // scroll offset and the selection (path-keyed — indices shift).
+        let clip = outline.enclosingScrollView?.contentView
+        let scrollOrigin = clip?.bounds.origin
+        let selectedPath = (outline.item(atRow: outline.selectedRow) as? FileTreeNode)?.path
+
         outline.reloadData()
         outline.expandItem(nil, expandChildren: true)
 
@@ -115,8 +128,19 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
         let cell =
             outline.makeView(withIdentifier: identifier, owner: nil) as? FileTreeCellView
             ?? FileTreeCellView(identifier: identifier)
-        cell.configure(node)
+        cell.configure(node, comments: commentCount(for: node))
         return cell
+    }
+
+    /// Files read their own count; directories aggregate descendants.
+    private func commentCount(for node: FileTreeNode) -> Int {
+        if !node.isDirectory {
+            return commentCounts[node.path] ?? 0
+        }
+        let prefix = node.path + "/"
+        return commentCounts.reduce(0) { total, entry in
+            entry.key.hasPrefix(prefix) ? total + entry.value : total
+        }
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
@@ -132,10 +156,12 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
     }
 }
 
-// One sidebar row: status/folder symbol, name, right-aligned ±stats.
+// One sidebar row: status/folder symbol, name, comment bubble,
+// right-aligned ±stats.
 private final class FileTreeCellView: NSTableCellView {
     private let icon = NSImageView()
     private let name = NSTextField(labelWithString: "")
+    private let bubble = NSButton()
     private let stats = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
@@ -147,12 +173,22 @@ private final class FileTreeCellView: NSTableCellView {
         name.lineBreakMode = .byTruncatingMiddle
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        bubble.isBordered = false
+        bubble.imagePosition = .imageLeading
+        bubble.font = .monospacedDigitSystemFont(
+            ofSize: NSFont.smallSystemFontSize - 1, weight: .medium)
+        bubble.contentTintColor = .controlAccentColor
+        bubble.setContentHuggingPriority(.required, for: .horizontal)
+        bubble.setContentCompressionResistancePriority(.required, for: .horizontal)
+        bubble.isEnabled = false
+        bubble.toolTip = "Unresolved feedback in this file"
+
         stats.font = .monospacedDigitSystemFont(
             ofSize: NSFont.smallSystemFontSize, weight: .regular)
         stats.setContentHuggingPriority(.required, for: .horizontal)
         stats.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        for view in [icon, name, stats] as [NSView] {
+        for view in [icon, name, bubble, stats] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -165,8 +201,11 @@ private final class FileTreeCellView: NSTableCellView {
             icon.widthAnchor.constraint(equalToConstant: 16),
             name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
             name.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stats.leadingAnchor.constraint(
+            bubble.leadingAnchor.constraint(
                 greaterThanOrEqualTo: name.trailingAnchor, constant: Metrics.padding),
+            bubble.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stats.leadingAnchor.constraint(
+                equalTo: bubble.trailingAnchor, constant: Metrics.unit),
             stats.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.unit),
             stats.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -174,7 +213,20 @@ private final class FileTreeCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func configure(_ node: FileTreeNode) {
+    func configure(_ node: FileTreeNode, comments: Int) {
+        if comments > 0 {
+            bubble.image = NSImage(
+                systemSymbolName: "text.bubble.fill", accessibilityDescription: "comments")?
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .medium))
+            bubble.title = "\(comments)"
+            bubble.isHidden = false
+        } else {
+            bubble.isHidden = true
+        }
+        configure(node)
+    }
+
+    private func configure(_ node: FileTreeNode) {
         name.stringValue = node.name
         if node.isDirectory {
             icon.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "folder")

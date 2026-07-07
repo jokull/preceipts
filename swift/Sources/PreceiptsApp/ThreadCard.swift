@@ -1,218 +1,100 @@
-// The anchored thread card: a floating material bubble pinned beside the
-// commented line range, scrolling with the diff. Long conversations
-// scroll inside the card (capped height) — the diff never reflows.
+// The thread area: a full-width tear in the diff. Its empty state is the
+// PR conversation (torn in above the first file); selecting an anchored
+// thread moves the tear to that range with a breadcrumb + back button.
+// The kitchen sink lives here: read the thread, edit/delete your draft
+// notes, and compose new ones — never posted, notes-to-agent.
 
 import AppKit
 import PreceiptsKit
 
-struct ThreadCardModel {
+struct TearContent {
     struct Entry {
         let author: String?
         let meta: String
         let body: String
     }
 
-    let title: String
-    let entries: [Entry]
-    /// Root comment URL; nil for drafts.
-    let url: String?
-    let digest: String
+    /// "‹" target exists when non-nil handler is installed; label text.
+    var breadcrumb: String
+    var showBack: Bool
+    /// Read-only comments (GitHub).
+    var entries: [Entry]
+    /// Editable local draft notes.
+    var notes: [LocalComment]
+    var url: String?
+    var digest: String
+    /// Nil hides the composer (conversation view).
+    var composerPlaceholder: String?
+    var focusComposer: Bool
+    /// Shown when there's nothing else (empty conversation, no PR…).
+    var emptyText: String?
 }
 
-final class ThreadCardView: NSVisualEffectView {
-    static let width: CGFloat = 380
-    static let maxBodyHeight: CGFloat = 300
-
-    var onClose: (() -> Void)?
-
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let entriesStack = NSStackView()
-    private let bodyScroll = NSScrollView()
-    private var model: ThreadCardModel?
-    private var bodyHeight: NSLayoutConstraint?
-
-    init() {
-        super.init(frame: .zero)
-        material = .popover
-        blendingMode = .withinWindow
-        state = .active
-        wantsLayer = true
-        layer?.cornerRadius = 10
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.separatorColor.cgColor
-        layer?.masksToBounds = true
-        shadow = {
-            let shadow = NSShadow()
-            shadow.shadowBlurRadius = 12
-            shadow.shadowOffset = NSSize(width: 0, height: -4)
-            shadow.shadowColor = NSColor.black.withAlphaComponent(0.25)
-            return shadow
-        }()
-
-        titleLabel.font = .monospacedSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.lineBreakMode = .byTruncatingHead
-
-        let copy = headerButton("doc.on.doc", "Copy thread", #selector(copyClicked(_:)))
-        let open = headerButton("safari", "Open on GitHub", #selector(openClicked(_:)))
-        let close = headerButton("xmark", "Close (Esc)", #selector(closeClicked(_:)))
-
-        let header = NSStackView(views: [titleLabel, NSView(), copy, open, close])
-        header.orientation = .horizontal
-        header.spacing = Metrics.unit
-
-        entriesStack.orientation = .vertical
-        entriesStack.alignment = .leading
-        entriesStack.spacing = Metrics.paddingWide
-
-        let clipDocument = FlippedStackDocument(stack: entriesStack)
-        bodyScroll.documentView = clipDocument
-        bodyScroll.hasVerticalScroller = true
-        bodyScroll.drawsBackground = false
-        bodyScroll.borderType = .noBorder
-
-        let stack = NSStackView(views: [header, bodyScroll])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = Metrics.padding
-        stack.edgeInsets = NSEdgeInsets(
-            top: Metrics.paddingWide, left: Metrics.paddingWide,
-            bottom: Metrics.paddingWide, right: Metrics.paddingWide)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-
-        let bodyHeight = bodyScroll.heightAnchor.constraint(equalToConstant: 100)
-        self.bodyHeight = bodyHeight
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            header.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
-            bodyScroll.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
-            bodyHeight,
-            clipDocument.widthAnchor.constraint(
-                equalTo: bodyScroll.widthAnchor),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-
-    private func headerButton(
-        _ symbol: String, _ tooltip: String, _ action: Selector
-    ) -> NSButton {
-        let button = NSButton()
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
-        button.isBordered = false
-        button.controlSize = .small
-        button.target = self
-        button.action = action
-        button.toolTip = tooltip
-        return button
-    }
-
-    /// Populate and return the fitting card height for layout.
-    @discardableResult
-    func show(_ model: ThreadCardModel) -> CGFloat {
-        self.model = model
-        titleLabel.stringValue = model.title
-        entriesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for entry in model.entries {
-            let block = NSStackView()
-            block.orientation = .vertical
-            block.alignment = .leading
-            block.spacing = 2
-            if let author = entry.author {
-                let head = NSTextField(labelWithString: "\(author)  \(entry.meta)")
-                head.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-                head.textColor = .labelColor
-                block.addArrangedSubview(head)
-            }
-            let body = NSTextField(wrappingLabelWithString: entry.body)
-            body.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            body.textColor = .labelColor
-            body.isSelectable = true
-            block.addArrangedSubview(body)
-            entriesStack.addArrangedSubview(block)
-            NSLayoutConstraint.activate([
-                block.widthAnchor.constraint(equalTo: entriesStack.widthAnchor),
-                body.widthAnchor.constraint(equalTo: block.widthAnchor),
-            ])
-        }
-        // Measure content against the fixed width, cap the scroll height.
-        entriesStack.layoutSubtreeIfNeeded()
-        let content = entriesStack.fittingSize.height
-        let capped = min(content, Self.maxBodyHeight)
-        bodyHeight?.constant = max(capped, 24)
-        layoutSubtreeIfNeeded()
-        return fittingSize.height
-    }
-
-    @objc private func copyClicked(_ sender: Any?) {
-        guard let model else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(model.digest, forType: .string)
-    }
-
-    @objc private func openClicked(_ sender: Any?) {
-        guard let model, let url = model.url.flatMap(URL.init(string:)) else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    @objc private func closeClicked(_ sender: Any?) {
-        onClose?()
-    }
+struct TearHandlers {
+    var back: (() -> Void)?
+    var saveNote: ((String) -> Void)?
+    var updateNote: ((UInt64, String) -> Void)?
+    var deleteNote: ((UInt64) -> Void)?
 }
 
-// ------------------------------------------------------------------
-// Tear
-
-/// A full-width conversation torn into the diff below its anchor range —
-/// it reads in the main scroll flow (no inner scroll), like an inline PR
-/// thread. Chrome regime inside the One Dark surface: the tear is the
-/// app showing through the document.
 final class ThreadTearView: NSView {
     var onClose: (() -> Void)?
 
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let entriesStack = NSStackView()
+    private var content: TearContent?
+    private var handlers = TearHandlers()
+
+    private let backButton = NSButton()
+    private let breadcrumbLabel = NSTextField(labelWithString: "")
+    private let bodyStack = NSStackView()
+    private let composer: ComposerView
     private let contentStack = NSStackView()
-    private var model: ThreadCardModel?
-    private var lastWidth: CGFloat = 0
 
     init() {
+        composer = ComposerView()
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        titleLabel.font = .monospacedSystemFont(
+        backButton.image = NSImage(
+            systemSymbolName: "chevron.backward", accessibilityDescription: "back")
+        backButton.isBordered = false
+        backButton.controlSize = .small
+        backButton.target = self
+        backButton.action = #selector(backClicked(_:))
+        backButton.toolTip = "Back to the PR conversation"
+
+        breadcrumbLabel.font = .monospacedSystemFont(
             ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.lineBreakMode = .byTruncatingHead
+        breadcrumbLabel.textColor = .secondaryLabelColor
+        breadcrumbLabel.lineBreakMode = .byTruncatingHead
 
         let copy = button("doc.on.doc", "Copy thread", #selector(copyClicked(_:)))
         let open = button("safari", "Open on GitHub", #selector(openClicked(_:)))
         let close = button("xmark", "Close (Esc)", #selector(closeClicked(_:)))
 
-        let header = NSStackView(views: [titleLabel, NSView(), copy, open, close])
+        let header = NSStackView(views: [
+            backButton, breadcrumbLabel, NSView(), copy, open, close,
+        ])
         header.orientation = .horizontal
-        header.spacing = Metrics.unit
+        header.spacing = Metrics.unit + 2
 
-        entriesStack.orientation = .vertical
-        entriesStack.alignment = .leading
-        entriesStack.spacing = Metrics.paddingWide
+        bodyStack.orientation = .vertical
+        bodyStack.alignment = .leading
+        bodyStack.spacing = Metrics.paddingWide
+
+        composer.onSave = { [weak self] body in
+            self?.handlers.saveNote?(body)
+        }
 
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = Metrics.padding
+        contentStack.spacing = Metrics.paddingWide
         contentStack.edgeInsets = NSEdgeInsets(
             top: Metrics.paddingWide, left: 2 * Metrics.paddingWide,
             bottom: Metrics.paddingWide, right: 2 * Metrics.paddingWide)
         contentStack.addArrangedSubview(header)
-        contentStack.addArrangedSubview(entriesStack)
+        contentStack.addArrangedSubview(bodyStack)
+        contentStack.addArrangedSubview(composer)
 
         let top = NSBox()
         top.boxType = .separator
@@ -253,74 +135,257 @@ final class ThreadTearView: NSView {
         return button
     }
 
+    // ------------------------------------------------------------------
+    // Population + measurement
+
     /// Populate and measure for `width`; returns the tear row height.
-    func prepare(_ model: ThreadCardModel, width: CGFloat) -> CGFloat {
-        self.model = model
-        titleLabel.stringValue = model.title
-        entriesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        // Comfortable read width even on wide diffs.
+    func prepare(_ content: TearContent, handlers: TearHandlers, width: CGFloat) -> CGFloat {
+        self.content = content
+        self.handlers = handlers
+
+        backButton.isHidden = !content.showBack
+        breadcrumbLabel.stringValue = content.breadcrumb
+
+        bodyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let readable = min(width - 4 * Metrics.paddingWide, 680)
-        for entry in model.entries {
-            let block = NSStackView()
-            block.orientation = .vertical
-            block.alignment = .leading
-            block.spacing = 2
-            if let author = entry.author {
-                let head = NSTextField(labelWithString: "\(author)  \(entry.meta)")
-                head.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-                block.addArrangedSubview(head)
-            }
-            let body = NSTextField(wrappingLabelWithString: entry.body)
-            body.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
-            body.isSelectable = true
-            body.preferredMaxLayoutWidth = readable
-            block.addArrangedSubview(body)
-            entriesStack.addArrangedSubview(block)
-            body.widthAnchor.constraint(lessThanOrEqualToConstant: readable).isActive = true
+
+        for entry in content.entries {
+            bodyStack.addArrangedSubview(entryBlock(entry, readable: readable))
         }
+        for note in content.notes {
+            bodyStack.addArrangedSubview(noteBlock(note, readable: readable))
+        }
+        if content.entries.isEmpty, content.notes.isEmpty, let empty = content.emptyText {
+            let label = NSTextField(wrappingLabelWithString: empty)
+            label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            label.textColor = .secondaryLabelColor
+            label.preferredMaxLayoutWidth = readable
+            bodyStack.addArrangedSubview(label)
+        }
+
+        if let placeholder = content.composerPlaceholder {
+            composer.isHidden = false
+            composer.reset(placeholder: placeholder, width: readable)
+        } else {
+            composer.isHidden = true
+        }
+
         return remeasure(width: width)
     }
 
-    /// Height for the current model at `width` (wrapping text reflows).
+    /// Height for the current content at `width` (wrapping text reflows).
     func remeasure(width: CGFloat) -> CGFloat {
-        lastWidth = width
         frame = NSRect(x: 0, y: 0, width: width, height: 10)
         layoutSubtreeIfNeeded()
         return contentStack.fittingSize.height
     }
 
+    func focusComposerIfRequested() {
+        if content?.focusComposer == true, !composer.isHidden {
+            composer.focus()
+        }
+    }
+
+    private func entryBlock(_ entry: TearContent.Entry, readable: CGFloat) -> NSView {
+        let block = NSStackView()
+        block.orientation = .vertical
+        block.alignment = .leading
+        block.spacing = 2
+        if let author = entry.author {
+            let head = NSTextField(labelWithString: "\(author)  \(entry.meta)")
+            head.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+            block.addArrangedSubview(head)
+        }
+        let body = NSTextField(wrappingLabelWithString: entry.body)
+        body.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
+        body.isSelectable = true
+        body.preferredMaxLayoutWidth = readable
+        body.widthAnchor.constraint(lessThanOrEqualToConstant: readable).isActive = true
+        block.addArrangedSubview(body)
+        return block
+    }
+
+    /// A draft note: always-editable text, saved when focus leaves.
+    private func noteBlock(_ note: LocalComment, readable: CGFloat) -> NSView {
+        let block = NSStackView()
+        block.orientation = .vertical
+        block.alignment = .leading
+        block.spacing = 2
+
+        let head = NSTextField(labelWithString: "Draft note")
+        head.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        head.textColor = .controlAccentColor
+
+        let delete = NSButton()
+        delete.image = NSImage(
+            systemSymbolName: "trash", accessibilityDescription: "delete note")
+        delete.isBordered = false
+        delete.controlSize = .small
+        delete.target = self
+        delete.action = #selector(deleteNoteClicked(_:))
+        delete.tag = Int(bitPattern: UInt(note.id))
+        delete.toolTip = "Delete this draft"
+
+        let headRow = NSStackView(views: [head, delete])
+        headRow.orientation = .horizontal
+        headRow.spacing = Metrics.unit
+
+        let editor = NoteEditor(note: note) { [weak self] id, body in
+            self?.handlers.updateNote?(id, body)
+        }
+        editor.widthAnchor.constraint(equalToConstant: readable).isActive = true
+
+        block.addArrangedSubview(headRow)
+        block.addArrangedSubview(editor)
+        return block
+    }
+
+    // ------------------------------------------------------------------
+    // Actions
+
+    @objc private func backClicked(_ sender: Any?) {
+        handlers.back?()
+    }
+
     @objc private func copyClicked(_ sender: Any?) {
-        guard let model else { return }
+        guard let content else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(model.digest, forType: .string)
+        NSPasteboard.general.setString(content.digest, forType: .string)
     }
 
     @objc private func openClicked(_ sender: Any?) {
-        guard let model, let url = model.url.flatMap(URL.init(string:)) else { return }
+        guard let url = content?.url.flatMap(URL.init(string:)) else { return }
         NSWorkspace.shared.open(url)
     }
 
     @objc private func closeClicked(_ sender: Any?) {
         onClose?()
     }
+
+    @objc private func deleteNoteClicked(_ sender: NSButton) {
+        handlers.deleteNote?(UInt64(UInt(bitPattern: sender.tag)))
+    }
 }
 
-/// Scroll document wrapping the entries stack, top-anchored.
-private final class FlippedStackDocument: NSView {
-    override var isFlipped: Bool { true }
+// ------------------------------------------------------------------
+// Note editor: bordered NSTextView, commits on focus loss.
 
-    init(stack: NSStackView) {
+private final class NoteEditor: NSView, NSTextViewDelegate {
+    private let noteId: UInt64
+    private let onCommit: (UInt64, String) -> Void
+    private let textView: NSTextView
+    private let scroll: NSScrollView
+
+    init(note: LocalComment, onCommit: @escaping (UInt64, String) -> Void) {
+        self.noteId = note.id
+        self.onCommit = onCommit
+        self.scroll = NSTextView.scrollableTextView()
+        self.textView = scroll.documentView as! NSTextView
         super.init(frame: .zero)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+
+        textView.string = note.body
+        textView.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
+        textView.isRichText = false
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.delegate = self
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+
+        // Size to content (within reason) — the tear grows, not the note.
+        let measured = note.body.height(
+            font: textView.font!, width: 640) + 14
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            // Document height follows content so the scroll view can scroll.
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            heightAnchor.constraint(equalToConstant: min(max(measured, 28), 200)),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func textDidEndEditing(_ notification: Notification) {
+        onCommit(noteId, textView.string)
+    }
+}
+
+// ------------------------------------------------------------------
+// Composer: text view + save, for new notes and thread replies.
+
+private final class ComposerView: NSStackView {
+    var onSave: ((String) -> Void)?
+
+    private let textView: NSTextView
+    private let textScroll: NSScrollView
+    private let saveButton: NSButton
+
+    init() {
+        textScroll = NSTextView.scrollableTextView()
+        textView = textScroll.documentView as! NSTextView
+        saveButton = NSButton(title: "Save Note", target: nil, action: nil)
+        super.init(frame: .zero)
+
+        textView.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
+        textView.isRichText = false
+        textView.textContainerInset = NSSize(width: 4, height: 5)
+        textScroll.borderType = .bezelBorder
+        textScroll.hasVerticalScroller = false
+
+        saveButton.bezelStyle = .rounded
+        saveButton.controlSize = .small
+        saveButton.keyEquivalent = "\r"
+        saveButton.keyEquivalentModifierMask = [.command]
+        saveButton.target = self
+        saveButton.action = #selector(saveClicked(_:))
+
+        let hint = NSTextField(labelWithString: "Never posted \u{2014} a note for your agent")
+        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
+        hint.textColor = .secondaryLabelColor
+
+        let footer = NSStackView(views: [hint, NSView(), saveButton])
+        footer.orientation = .horizontal
+        footer.spacing = Metrics.padding
+
+        orientation = .vertical
+        alignment = .leading
+        spacing = Metrics.unit + 2
+        addArrangedSubview(textScroll)
+        addArrangedSubview(footer)
+        NSLayoutConstraint.activate([
+            textScroll.heightAnchor.constraint(equalToConstant: 64),
+            footer.widthAnchor.constraint(equalTo: widthAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    func reset(placeholder: String, width: CGFloat) {
+        textView.string = ""
+        // NSTextView has no placeholder; the hint label carries intent.
+        toolTip = placeholder
+        textScroll.widthAnchor.constraint(equalToConstant: width).isActive = true
+    }
+
+    func focus() {
+        window?.makeFirstResponder(textView)
+    }
+
+    @objc private func saveClicked(_ sender: Any?) {
+        let body = textView.string
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        onSave?(body)
+    }
+}
+
+extension String {
+    fileprivate func height(font: NSFont, width: CGFloat) -> CGFloat {
+        let bounds = (self as NSString).boundingRect(
+            with: NSSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin],
+            attributes: [.font: font])
+        return ceil(bounds.height)
+    }
 }

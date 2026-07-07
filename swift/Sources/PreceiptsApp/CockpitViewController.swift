@@ -33,6 +33,16 @@ final class CockpitViewController: NSSplitViewController {
     private var prTimer: Timer?
     private var prStatusInFlight = false
 
+    /// The thread area's navigation stack: conversation is the empty
+    /// state, threads/compose sit one level in, back pops.
+    private enum TearState {
+        case closed
+        case conversation
+        case thread(FeedbackNavItem)
+        case compose(DraftAnchor)
+    }
+    private var tearState: TearState = .closed
+
     deinit {
         hudTimer?.invalidate()
         prTimer?.invalidate()
@@ -74,8 +84,18 @@ final class CockpitViewController: NSSplitViewController {
         sidebar.delegate = self
         content.delegate = self
         feedbackPanel.delegate = self
+        // Esc / ✕ pops the tear one level: thread → conversation → closed.
         content.onThreadDismissed = { [weak self] in
-            self?.feedbackPanel.clearSelection()
+            guard let self else { return }
+            switch self.tearState {
+            case .thread, .compose:
+                self.setTear(.conversation)
+            case .conversation:
+                self.tearState = .closed
+                self.feedbackPanel.clearSelection()
+            case .closed:
+                break
+            }
         }
 
         if let token = Keychain.loadToken() {
@@ -240,9 +260,15 @@ final class CockpitViewController: NSSplitViewController {
             ensureEngine(changeset)
             refreshHud()
             ensureCommentStore(changeset)
-            // Anchor rows shifted with the new changeset; a mispointed
-            // claw is worse than a closed card.
-            content.dismissThread(notify: true)
+            // Anchor rows shifted with the new changeset — pop the tear
+            // to the safe level rather than point the claw at the wrong
+            // lines. (content.show already dropped the stale tear.)
+            switch tearState {
+            case .closed:
+                break
+            default:
+                setTear(.conversation)
+            }
             refreshFeedbackViews()
             refreshPrStatus()
         case .failure(let error):
@@ -264,24 +290,41 @@ final class CockpitViewController: NSSplitViewController {
         }
     }
 
-    /// Panel list + surface badges from the current feedback and drafts —
-    /// anchors re-resolve against every new changeset. Badges sit on each
-    /// thread's root row and count the whole conversation.
+    /// Navigator list, sidebar bubbles, and the row→thread routing map,
+    /// from the current feedback and drafts — anchors re-resolve against
+    /// every new changeset.
     private func refreshFeedbackViews() {
-        feedbackPanel.apply(feedback: prFeedback, drafts: commentStore?.comments ?? [])
+        let drafts = commentStore?.comments ?? []
+        feedbackPanel.apply(feedback: prFeedback, drafts: drafts)
+
+        // File-tree bubbles: unresolved threads + drafts per path.
+        var counts: [String: Int] = [:]
+        for draft in drafts {
+            counts[draft.path, default: 0] += 1
+        }
+        let threads = FeedbackThread.group(prFeedback?.comments ?? [])
+        for thread in threads {
+            guard let path = thread.root.path,
+                prFeedback?.resolvedRootIds.contains(thread.root.id) != true
+            else { continue }
+            counts[path, default: 0] += 1
+        }
+        sidebar.updateCommentCounts(counts)
+
+        // Row routing for double-clicks (not drawn).
         var badges: [Int: Int] = [:]
         guard let changeset else {
             content.setCommentBadges([:])
             return
         }
-        for draft in commentStore?.comments ?? [] {
+        for draft in drafts {
             if let row = surface.anchorRow(
                 path: draft.path, line: draft.line, side: draft.side, changeset: changeset)
             {
                 badges[row, default: 0] += 1
             }
         }
-        for thread in FeedbackThread.group(prFeedback?.comments ?? []) {
+        for thread in threads {
             if let path = thread.root.path, let line = thread.root.line,
                 let row = surface.anchorRow(
                     path: path, line: line, side: thread.root.side, changeset: changeset)
@@ -332,8 +375,13 @@ final class CockpitViewController: NSSplitViewController {
     @objc func toggleFeedbackPanel(_ sender: Any?) {
         guard let feedbackItem else { return }
         feedbackItem.animator().isCollapsed.toggle()
-        if !feedbackItem.isCollapsed, prFeedback == nil {
-            refreshFeedback()
+        if !feedbackItem.isCollapsed {
+            if prFeedback == nil {
+                refreshFeedback()
+            }
+            if case .closed = tearState {
+                setTear(.conversation)
+            }
         }
     }
 
@@ -425,25 +473,15 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
         sidebar.highlight(fileIndex: fileIndex)
     }
 
-    func surface(
-        _ surface: SurfaceViewController,
-        addDraft path: String, line: Int, startLine: Int?, side: CommentSide,
-        lineText: String, quote: String?, body: String
-    ) {
-        try? commentStore?.add(
-            path: path, line: line, startLine: startLine, side: side,
-            lineText: lineText, quote: quote, body: body)
-        refreshFeedbackViews()
+    func surface(_ surface: SurfaceViewController, composeFor anchor: DraftAnchor) {
+        setTear(.compose(anchor))
     }
 
-    /// Double-click on a badged row: open the thread rooted there.
+    /// Double-click on a row with an anchored thread: open it.
     func surface(_ surface: SurfaceViewController, openThreadAtRow row: Int) {
         guard let item = navItem(atRow: row) else { return }
         feedbackPanel.highlight(item)
-        content.presentThread(
-            threadCardModel(item),
-            anchorRows: resolveAnchorRows(item),
-            side: item.anchor?.side ?? .new)
+        setTear(.thread(item))
     }
 
     private func navItem(atRow row: Int) -> FeedbackNavItem? {
@@ -472,19 +510,28 @@ extension CockpitViewController: FeedbackPanelDelegate {
         _ panel: FeedbackPanelViewController, didSelect item: FeedbackNavItem?
     ) {
         guard let item else {
-            content.dismissThread()
+            if case .thread = tearState {
+                setTear(.conversation)
+            } else if case .compose = tearState {
+                setTear(.conversation)
+            }
             return
         }
-        content.presentThread(
-            threadCardModel(item),
-            anchorRows: resolveAnchorRows(item),
-            side: item.anchor?.side ?? .new)
+        // Unanchored navigator rows (reviews, conversation comments) live
+        // in the conversation view.
+        if item.anchor == nil {
+            setTear(.conversation)
+        } else {
+            setTear(.thread(item))
+        }
     }
 
     func feedbackPanel(_ panel: FeedbackPanelViewController, deleteDraft id: UInt64) {
         try? commentStore?.remove(id: id)
-        content.dismissThread()
         refreshFeedbackViews()
+        if case .thread(let item) = tearState, case .draft(let draft) = item, draft.id == id {
+            setTear(.conversation)
+        }
     }
 
     func feedbackPanel(
@@ -522,40 +569,183 @@ extension CockpitViewController: FeedbackPanelDelegate {
         return low...high
     }
 
-    private func threadCardModel(_ item: FeedbackNavItem) -> ThreadCardModel {
+    // ------------------------------------------------------------------
+    // The thread area's state machine
+
+    private func setTear(_ state: TearState) {
+        tearState = state
+        switch state {
+        case .closed:
+            content.dismissThread()
+            feedbackPanel.clearSelection()
+        case .conversation:
+            content.presentTear(
+                conversationContent(), handlers: TearHandlers(),
+                anchorRows: nil, side: .new)
+        case .thread(let item):
+            content.presentTear(
+                threadContent(item), handlers: threadHandlers(item),
+                anchorRows: resolveAnchorRows(item),
+                side: item.anchor?.side ?? .new)
+        case .compose(let anchor):
+            content.presentTear(
+                composeContent(anchor), handlers: composeHandlers(anchor),
+                anchorRows: anchor.rows, side: anchor.side)
+        }
+    }
+
+    private func conversationContent() -> TearContent {
+        guard let feedback = prFeedback else {
+            return TearContent(
+                breadcrumb: "Conversation", showBack: false, entries: [], notes: [],
+                url: nil, digest: "", composerPlaceholder: nil, focusComposer: false,
+                emptyText: "No PR feedback loaded \u{2014} refresh from the Feedback panel")
+        }
+        let prLevel = FeedbackThread.group(feedback.comments)
+            .filter { $0.root.path == nil }
+            .flatMap(\.comments)
+            .sorted { $0.createdAt < $1.createdAt }
+        return TearContent(
+            breadcrumb: "#\(feedback.number)  \(feedback.title)",
+            showBack: false,
+            entries: prLevel.map(entry(_:)),
+            notes: [],
+            url: feedback.url,
+            digest: PrFeedback.digest(prLevel),
+            composerPlaceholder: nil,
+            focusComposer: false,
+            emptyText: "No PR-level conversation yet \u{2014} select a thread in a file")
+    }
+
+    private func threadContent(_ item: FeedbackNavItem) -> TearContent {
+        let breadcrumb: String
+        if let anchor = item.anchor {
+            breadcrumb =
+                anchor.range.count == 1
+                ? "\(anchor.path):\(anchor.range.lowerBound)"
+                : "\(anchor.path):\(anchor.range.lowerBound)\u{2013}\(anchor.range.upperBound)"
+        } else {
+            breadcrumb = "Conversation"
+        }
         switch item {
         case .thread(let thread):
-            let title: String
-            if let path = thread.root.path, let range = thread.lineRange {
-                title =
-                    range.count == 1
-                    ? "\(path):\(range.lowerBound)"
-                    : "\(path):\(range.lowerBound)\u{2013}\(range.upperBound)"
-            } else if let state = thread.root.state {
-                title = state.lowercased().replacingOccurrences(of: "_", with: " ")
-            } else {
-                title = "Conversation"
-            }
-            return ThreadCardModel(
-                title: title,
-                entries: thread.comments.map { comment in
-                    ThreadCardModel.Entry(
-                        author: comment.author,
-                        meta: Self.relativeTime(comment.createdAt),
-                        body: comment.body)
-                },
+            return TearContent(
+                breadcrumb: breadcrumb,
+                showBack: true,
+                entries: thread.comments.map(entry(_:)),
+                notes: notesMatching(item),
                 url: thread.root.url,
-                digest: formatDigest(thread.comments.map(\.context)))
+                digest: formatDigest(thread.comments.map(\.context)),
+                composerPlaceholder: "Add a draft note",
+                focusComposer: false,
+                emptyText: nil)
         case .draft(let draft):
-            return ThreadCardModel(
-                title: "\(draft.path):\(draft.line)",
-                entries: [
-                    ThreadCardModel.Entry(
-                        author: "Draft", meta: "never posted", body: draft.body)
-                ],
+            return TearContent(
+                breadcrumb: breadcrumb,
+                showBack: true,
+                entries: [],
+                notes: [draft],
                 url: nil,
-                digest: item.contexts.map(formatComment).joined(separator: "\n"))
+                digest: item.contexts.map(formatComment).joined(separator: "\n"),
+                composerPlaceholder: "Add a draft note",
+                focusComposer: false,
+                emptyText: nil)
         }
+    }
+
+    private func composeContent(_ anchor: DraftAnchor) -> TearContent {
+        let range =
+            anchor.startLine.map { "\(min($0, anchor.line))\u{2013}\(anchor.line)" }
+            ?? "\(anchor.line)"
+        return TearContent(
+            breadcrumb: "\(anchor.path):\(range)",
+            showBack: true,
+            entries: [], notes: [],
+            url: nil, digest: "",
+            composerPlaceholder: "Draft comment",
+            focusComposer: true,
+            emptyText: nil)
+    }
+
+    /// Drafts sharing a GitHub thread's exact anchor render inside it as
+    /// your notes on that conversation.
+    private func notesMatching(_ item: FeedbackNavItem) -> [LocalComment] {
+        guard case .thread = item, let anchor = item.anchor else { return [] }
+        return (commentStore?.comments ?? []).filter {
+            $0.path == anchor.path && $0.lineRange == anchor.range && $0.side == anchor.side
+        }
+    }
+
+    private func threadHandlers(_ item: FeedbackNavItem) -> TearHandlers {
+        var handlers = TearHandlers()
+        handlers.back = { [weak self] in
+            self?.setTear(.conversation)
+        }
+        handlers.updateNote = { [weak self] id, body in
+            try? self?.commentStore?.updateBody(id: id, body: body)
+            self?.refreshFeedbackViews()
+        }
+        handlers.deleteNote = { [weak self] id in
+            guard let self else { return }
+            try? self.commentStore?.remove(id: id)
+            self.refreshFeedbackViews()
+            if case .draft(let draft) = item, draft.id == id {
+                self.setTear(.conversation)
+            } else {
+                self.setTear(.thread(item))
+            }
+        }
+        if let anchor = item.anchor {
+            let lineText: String
+            switch item {
+            case .thread(let thread): lineText = thread.root.lineText
+            case .draft(let draft): lineText = draft.lineText
+            }
+            handlers.saveNote = { [weak self] body in
+                guard let self else { return }
+                try? self.commentStore?.add(
+                    path: anchor.path,
+                    line: anchor.range.upperBound,
+                    startLine: anchor.range.count > 1 ? anchor.range.lowerBound : nil,
+                    side: anchor.side,
+                    lineText: lineText,
+                    body: body)
+                self.refreshFeedbackViews()
+                self.setTear(.thread(item))
+            }
+        }
+        return handlers
+    }
+
+    private func composeHandlers(_ anchor: DraftAnchor) -> TearHandlers {
+        var handlers = TearHandlers()
+        handlers.back = { [weak self] in
+            self?.setTear(.conversation)
+        }
+        handlers.saveNote = { [weak self] body in
+            guard let self,
+                let draft = try? self.commentStore?.add(
+                    path: anchor.path, line: anchor.line, startLine: anchor.startLine,
+                    side: anchor.side, lineText: anchor.lineText, quote: anchor.quote,
+                    body: body)
+            else { return }
+            self.refreshFeedbackViews()
+            let item = FeedbackNavItem.draft(draft)
+            self.feedbackPanel.highlight(item)
+            self.setTear(.thread(item))
+        }
+        return handlers
+    }
+
+    private func entry(_ comment: FeedbackComment) -> TearContent.Entry {
+        var author = comment.author
+        if let state = comment.state, !state.isEmpty {
+            author += " \u{00b7} " + state.lowercased().replacingOccurrences(of: "_", with: " ")
+        }
+        return TearContent.Entry(
+            author: author,
+            meta: Self.relativeTime(comment.createdAt),
+            body: comment.body)
     }
 
     private static func relativeTime(_ iso: String) -> String {
