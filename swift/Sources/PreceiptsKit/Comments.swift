@@ -17,18 +17,28 @@ public enum CommentSide: String, Codable, Sendable {
 public struct LocalComment: Codable, Sendable, Identifiable {
     public let id: UInt64
     public let path: String
-    /// 1-based line number on `side` of the diff.
+    /// 1-based line number on `side` of the diff (the range end for
+    /// multi-line drafts — GitHub's convention).
     public let line: Int
+    /// First line of a multi-line draft; nil for single-line.
+    public let startLine: Int?
     public let side: CommentSide
-    /// The diff line's text when the comment was written — quoted in the
-    /// clipboard format and used to flag the comment as outdated later.
+    /// The anchored (end) line's text when the comment was written —
+    /// quoted in the clipboard format and used to flag outdated later.
     public let lineText: String
     public var body: String
     /// Unix seconds; display formatting is the UI's job.
     public let createdAt: UInt64
 
+    /// startLine…line (normalized); single-line drafts collapse.
+    public var lineRange: ClosedRange<Int> {
+        let start = startLine ?? line
+        return min(start, line)...max(start, line)
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, path, line, side, body
+        case startLine = "start_line"
         case lineText = "line_text"
         case createdAt = "created_at"
     }
@@ -131,13 +141,15 @@ public final class CommentStore {
 
     @discardableResult
     public func add(
-        path: String, line: Int, side: CommentSide, lineText: String, body: String
+        path: String, line: Int, startLine: Int? = nil, side: CommentSide,
+        lineText: String, body: String
     ) throws -> LocalComment {
         data.nextId += 1
         let comment = LocalComment(
             id: data.nextId,
             path: path,
             line: line,
+            startLine: startLine,
             side: side,
             lineText: lineText,
             body: body,

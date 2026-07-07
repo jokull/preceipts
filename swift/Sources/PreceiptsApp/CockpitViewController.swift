@@ -427,17 +427,39 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
 
     func surface(
         _ surface: SurfaceViewController,
-        addDraft path: String, line: Int, side: CommentSide, lineText: String, body: String
+        addDraft path: String, line: Int, startLine: Int?, side: CommentSide,
+        lineText: String, body: String
     ) {
         try? commentStore?.add(
-            path: path, line: line, side: side, lineText: lineText, body: body)
+            path: path, line: line, startLine: startLine, side: side,
+            lineText: lineText, body: body)
         refreshFeedbackViews()
     }
 
-    func surfaceRequestsFeedbackPanel(_ surface: SurfaceViewController) {
-        if feedbackItem?.isCollapsed == true {
-            toggleFeedbackPanel(nil)
+    /// Double-click on a badged row: open the thread rooted there.
+    func surface(_ surface: SurfaceViewController, openThreadAtRow row: Int) {
+        guard let item = navItem(atRow: row) else { return }
+        feedbackPanel.highlight(item)
+        content.presentThread(
+            threadCardModel(item),
+            anchorRows: resolveAnchorRows(item),
+            side: item.anchor?.side ?? .new)
+    }
+
+    private func navItem(atRow row: Int) -> FeedbackNavItem? {
+        for draft in commentStore?.comments ?? [] {
+            let item = FeedbackNavItem.draft(draft)
+            if let rows = resolveAnchorRows(item), rows.contains(row) {
+                return item
+            }
         }
+        for thread in FeedbackThread.group(prFeedback?.comments ?? []) {
+            let item = FeedbackNavItem.thread(thread)
+            if let rows = resolveAnchorRows(item), rows.contains(row) {
+                return item
+            }
+        }
+        return nil
     }
 }
 
@@ -484,9 +506,12 @@ extension CockpitViewController: FeedbackPanelDelegate {
             }
         }
         guard let low = resolved.min(), let high = resolved.max() else { return nil }
-        // Drafts also go outdated when the anchored line's text changed.
+        // Drafts also go outdated when the anchored (end) line's text
+        // changed under them.
         if case .draft(let draft) = item,
-            case .line(let file, let hunk, let rowIndex) = surface.rows[low]
+            let endRow = surface.anchorRow(
+                path: anchor.path, line: draft.line, side: draft.side, changeset: changeset),
+            case .line(let file, let hunk, let rowIndex) = surface.rows[endRow]
         {
             let diffRow = changeset.files[file].hunks[hunk].rows[rowIndex]
             let current = draft.side == .new ? diffRow.new?.text : diffRow.old?.text

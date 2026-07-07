@@ -10,9 +10,10 @@ protocol SurfaceDelegate: AnyObject {
     func surface(_ surface: SurfaceViewController, didScrollToFile fileIndex: Int)
     func surface(
         _ surface: SurfaceViewController,
-        addDraft path: String, line: Int, side: CommentSide, lineText: String, body: String)
-    /// Double-click on a row with a comment badge.
-    func surfaceRequestsFeedbackPanel(_ surface: SurfaceViewController)
+        addDraft path: String, line: Int, startLine: Int?, side: CommentSide,
+        lineText: String, body: String)
+    /// Double-click on a row with a comment badge — open its thread.
+    func surface(_ surface: SurfaceViewController, openThreadAtRow row: Int)
 }
 
 final class SurfaceViewController: NSViewController {
@@ -44,6 +45,10 @@ final class SurfaceViewController: NSViewController {
     /// Surface row → number of comments anchored there (drafts + GitHub).
     private var commentBadges: [Int: Int] = [:]
     private var composePopover: NSPopover?
+    /// Live claw while drag-selecting a range or composing — takes
+    /// precedence over the open thread's claw.
+    private var previewClaw: (rows: ClosedRange<Int>, side: CommentSide)?
+    private var dragSelecting = false
 
     /// The open thread: card + clawed row range (nil rows = unanchored,
     /// card pins under the toolbar). One at a time.
@@ -72,6 +77,7 @@ final class SurfaceViewController: NSViewController {
         surfaceTable.dataSource = self
         surfaceTable.doubleAction = #selector(rowDoubleClicked(_:))
         surfaceTable.target = self
+        surfaceTable.allowsMultipleSelection = true
 
         scroll.documentView = surfaceTable
         scroll.hasVerticalScroller = true
@@ -376,46 +382,88 @@ final class SurfaceViewController: NSViewController {
         refreshVisibleRows()
     }
 
-    /// The (path, line, side, lineText) a composed comment would anchor
-    /// to: the selected row's new side when present, else its old side.
-    func selectedAnchor() -> (path: String, line: Int, side: CommentSide, lineText: String)? {
-        let row = surfaceTable.selectedRow
-        guard let changeset, row >= 0, row < surface.rows.count,
-            case .line(let file, let hunk, let rowIndex) = surface.rows[row]
-        else { return nil }
-        let fileDiff = changeset.files[file]
-        let diffRow = fileDiff.hunks[hunk].rows[rowIndex]
-        if let new = diffRow.new {
-            return (fileDiff.path, new.number, .new, new.text)
-        }
-        if let old = diffRow.old {
-            return (fileDiff.path, old.number, .old, old.text)
-        }
-        return nil
+    /// What a composed comment would anchor to, from the current
+    /// (possibly multi-row) selection: contiguous line rows of one file,
+    /// end line + optional start line, new side preferred.
+    private struct DraftAnchor {
+        let path: String
+        let line: Int
+        let startLine: Int?
+        let side: CommentSide
+        let lineText: String
+        let rows: ClosedRange<Int>
     }
 
-    /// ⌘⇧M / Add Comment — popover composer on the selected row.
+    private func selectionAnchor() -> DraftAnchor? {
+        guard let changeset else { return nil }
+        // Line rows only, all in the anchor file.
+        let selected = surfaceTable.selectedRowIndexes.filter { index in
+            if case .line = surface.rows[index] { return true }
+            return false
+        }
+        guard let lowRow = selected.min(), let highRow = selected.max(),
+            case .line(let file, _, _) = surface.rows[highRow]
+        else { return nil }
+        let fileDiff = changeset.files[file]
+
+        func lineRef(_ row: Int, side: CommentSide) -> LineRef? {
+            guard case .line(let f, let hunk, let index) = surface.rows[row], f == file
+            else { return nil }
+            let diffRow = fileDiff.hunks[hunk].rows[index]
+            return side == .new ? diffRow.new : diffRow.old
+        }
+
+        // Side from the end row; the claw and GitHub both key on it.
+        let side: CommentSide = lineRef(highRow, side: .new) != nil ? .new : .old
+        guard let end = lineRef(highRow, side: side) else { return nil }
+        // Walk the range's rows for the first one with a number this side.
+        var start: LineRef?
+        var startRow = lowRow
+        for row in lowRow...highRow {
+            if let ref = lineRef(row, side: side) {
+                start = ref
+                startRow = row
+                break
+            }
+        }
+        guard let start else { return nil }
+        return DraftAnchor(
+            path: fileDiff.path,
+            line: end.number,
+            startLine: start.number == end.number ? nil : start.number,
+            side: side,
+            lineText: end.text,
+            rows: startRow...highRow)
+    }
+
+    /// ⌘⇧M / Add Comment / drag-release — popover composer on the
+    /// selected range, claw previewing the anchor while it's open.
     func composeComment() {
-        guard let anchor = selectedAnchor() else {
+        guard let anchor = selectionAnchor() else {
             NSSound.beep()
             return
         }
         composePopover?.close()
+        previewClaw = (anchor.rows, anchor.side)
+        refreshVisibleRows()
+
+        let range = anchor.startLine.map { "\($0)\u{2013}\(anchor.line)" } ?? "\(anchor.line)"
         let popover = NSPopover()
         popover.behavior = .transient
+        popover.delegate = self
         let composer = CommentComposerViewController(
-            anchor: "\(anchor.path):\(anchor.line)"
+            anchor: "\(anchor.path):\(range)"
         ) { [weak self, weak popover] body in
             popover?.close()
             guard let self, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { return }
             self.delegate?.surface(
-                self, addDraft: anchor.path, line: anchor.line, side: anchor.side,
-                lineText: anchor.lineText, body: body)
+                self, addDraft: anchor.path, line: anchor.line, startLine: anchor.startLine,
+                side: anchor.side, lineText: anchor.lineText, body: body)
         }
         popover.contentViewController = composer
         composePopover = popover
-        let rect = surfaceTable.rect(ofRow: surfaceTable.selectedRow)
+        let rect = surfaceTable.rect(ofRow: anchor.rows.upperBound)
         popover.show(relativeTo: rect, of: surfaceTable, preferredEdge: .maxY)
     }
 
@@ -426,8 +474,14 @@ final class SurfaceViewController: NSViewController {
 
     @objc private func rowDoubleClicked(_ sender: Any?) {
         let row = surfaceTable.clickedRow
-        guard row >= 0, commentBadges[row] != nil else { return }
-        delegate?.surfaceRequestsFeedbackPanel(self)
+        guard row >= 0 else { return }
+        if commentBadges[row] != nil {
+            delegate?.surface(self, openThreadAtRow: row)
+        } else if case .line = surface.rows[row] {
+            // Double-click a bare line: start a draft right there.
+            selectRow(row)
+            composeComment()
+        }
     }
 
     // ------------------------------------------------------------------
@@ -501,17 +555,19 @@ final class SurfaceViewController: NSViewController {
         cell.isCurrentFindMatch =
             !findMatches.isEmpty && findCurrent < findMatches.count
             && findMatches[findCurrent] == row
-        cell.isRowSelected = surfaceTable.selectedRow == row
+        cell.isRowSelected = surfaceTable.selectedRowIndexes.contains(row)
         cell.commentBadge = commentBadges[row] ?? 0
-        if let threadAnchor, threadAnchor.rows.contains(row) {
+        // Live drag/compose preview wins over the open thread's claw.
+        let span = previewClaw ?? threadAnchor
+        if let span, span.rows.contains(row) {
             let segment: DiffRowView.ClawSegment
-            switch (row == threadAnchor.rows.lowerBound, row == threadAnchor.rows.upperBound) {
+            switch (row == span.rows.lowerBound, row == span.rows.upperBound) {
             case (true, true): segment = .single
             case (true, false): segment = .top
             case (false, true): segment = .bottom
             case (false, false): segment = .middle
             }
-            cell.claw = (segment, threadAnchor.side)
+            cell.claw = (segment, span.side)
         } else {
             cell.claw = nil
         }
@@ -552,7 +608,39 @@ extension SurfaceViewController: NSTableViewDataSource, NSTableViewDelegate {
         return false
     }
 
+    /// Fires continuously while the mouse drags across rows — the claw
+    /// previews the would-be comment range as it grows.
+    func tableViewSelectionIsChanging(_ notification: Notification) {
+        dragSelecting = true
+        if let anchor = selectionAnchor() {
+            previewClaw = (anchor.rows, anchor.side)
+        } else {
+            previewClaw = nil
+        }
+        refreshVisibleRows()
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
+        // Releasing a multi-row drag goes straight into the composer.
+        if dragSelecting {
+            dragSelecting = false
+            let lineRows = surfaceTable.selectedRowIndexes.filter { index in
+                if case .line = surface.rows[index] { return true }
+                return false
+            }
+            if lineRows.count > 1 {
+                composeComment()
+            } else if composePopover?.isShown != true {
+                previewClaw = nil
+            }
+        }
+        refreshVisibleRows()
+    }
+}
+
+extension SurfaceViewController: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        previewClaw = nil
         refreshVisibleRows()
     }
 }

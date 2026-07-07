@@ -16,7 +16,19 @@ enum FeedbackNavItem {
             guard let path = thread.root.path, let range = thread.lineRange else { return nil }
             return (path, range, thread.root.side)
         case .draft(let draft):
-            return (draft.path, draft.line...draft.line, draft.side)
+            return (draft.path, draft.lineRange, draft.side)
+        }
+    }
+
+    /// Stable identity for selection sync (thread root id / draft id).
+    func matches(_ other: FeedbackNavItem) -> Bool {
+        switch (self, other) {
+        case (.thread(let a), .thread(let b)):
+            return a.root.id == b.root.id && a.root.url == b.root.url
+        case (.draft(let a), .draft(let b)):
+            return a.id == b.id
+        default:
+            return false
         }
     }
 
@@ -224,6 +236,21 @@ final class FeedbackPanelViewController: NSViewController {
         suppressSelection = true
         outline.deselectAll(nil)
         suppressSelection = false
+    }
+
+    /// Reflect a thread opened from the diff side, without echoing back.
+    func highlight(_ item: FeedbackNavItem) {
+        for group in groups {
+            for row in group.items where row.item.matches(item) {
+                let index = outline.row(forItem: row)
+                guard index >= 0 else { continue }
+                suppressSelection = true
+                outline.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+                outline.scrollRowToVisible(index)
+                suppressSelection = false
+                return
+            }
+        }
     }
 
     private func rebuild() {
@@ -457,7 +484,11 @@ private final class FeedbackNavCellView: NSTableCellView {
                 systemSymbolName: "square.and.pencil", accessibilityDescription: "draft")
             icon.contentTintColor = .controlAccentColor
             title.stringValue = firstLine(draft.body)
-            detail.stringValue = "L\(draft.line)"
+            let range = draft.lineRange
+            detail.stringValue =
+                range.count == 1
+                ? "L\(range.lowerBound)"
+                : "L\(range.lowerBound)\u{2013}\(range.upperBound)"
         case .thread(let thread):
             let (symbol, tint) = Self.glyph(thread.root, outdated: outdated)
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
