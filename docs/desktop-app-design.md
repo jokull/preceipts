@@ -17,7 +17,9 @@ surface is a custom fixed-row-height Core Text view — the native path from
 GitUp/Nova/Kaleidoscope. The TS/Bun `preceipts-engine` is unchanged behind
 its subprocess boundary. Sublime spirit, macOS body: Cmd-key conventions,
 native menus, system feel throughout. VS Code's chrome is the layout
-reference, not its weight.
+reference, not its weight. For the Tahoe+ (macOS 26) look — standard
+chrome primitives, Liquid Glass, semantic colors, design tokens — see
+[modern-macos-feel.md](./modern-macos-feel.md).
 
 Architecture history, honestly: a GPUI implementation (decision 10,
 `app/`) validated the surface model, algorithm stack, watch discipline,
