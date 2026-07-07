@@ -32,8 +32,13 @@ final class SettingsWindowController: NSWindowController {
 @MainActor
 final class SettingsModel: ObservableObject {
     private static let clientIDKey = "GitHubOAuthClientID"
+    /// jokull's OAuth app (device flow enabled) — client IDs are public
+    /// identifiers, not secrets. Overridable in Settings.
+    private static let defaultClientID = "Ov23licJONCc4hbUWRuK"
 
-    @Published var clientID: String = UserDefaults.standard.string(forKey: clientIDKey) ?? "" {
+    @Published var clientID: String =
+        UserDefaults.standard.string(forKey: clientIDKey) ?? defaultClientID
+    {
         didSet { UserDefaults.standard.set(clientID, forKey: Self.clientIDKey) }
     }
     @Published var signedInAs: String?
