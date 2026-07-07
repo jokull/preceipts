@@ -5,6 +5,7 @@
 
 import AppKit
 import PreceiptsKit
+import SwiftUI
 
 final class CockpitViewController: NSSplitViewController {
     private let repo: URL
@@ -26,8 +27,15 @@ final class CockpitViewController: NSSplitViewController {
     private let feedbackPanel = FeedbackPanelViewController()
     private var feedbackItem: NSSplitViewItem?
 
+    /// Signed-in transport; nil falls back to the gh CLI.
+    private var github: GitHubClient?
+    private let prChipModel = PrChipModel()
+    private var prTimer: Timer?
+    private var prStatusInFlight = false
+
     deinit {
         hudTimer?.invalidate()
+        prTimer?.invalidate()
     }
 
     private let sidebar = SidebarViewController()
@@ -67,7 +75,54 @@ final class CockpitViewController: NSSplitViewController {
         content.delegate = self
         feedbackPanel.delegate = self
 
+        if let token = Keychain.loadToken() {
+            github = GitHubClient(token: token)
+        }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(authChanged),
+            name: .gitHubAuthChanged, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(windowFocused),
+            name: NSWindow.didBecomeKeyNotification, object: nil)
+        prTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.refreshPrStatus()
+        }
+
         requestReload()
+    }
+
+    @objc private func authChanged() {
+        github = Keychain.loadToken().map(GitHubClient.init(token:))
+        prFeedback = nil
+        refreshPrStatus()
+        if feedbackItem?.isCollapsed == false {
+            refreshFeedback()
+        }
+    }
+
+    @objc private func windowFocused(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === view.window else { return }
+        refreshPrStatus()
+    }
+
+    /// Poll politely: timer + window focus + after reloads; single-flight.
+    private func refreshPrStatus() {
+        guard let changeset, !prStatusInFlight else { return }
+        prStatusInFlight = true
+        if let github, let repo = changeset.githubRepo, let branch = changeset.branch {
+            Task { @MainActor [weak self] in
+                let status = try? await github.prStatus(repo: repo, branch: branch)
+                self?.prChipModel.status = status
+                self?.prStatusInFlight = false
+            }
+        } else if let gh, gh.available {
+            gh.fetchPrStatus { [weak self] status in
+                self?.prChipModel.status = status
+                self?.prStatusInFlight = false
+            }
+        } else {
+            prStatusInFlight = false
+        }
     }
 
     // ------------------------------------------------------------------
@@ -76,6 +131,7 @@ final class CockpitViewController: NSSplitViewController {
     private enum ToolbarID {
         static let scope = NSToolbarItem.Identifier("preceipts.scope")
         static let reload = NSToolbarItem.Identifier("preceipts.reload")
+        static let pr = NSToolbarItem.Identifier("preceipts.pr")
     }
 
     func makeToolbar() -> NSToolbar {
@@ -182,6 +238,7 @@ final class CockpitViewController: NSSplitViewController {
             refreshHud()
             ensureCommentStore(changeset)
             refreshFeedbackViews()
+            refreshPrStatus()
         case .failure(let error):
             content.showError(error.localizedDescription)
         }
@@ -229,12 +286,30 @@ final class CockpitViewController: NSSplitViewController {
     }
 
     private func refreshFeedback() {
-        guard let gh else { return }
-        guard gh.available else {
-            feedbackPanel.showStatus(GhError.notInstalled.localizedDescription)
+        feedbackPanel.showStatus("Fetching PR feedback\u{2026}")
+        // Signed in → URLSession; signed out → gh CLI; neither → explain.
+        if let github, let repo = changeset?.githubRepo, let branch = changeset?.branch {
+            Task { @MainActor [weak self] in
+                do {
+                    guard let feedback = try await github.fetchFeedback(
+                        repo: repo, branch: branch)
+                    else {
+                        self?.feedbackPanel.showStatus(GhError.noPr.localizedDescription)
+                        return
+                    }
+                    self?.prFeedback = feedback
+                    self?.refreshFeedbackViews()
+                } catch {
+                    self?.feedbackPanel.showStatus(error.localizedDescription)
+                }
+            }
             return
         }
-        feedbackPanel.showStatus("Fetching PR feedback\u{2026}")
+        guard let gh, gh.available else {
+            feedbackPanel.showStatus(
+                "Sign in to GitHub in Settings (\u{2318},) \u{2014} or install the gh CLI")
+            return
+        }
         gh.fetchFeedback { [weak self] result in
             guard let self else { return }
             switch result {
@@ -407,7 +482,7 @@ extension CockpitViewController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
             .toggleSidebar, .sidebarTrackingSeparator, ToolbarID.scope, .flexibleSpace,
-            ToolbarID.reload,
+            ToolbarID.pr, ToolbarID.reload,
         ]
     }
 
@@ -433,6 +508,13 @@ extension CockpitViewController: NSToolbarDelegate {
             item.view = control
             item.label = "Scope"
             item.toolTip = "Diff scope (\u{2318}\u{21e7}D)"
+            return item
+        case ToolbarID.pr:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            let host = NSHostingView(rootView: PrChipView(model: prChipModel))
+            host.sizingOptions = .intrinsicContentSize
+            item.view = host
+            item.label = "Pull Request"
             return item
         case ToolbarID.reload:
             let item = NSToolbarItem(itemIdentifier: itemIdentifier)

@@ -3,6 +3,11 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var cockpit: CockpitViewController!
+    private lazy var settings = SettingsWindowController()
+
+    @objc private func openSettings(_ sender: Any?) {
+        settings.show()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let repoPath =
@@ -56,6 +61,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             withTitle: "About preceipts",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: "")
+        menu.addItem(.separator())
+        let settingsItem = NSMenuItem(
+            title: "Settings\u{2026}",
+            action: #selector(openSettings(_:)),
+            keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Quit preceipts",

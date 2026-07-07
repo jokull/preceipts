@@ -80,7 +80,13 @@ default branch `preceipts`). Everything committed and pushed.
    copy/copy-all, click-to-anchor); drafts via row selection + ⌘⇧M
    popover; gutter comment badges. Deferred: inline chips under
    anchored rows (badges + panel for now), file filter in panel.
-5. GitHub OAuth device flow + Keychain.
+5. ~~GitHub OAuth device flow + Keychain~~ **done 2026-07-07**:
+   GitHubAuth (device flow, no wrapper deps — researched, see design
+   doc), Keychain token, GitHubClient (GraphQL PR status + REST
+   feedback), Settings ⌘, (client ID + sign in/out), toolbar PR chip
+   (60s + focus polling), gh-CLI fallback when signed out. NOTE: user
+   must create a GitHub OAuth app with device flow enabled and paste
+   its client ID into Settings to sign in.
 6. App bundle/icon/vendored libgit2/notarization via the vendored
    packaging skill.
 

@@ -119,6 +119,7 @@ public enum ChangesetLoader {
             baseName: baseName,
             baseBranch: baseBranch,
             branch: head.name,
+            githubRepo: reader.originRemoteURL().flatMap(GitHubRepo.parse(remoteURL:)),
             workdir: workdir,
             gitDir: reader.gitDir,
             files: files

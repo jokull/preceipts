@@ -77,6 +77,61 @@ final class GhClient {
         return PrFeedback(number: number, title: title, url: url, comments: comments)
     }
 
+    /// PR association for the current branch — the signed-out titlebar
+    /// chip. Completion on the main thread; nil when there's no PR.
+    func fetchPrStatus(completion: @escaping (PrStatus?) -> Void) {
+        guard let binary else {
+            completion(nil)
+            return
+        }
+        let workdir = workdir
+        DispatchQueue.global(qos: .utility).async {
+            let status = try? Self.prStatus(binary: binary, workdir: workdir)
+            DispatchQueue.main.async { completion(status) }
+        }
+    }
+
+    private static func prStatus(binary: URL, workdir: URL) throws -> PrStatus? {
+        let data = try run(
+            binary: binary, workdir: workdir,
+            arguments: [
+                "pr", "view", "--json", "number,title,url,reviewDecision,statusCheckRollup",
+            ])
+        guard let pr = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let number = pr["number"] as? Int
+        else { return nil }
+        return PrStatus(
+            number: number,
+            title: pr["title"] as? String ?? "",
+            url: pr["url"] as? String ?? "",
+            reviewDecision: (pr["reviewDecision"] as? String)
+                .flatMap(PrStatus.ReviewDecision.init(rawValue:)),
+            ciState: ciState(pr["statusCheckRollup"] as? [[String: Any]] ?? []))
+    }
+
+    /// Fold gh's rollup array (CheckRun status/conclusion + StatusContext
+    /// state) into one verdict.
+    private static func ciState(_ rollup: [[String: Any]]) -> PrStatus.CiState? {
+        guard !rollup.isEmpty else { return nil }
+        var pending = false
+        for item in rollup {
+            if let status = item["status"] as? String, status != "COMPLETED" {
+                pending = true
+                continue
+            }
+            let verdict = item["conclusion"] as? String ?? item["state"] as? String ?? ""
+            switch verdict {
+            case "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED":
+                return .failure
+            case "PENDING", "EXPECTED":
+                pending = true
+            default:
+                break
+            }
+        }
+        return pending ? .pending : .success
+    }
+
     /// `--paginate` concatenates JSON arrays; join the "][" seams.
     private static func normalizeSeams(_ data: Data) -> Data {
         guard let text = String(data: data, encoding: .utf8), text.contains("][") else {

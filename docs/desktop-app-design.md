@@ -109,9 +109,15 @@ default path.
 ## GitHub integration (new)
 
 - **Auth**: OAuth device flow with a public client ID (native app, no
-  secret). Token stored in the **macOS Keychain** (`security-framework`
-  crate), never on disk. Sign-in lives in Settings and is prompted
-  contextually ("Sign in to see PR status"), never required.
+  secret). Token stored in the **macOS Keychain**, never on disk.
+  Sign-in lives in Settings and is prompted contextually ("Sign in to
+  see PR status"), never required.
+- **No wrapper deps (researched 2026-07-07)**: OctoKit.swift is REST-only
+  with no device-flow support (the redirect OAuth flow only) — it covers
+  none of the hard parts (device flow, the GraphQL-only
+  reviewDecision/statusCheckRollup fields). KeychainAccess/Valet wrap the
+  one SecItem call we make. Same doctrine as the SwiftTreeSitter
+  decision: consume the platform APIs directly.
 - **Data (GraphQL)**: PR associated with the current branch (number, title,
   URL, review decision, mergeability, `statusCheckRollup`), base-branch
   movement. Poll politely (ETag/If-None-Match, ~60s), refresh on window

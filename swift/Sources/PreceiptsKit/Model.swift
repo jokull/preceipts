@@ -111,6 +111,8 @@ public struct Changeset: Sendable {
     /// engine's hud compares against. Nil when no base candidate resolves.
     public let baseBranch: String?
     public let branch: String?
+    /// owner/name when origin points at GitHub; nil otherwise.
+    public let githubRepo: GitHubRepo?
     public let workdir: URL
     public let gitDir: URL
     public let files: [FileDiff]
@@ -123,6 +125,7 @@ public struct Changeset: Sendable {
         baseName: String,
         baseBranch: String? = nil,
         branch: String?,
+        githubRepo: GitHubRepo? = nil,
         workdir: URL,
         gitDir: URL,
         files: [FileDiff]
@@ -131,6 +134,7 @@ public struct Changeset: Sendable {
         self.baseName = baseName
         self.baseBranch = baseBranch
         self.branch = branch
+        self.githubRepo = githubRepo
         self.workdir = workdir
         self.gitDir = gitDir
         self.files = files
