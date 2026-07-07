@@ -441,8 +441,8 @@ fn run_app_internal(
         }
 
         if state.needs_reload {
-            super::receipts::refresh(hud_base.clone());
             if let Some(ref pr) = pr_info {
+                super::receipts::refresh(hud_base.clone());
                 state.needs_reload = false;
                 // In PR mode, reload from GitHub (rare; sync is acceptable)
                 let file_diffs = match load_pr_file_diffs(pr) {
@@ -460,6 +460,11 @@ fn run_app_internal(
                 // PR-scope diff blocks the loop for seconds, and watch mode
                 // fires constantly while an agent edits the repo — the old
                 // frame stays interactive until the fresh diff arrives.
+                // refresh() only here, when a reload actually starts: while
+                // one is in flight needs_reload stays set and this branch is
+                // re-entered every loop tick — refreshing unconditionally
+                // above spawned an engine process every 100ms.
+                super::receipts::refresh(hud_base.clone());
                 state.needs_reload = false;
                 let opts = options.clone();
                 let changed_files = pending_watch_event.take().map(|e| e.changed_files);

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, RwLock};
 use std::time::Instant;
 
@@ -37,7 +37,8 @@ pub struct HudSnapshot {
 }
 
 static HUD: RwLock<Option<HudSnapshot>> = RwLock::new(None);
-static GENERATION: AtomicU64 = AtomicU64::new(0);
+static HUD_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static HUD_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn get() -> Option<HudSnapshot> {
     HUD.read().ok().and_then(|guard| guard.clone())
@@ -57,22 +58,34 @@ fn load(base: Option<&str>) -> Option<HudSnapshot> {
     serde_json::from_slice(&output.stdout).ok()
 }
 
-/// Refresh the snapshot off-thread. Stale results are dropped: only the most
-/// recently requested refresh may publish (watch mode can fire these fast).
+/// Refresh the snapshot off-thread. At most ONE engine process runs at a
+/// time: `hud --json` does a full worktree scan, and callers (timers, watch
+/// events, the app loop) can request refreshes far faster than one completes
+/// on a big repo — unguarded spawning snowballs into a process storm. A
+/// request landing mid-flight sets PENDING and the worker immediately loads
+/// once more before exiting, so the final snapshot is never stale.
 pub fn refresh(base: Option<String>) {
-    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if HUD_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        HUD_PENDING.store(true, Ordering::SeqCst);
+        return;
+    }
     std::thread::spawn(move || {
-        let snapshot = load(base.as_deref());
-        if GENERATION.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        if let Ok(mut guard) = HUD.write() {
-            // Keep the last good snapshot on transient failure; clear only if
-            // we never had one (so a repo without preceipts shows nothing).
-            if snapshot.is_some() || guard.is_none() {
-                *guard = snapshot;
+        loop {
+            let snapshot = load(base.as_deref());
+            if let Ok(mut guard) = HUD.write() {
+                // Keep the last good snapshot on transient failure; clear only
+                // if we never had one (repo without preceipts shows nothing).
+                if snapshot.is_some() || guard.is_none() {
+                    *guard = snapshot;
+                }
+            }
+            if !HUD_PENDING.swap(false, Ordering::SeqCst) {
+                break;
             }
         }
+        // A request racing between the PENDING check and this store is lost;
+        // the periodic timer re-requests within seconds, so it self-heals.
+        HUD_IN_FLIGHT.store(false, Ordering::SeqCst);
     });
 }
 
@@ -122,32 +135,42 @@ pub struct StatusSnapshot {
 }
 
 static STATUS: RwLock<Option<StatusSnapshot>> = RwLock::new(None);
-static STATUS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static STATUS_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static STATUS_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn status_get() -> Option<StatusSnapshot> {
     STATUS.read().ok().and_then(|guard| guard.clone())
 }
 
+/// Same single-flight discipline as [`refresh`]: `status --json` also scans
+/// the whole worktree, and the 5s timer must never lap a slow scan.
 pub fn refresh_status() {
-    let generation = STATUS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if STATUS_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        STATUS_PENDING.store(true, Ordering::SeqCst);
+        return;
+    }
     std::thread::spawn(move || {
-        let engine = crate::preceipts::engine_binary();
-        // `status` exits 1 when not green by design — parse stdout regardless
-        // of exit code; parse failure (no .preceipts, no engine) means None.
-        let snapshot = Command::new(engine)
-            .args(["status", "--json"])
-            .stdin(Stdio::null())
-            .output()
-            .ok()
-            .and_then(|output| serde_json::from_slice::<StatusSnapshot>(&output.stdout).ok());
-        if STATUS_GENERATION.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        if let Ok(mut guard) = STATUS.write() {
-            if snapshot.is_some() || guard.is_none() {
-                *guard = snapshot;
+        loop {
+            let engine = crate::preceipts::engine_binary();
+            // `status` exits 1 when not green by design — parse stdout
+            // regardless of exit code; parse failure (no .preceipts, no
+            // engine) means None.
+            let snapshot = Command::new(engine)
+                .args(["status", "--json"])
+                .stdin(Stdio::null())
+                .output()
+                .ok()
+                .and_then(|output| serde_json::from_slice::<StatusSnapshot>(&output.stdout).ok());
+            if let Ok(mut guard) = STATUS.write() {
+                if snapshot.is_some() || guard.is_none() {
+                    *guard = snapshot;
+                }
+            }
+            if !STATUS_PENDING.swap(false, Ordering::SeqCst) {
+                break;
             }
         }
+        STATUS_IN_FLIGHT.store(false, Ordering::SeqCst);
     });
 }
 
