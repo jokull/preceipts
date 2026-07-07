@@ -167,6 +167,144 @@ final class ThreadCardView: NSVisualEffectView {
     }
 }
 
+// ------------------------------------------------------------------
+// Tear
+
+/// A full-width conversation torn into the diff below its anchor range —
+/// it reads in the main scroll flow (no inner scroll), like an inline PR
+/// thread. Chrome regime inside the One Dark surface: the tear is the
+/// app showing through the document.
+final class ThreadTearView: NSView {
+    var onClose: (() -> Void)?
+
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let entriesStack = NSStackView()
+    private let contentStack = NSStackView()
+    private var model: ThreadCardModel?
+    private var lastWidth: CGFloat = 0
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        titleLabel.font = .monospacedSystemFont(
+            ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.lineBreakMode = .byTruncatingHead
+
+        let copy = button("doc.on.doc", "Copy thread", #selector(copyClicked(_:)))
+        let open = button("safari", "Open on GitHub", #selector(openClicked(_:)))
+        let close = button("xmark", "Close (Esc)", #selector(closeClicked(_:)))
+
+        let header = NSStackView(views: [titleLabel, NSView(), copy, open, close])
+        header.orientation = .horizontal
+        header.spacing = Metrics.unit
+
+        entriesStack.orientation = .vertical
+        entriesStack.alignment = .leading
+        entriesStack.spacing = Metrics.paddingWide
+
+        contentStack.orientation = .vertical
+        contentStack.alignment = .leading
+        contentStack.spacing = Metrics.padding
+        contentStack.edgeInsets = NSEdgeInsets(
+            top: Metrics.paddingWide, left: 2 * Metrics.paddingWide,
+            bottom: Metrics.paddingWide, right: 2 * Metrics.paddingWide)
+        contentStack.addArrangedSubview(header)
+        contentStack.addArrangedSubview(entriesStack)
+
+        let top = NSBox()
+        top.boxType = .separator
+        let bottom = NSBox()
+        bottom.boxType = .separator
+
+        for view in [contentStack, top, bottom] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            top.topAnchor.constraint(equalTo: topAnchor),
+            top.leadingAnchor.constraint(equalTo: leadingAnchor),
+            top.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bottom.bottomAnchor.constraint(equalTo: bottomAnchor),
+            bottom.leadingAnchor.constraint(equalTo: leadingAnchor),
+            bottom.trailingAnchor.constraint(equalTo: trailingAnchor),
+            contentStack.topAnchor.constraint(equalTo: topAnchor),
+            contentStack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            contentStack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            header.widthAnchor.constraint(
+                equalTo: contentStack.widthAnchor, constant: -4 * Metrics.paddingWide),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    private func button(
+        _ symbol: String, _ tooltip: String, _ action: Selector
+    ) -> NSButton {
+        let button = NSButton()
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
+        button.isBordered = false
+        button.controlSize = .small
+        button.target = self
+        button.action = action
+        button.toolTip = tooltip
+        return button
+    }
+
+    /// Populate and measure for `width`; returns the tear row height.
+    func prepare(_ model: ThreadCardModel, width: CGFloat) -> CGFloat {
+        self.model = model
+        titleLabel.stringValue = model.title
+        entriesStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        // Comfortable read width even on wide diffs.
+        let readable = min(width - 4 * Metrics.paddingWide, 680)
+        for entry in model.entries {
+            let block = NSStackView()
+            block.orientation = .vertical
+            block.alignment = .leading
+            block.spacing = 2
+            if let author = entry.author {
+                let head = NSTextField(labelWithString: "\(author)  \(entry.meta)")
+                head.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+                block.addArrangedSubview(head)
+            }
+            let body = NSTextField(wrappingLabelWithString: entry.body)
+            body.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
+            body.isSelectable = true
+            body.preferredMaxLayoutWidth = readable
+            block.addArrangedSubview(body)
+            entriesStack.addArrangedSubview(block)
+            body.widthAnchor.constraint(lessThanOrEqualToConstant: readable).isActive = true
+        }
+        return remeasure(width: width)
+    }
+
+    /// Height for the current model at `width` (wrapping text reflows).
+    func remeasure(width: CGFloat) -> CGFloat {
+        lastWidth = width
+        frame = NSRect(x: 0, y: 0, width: width, height: 10)
+        layoutSubtreeIfNeeded()
+        return contentStack.fittingSize.height
+    }
+
+    @objc private func copyClicked(_ sender: Any?) {
+        guard let model else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(model.digest, forType: .string)
+    }
+
+    @objc private func openClicked(_ sender: Any?) {
+        guard let model, let url = model.url.flatMap(URL.init(string:)) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func closeClicked(_ sender: Any?) {
+        onClose?()
+    }
+}
+
 /// Scroll document wrapping the entries stack, top-anchored.
 private final class FlippedStackDocument: NSView {
     override var isFlipped: Bool { true }
