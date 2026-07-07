@@ -54,66 +54,20 @@ final class SurfaceViewController: NSViewController {
     private var findIndexGeneration = 0
     private var pendingFindQuery: String?
 
-    /// Surface row → number of comments anchored there (drafts + GitHub);
-    /// not drawn — routes double-clicks to threads. Discovery lives in
-    /// the file tree bubbles and the navigator.
+    /// Surface row → number of comments anchored there (drafts + GitHub)
+    /// — the row bubbles; double-clicking one activates its thread in
+    /// the thread area.
     private var commentBadges: [Int: Int] = [:]
     /// Live claw while drag-selecting a range — previews the would-be
-    /// comment anchor; outranks the open tear's claw.
+    /// comment anchor; outranks the active thread's claw.
     private var previewClaw: (rows: ClosedRange<Int>, side: CommentSide)?
     private var dragSelecting = false
 
-    /// The thread area: one tear at a time. Anchored threads tear below
-    /// their range; the PR conversation tears in above the first file
-    /// (afterSurfaceRow == -1).
-    private let tearView = ThreadTearView()
-    private var tear: (afterSurfaceRow: Int, height: CGFloat)?
-    private var threadOpen = false
+    /// The active thread's claw — the only conversation UI in the diff;
+    /// reading happens in the thread area (trailing pane).
     private var threadAnchor: (rows: ClosedRange<Int>, side: CommentSide)?
-    var onThreadDismissed: (() -> Void)?
-
-    // ------------------------------------------------------------------
-    // Row-space mapping: the table shows the surface rows plus at most
-    // one variable-height tear row. Everything else stays in surface-row
-    // coordinates; these four helpers are the only crossing points.
-
-    private var tearTableRow: Int? {
-        tear.map { $0.afterSurfaceRow + 1 }
-    }
-
-    /// Nil when the table row IS the tear.
-    private func surfaceIndex(forTableRow row: Int) -> Int? {
-        guard let tearRow = tearTableRow else { return row }
-        if row == tearRow { return nil }
-        return row > tearRow ? row - 1 : row
-    }
-
-    private func tableRow(forSurfaceRow row: Int) -> Int {
-        guard let tear else { return row }
-        return row > tear.afterSurfaceRow ? row + 1 : row
-    }
-
-    /// Document y of a surface row's top.
-    private func yOfSurfaceRow(_ row: Int) -> CGFloat {
-        var y = CGFloat(row) * rowHeight
-        if let tear, row > tear.afterSurfaceRow {
-            y += tear.height
-        }
-        return y
-    }
-
-    /// Surface row containing document y (the tear belongs to its anchor).
-    private func surfaceRow(atY y: CGFloat) -> Int {
-        guard let tear else { return max(0, Int(y / rowHeight)) }
-        let tearTop = CGFloat(tear.afterSurfaceRow + 1) * rowHeight
-        if y < tearTop {
-            return max(0, Int(y / rowHeight))
-        }
-        if y < tearTop + tear.height {
-            return tear.afterSurfaceRow
-        }
-        return Int((y - tear.height) / rowHeight)
-    }
+    /// Esc with no find bar open — the cockpit pops the thread area.
+    var onEscape: (() -> Void)?
 
     // ------------------------------------------------------------------
     // View construction
@@ -153,7 +107,6 @@ final class SurfaceViewController: NSViewController {
         ])
         stickyHeader.isHidden = true
         ticks.isHidden = true
-        tearView.onClose = { [weak self] in self?.dismissThread(notify: true) }
         container.clipsToBounds = true
         container.addSubview(stickyHeader)
         container.addSubview(ticks)
@@ -228,8 +181,8 @@ final class SurfaceViewController: NSViewController {
     // Content
 
     func show(changeset: Changeset, surface: Surface) {
-        // The tear indexes into the old surface — drop it before reload.
-        dismissThread(notify: false)
+        // The claw indexes into the old surface — drop it before reload.
+        clearClaw()
         self.changeset = changeset
         self.surface = surface
         lastReportedFile = -1
@@ -279,7 +232,7 @@ final class SurfaceViewController: NSViewController {
 
     private var rowHeight: CGFloat { Theme.rowHeight }
     private var scrollY: CGFloat { scroll.contentView.bounds.origin.y }
-    private var topRow: Int { surfaceRow(atY: max(0, scrollY)) }
+    private var topRow: Int { max(0, Int(scrollY / rowHeight)) }
 
     @objc private func scrolled() {
         updateOverlays()
@@ -296,7 +249,7 @@ final class SurfaceViewController: NSViewController {
         if scrollY >= 0, let fileIndex = surface.fileIndex(atRow: topRow) {
             var pushUp: CGFloat = 0
             if fileIndex + 1 < surface.fileAnchors.count {
-                let nextY = yOfSurfaceRow(surface.fileAnchors[fileIndex + 1])
+                let nextY = CGFloat(surface.fileAnchors[fileIndex + 1]) * rowHeight
                 pushUp = min(0, nextY - scrollY - rowHeight)
             }
             stickyHeader.surfaceRow = .fileHeader(file: fileIndex)
@@ -330,22 +283,12 @@ final class SurfaceViewController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        // The tear's height depends on its width (wrapping text).
-        if let current = tear {
-            let height = tearView.remeasure(width: surfaceTable.frame.width)
-            if abs(height - current.height) > 0.5 {
-                tear = (current.afterSurfaceRow, height)
-                if let row = tearTableRow {
-                    surfaceTable.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
-                }
-            }
-        }
         updateOverlays()
     }
 
     /// Scroll so `row` sits at the top (below the sticky header) or centered.
     func scrollToRow(_ row: Int, centered: Bool = false) {
-        var y = yOfSurfaceRow(row)
+        var y = CGFloat(row) * rowHeight
         if centered {
             y -= (scroll.contentView.bounds.height - rowHeight) / 2
         }
@@ -384,53 +327,27 @@ final class SurfaceViewController: NSViewController {
     }
 
     // ------------------------------------------------------------------
-    // The thread area (one tear at a time)
+    // The claw (the active thread's range marker)
 
-    /// Anchored: tear below `anchorRows`, claw around the range.
-    /// Unanchored (`anchorRows` nil): the PR conversation, torn in above
-    /// the first file.
-    func presentTear(
-        _ content: TearContent, handlers: TearHandlers,
-        anchorRows: ClosedRange<Int>?, side: CommentSide
-    ) {
-        threadOpen = true
+    func showClaw(rows: ClosedRange<Int>, side: CommentSide) {
         previewClaw = nil
-        threadAnchor = anchorRows.map { ($0, side) }
-        let height = tearView.prepare(
-            content, handlers: handlers, width: surfaceTable.frame.width)
-        tear = (afterSurfaceRow: anchorRows?.upperBound ?? -1, height: height)
-        surfaceTable.reloadData()
-        if let anchorRows {
-            scrollToRow(anchorRows.lowerBound, centered: true)
-        } else {
-            scroll.contentView.scroll(to: .zero)
-            scroll.reflectScrolledClipView(scroll.contentView)
-        }
+        threadAnchor = (rows, side)
+        scrollToRow(rows.lowerBound, centered: true)
         refreshVisibleRows()
-        DispatchQueue.main.async { [weak self] in
-            self?.tearView.focusComposerIfRequested()
-        }
     }
 
-    func dismissThread(notify: Bool = false) {
-        guard threadOpen else { return }
-        threadOpen = false
+    func clearClaw() {
+        guard threadAnchor != nil || previewClaw != nil else { return }
         threadAnchor = nil
-        if tear != nil {
-            tear = nil
-            surfaceTable.reloadData()
-        }
+        previewClaw = nil
         refreshVisibleRows()
-        if notify {
-            onThreadDismissed?()
-        }
     }
 
     override func cancelOperation(_ sender: Any?) {
-        if threadOpen {
-            dismissThread(notify: true)
-        } else if findBar.isOpen {
+        if findBar.isOpen {
             closeFind()
+        } else {
+            onEscape?()
         }
     }
 
@@ -498,14 +415,12 @@ final class SurfaceViewController: NSViewController {
 
     func selectRow(_ row: Int) {
         guard row >= 0, row < surface.rows.count else { return }
-        surfaceTable.selectRowIndexes(
-            IndexSet(integer: tableRow(forSurfaceRow: row)), byExtendingSelection: false)
+        surfaceTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
     }
 
     @objc private func rowDoubleClicked(_ sender: Any?) {
-        guard surfaceTable.clickedRow >= 0,
-            let row = surfaceIndex(forTableRow: surfaceTable.clickedRow)
-        else { return }
+        let row = surfaceTable.clickedRow
+        guard row >= 0 else { return }
         if commentBadges[row] != nil {
             delegate?.surface(self, openThreadAtRow: row)
         } else if case .line = surface.rows[row] {
@@ -572,9 +487,8 @@ final class SurfaceViewController: NSViewController {
     /// Repaint materialized rows with the current row state — cheaper than
     /// reloadData and keeps scroll position untouched.
     private func refreshVisibleRows() {
-        surfaceTable.enumerateAvailableRowViews { [weak self] rowView, tableRow in
-            guard let self, let row = self.surfaceIndex(forTableRow: tableRow),
-                let cell = rowView.view(atColumn: 0) as? DiffRowView
+        surfaceTable.enumerateAvailableRowViews { [weak self] rowView, row in
+            guard let self, let cell = rowView.view(atColumn: 0) as? DiffRowView
             else { return }
             self.configureRowState(cell, row: row)
             cell.needsDisplay = true
@@ -588,7 +502,8 @@ final class SurfaceViewController: NSViewController {
         cell.isCurrentFindMatch =
             !findMatches.isEmpty && findCurrent < findMatches.count
             && findMatches[findCurrent] == row
-        cell.isRowSelected = surfaceTable.selectedRowIndexes.contains(tableRow(forSurfaceRow: row))
+        cell.isRowSelected = surfaceTable.selectedRowIndexes.contains(row)
+        cell.commentBadge = commentBadges[row] ?? 0
         // Live drag/compose preview wins over the open thread's claw.
         let span = previewClaw ?? threadAnchor
         if let span, span.rows.contains(row) {
@@ -611,22 +526,12 @@ final class SurfaceViewController: NSViewController {
 
 extension SurfaceViewController: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        surface.rows.count + (tear == nil ? 0 : 1)
-    }
-
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if row == tearTableRow {
-            return tear?.height ?? rowHeight
-        }
-        return rowHeight
+        surface.rows.count
     }
 
     func tableView(
         _ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int
     ) -> NSView? {
-        guard let surfaceRow = surfaceIndex(forTableRow: row) else {
-            return tearView
-        }
         let identifier = NSUserInterfaceItemIdentifier("diff-row")
         let cell =
             surfaceTable.makeView(withIdentifier: identifier, owner: nil) as? DiffRowView
@@ -635,17 +540,16 @@ extension SurfaceViewController: NSTableViewDataSource, NSTableViewDelegate {
                 view.identifier = identifier
                 return view
             }()
-        cell.surfaceRow = surface.rows[surfaceRow]
+        cell.surfaceRow = surface.rows[row]
         cell.changeset = changeset
-        configureRowState(cell, row: surfaceRow)
+        configureRowState(cell, row: row)
         cell.needsDisplay = true
         return cell
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        // Line rows select (comment anchoring); headers/gaps/tear don't.
-        guard let surfaceRow = surfaceIndex(forTableRow: row) else { return false }
-        if case .line = surface.rows[surfaceRow] {
+        // Line rows select (comment anchoring); headers/gaps don't.
+        if case .line = surface.rows[row] {
             return true
         }
         return false
@@ -654,9 +558,8 @@ extension SurfaceViewController: NSTableViewDataSource, NSTableViewDelegate {
     /// Table-row selection filtered down to surface line rows.
     private func selectedLineRows() -> [Int] {
         surfaceTable.selectedRowIndexes.compactMap { index in
-            guard let surfaceRow = surfaceIndex(forTableRow: index) else { return nil }
-            if case .line = surface.rows[surfaceRow] {
-                return surfaceRow
+            if case .line = surface.rows[index] {
+                return index
             }
             return nil
         }

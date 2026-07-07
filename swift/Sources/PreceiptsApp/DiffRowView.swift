@@ -14,6 +14,9 @@ final class DiffRowView: NSView {
     var isCurrentFindMatch = false
     /// Row selection (for comment anchoring) — drawn as an accent edge bar.
     var isRowSelected = false
+    /// Comments anchored to this row — the bubble; double-click opens
+    /// the thread in the thread area.
+    var commentBadge = 0
 
     /// This row's slice of the open thread's claw — the accent bracket
     /// hugging the anchored line range on the commented side.
@@ -41,6 +44,9 @@ final class DiffRowView: NSView {
             let fileDiff = changeset.files[file]
             drawLine(fileDiff.hunks[hunk].rows[row], file: fileDiff)
         }
+        if commentBadge > 0 {
+            drawCommentBubble()
+        }
         if let claw {
             drawClaw(claw.segment, side: claw.side)
         }
@@ -48,6 +54,32 @@ final class DiffRowView: NSView {
             NSColor.controlAccentColor.setFill()
             NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
         }
+    }
+
+    /// The row bubble: a quiet accent glyph (+ count when > 1) at the
+    /// trailing edge. Double-click opens the thread in the thread area.
+    private func drawCommentBubble() {
+        let config = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+            .applying(.init(paletteColors: [NSColor.controlAccentColor]))
+        guard
+            let icon = NSImage(
+                systemSymbolName: "text.bubble.fill", accessibilityDescription: "comments")?
+                .withSymbolConfiguration(config)
+        else { return }
+        var x = bounds.width - 24
+        if commentBadge > 1 {
+            let count = NSAttributedString(
+                string: "\(commentBadge)",
+                attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold),
+                    .foregroundColor: NSColor.controlAccentColor,
+                ])
+            let size = count.size()
+            count.draw(at: NSPoint(x: x, y: (bounds.height - size.height) / 2))
+            x -= 13
+        }
+        icon.draw(
+            in: NSRect(x: x - 11, y: (bounds.height - 11) / 2, width: 11, height: 11))
     }
 
     /// A 2px accent bracket at the commented half's edge: nubs at the

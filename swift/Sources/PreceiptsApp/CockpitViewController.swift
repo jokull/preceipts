@@ -24,7 +24,7 @@ final class CockpitViewController: NSSplitViewController {
     private var commentStore: CommentStore?
     private var commentStoreBranch: String?
     private var prFeedback: PrFeedback?
-    private let feedbackPanel = FeedbackPanelViewController()
+    private let threadArea = ThreadAreaViewController()
     private var feedbackItem: NSSplitViewItem?
 
     /// Signed-in transport; nil falls back to the gh CLI.
@@ -73,7 +73,7 @@ final class CockpitViewController: NSSplitViewController {
         addSplitViewItem(contentItem)
 
         // Feedback as an inspector pane: trailing material, collapsible.
-        let feedback = NSSplitViewItem(inspectorWithViewController: feedbackPanel)
+        let feedback = NSSplitViewItem(inspectorWithViewController: threadArea)
         feedback.minimumThickness = 320
         feedback.maximumThickness = 560
         feedback.canCollapse = true
@@ -83,16 +83,18 @@ final class CockpitViewController: NSSplitViewController {
 
         sidebar.delegate = self
         content.delegate = self
-        feedbackPanel.delegate = self
-        // Esc / ✕ pops the tear one level: thread → conversation → closed.
-        content.onThreadDismissed = { [weak self] in
+        threadArea.onRefresh = { [weak self] in
+            self?.refreshFeedback()
+        }
+        // Esc pops the thread area one level: thread → conversation →
+        // pane collapsed.
+        content.onEscape = { [weak self] in
             guard let self else { return }
             switch self.tearState {
             case .thread, .compose:
                 self.setTear(.conversation)
             case .conversation:
-                self.tearState = .closed
-                self.feedbackPanel.clearSelection()
+                self.setTear(.closed)
             case .closed:
                 break
             }
@@ -295,7 +297,6 @@ final class CockpitViewController: NSSplitViewController {
     /// every new changeset.
     private func refreshFeedbackViews() {
         let drafts = commentStore?.comments ?? []
-        feedbackPanel.apply(feedback: prFeedback, drafts: drafts)
 
         // File-tree bubbles: unresolved threads + drafts per path.
         var counts: [String: Int] = [:]
@@ -336,7 +337,7 @@ final class CockpitViewController: NSSplitViewController {
     }
 
     private func refreshFeedback() {
-        feedbackPanel.showStatus("Fetching PR feedback\u{2026}")
+        threadArea.showStatus("Fetching PR feedback\u{2026}")
         // Signed in → URLSession; signed out → gh CLI; neither → explain.
         if let github, let repo = changeset?.githubRepo, let branch = changeset?.branch {
             Task { @MainActor [weak self] in
@@ -344,19 +345,19 @@ final class CockpitViewController: NSSplitViewController {
                     guard let feedback = try await github.fetchFeedback(
                         repo: repo, branch: branch)
                     else {
-                        self?.feedbackPanel.showStatus(GhError.noPr.localizedDescription)
+                        self?.threadArea.showStatus(GhError.noPr.localizedDescription)
                         return
                     }
                     self?.prFeedback = feedback
                     self?.refreshFeedbackViews()
                 } catch {
-                    self?.feedbackPanel.showStatus(error.localizedDescription)
+                    self?.threadArea.showStatus(error.localizedDescription)
                 }
             }
             return
         }
         guard let gh, gh.available else {
-            feedbackPanel.showStatus(
+            threadArea.showStatus(
                 "Sign in to GitHub in Settings (\u{2318},) \u{2014} or install the gh CLI")
             return
         }
@@ -367,7 +368,7 @@ final class CockpitViewController: NSSplitViewController {
                 self.prFeedback = feedback
                 self.refreshFeedbackViews()
             case .failure(let error):
-                self.feedbackPanel.showStatus(error.localizedDescription)
+                self.threadArea.showStatus(error.localizedDescription)
             }
         }
     }
@@ -477,10 +478,9 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
         setTear(.compose(anchor))
     }
 
-    /// Double-click on a row with an anchored thread: open it.
+    /// Double-click on a row bubble: open its thread in the thread area.
     func surface(_ surface: SurfaceViewController, openThreadAtRow row: Int) {
         guard let item = navItem(atRow: row) else { return }
-        feedbackPanel.highlight(item)
         setTear(.thread(item))
     }
 
@@ -501,45 +501,7 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
     }
 }
 
-extension CockpitViewController: FeedbackPanelDelegate {
-    func feedbackPanelRequestsRefresh(_ panel: FeedbackPanelViewController) {
-        refreshFeedback()
-    }
-
-    func feedbackPanel(
-        _ panel: FeedbackPanelViewController, didSelect item: FeedbackNavItem?
-    ) {
-        guard let item else {
-            if case .thread = tearState {
-                setTear(.conversation)
-            } else if case .compose = tearState {
-                setTear(.conversation)
-            }
-            return
-        }
-        // Unanchored navigator rows (reviews, conversation comments) live
-        // in the conversation view.
-        if item.anchor == nil {
-            setTear(.conversation)
-        } else {
-            setTear(.thread(item))
-        }
-    }
-
-    func feedbackPanel(_ panel: FeedbackPanelViewController, deleteDraft id: UInt64) {
-        try? commentStore?.remove(id: id)
-        refreshFeedbackViews()
-        if case .thread(let item) = tearState, case .draft(let draft) = item, draft.id == id {
-            setTear(.conversation)
-        }
-    }
-
-    func feedbackPanel(
-        _ panel: FeedbackPanelViewController, anchorRowFor item: FeedbackNavItem
-    ) -> Int? {
-        resolveAnchorRows(item)?.lowerBound
-    }
-
+extension CockpitViewController {
     /// Surface-row span for an item's line range; nil when it no longer
     /// resolves in this changeset (partial ranges clamp to what does).
     private func resolveAnchorRows(_ item: FeedbackNavItem) -> ClosedRange<Int>? {
@@ -576,21 +538,30 @@ extension CockpitViewController: FeedbackPanelDelegate {
         tearState = state
         switch state {
         case .closed:
-            content.dismissThread()
-            feedbackPanel.clearSelection()
+            content.clearClaw()
+            feedbackItem?.animator().isCollapsed = true
         case .conversation:
-            content.presentTear(
-                conversationContent(), handlers: TearHandlers(),
-                anchorRows: nil, side: .new)
+            revealThreadArea()
+            content.clearClaw()
+            threadArea.render(conversationContent(), handlers: TearHandlers())
         case .thread(let item):
-            content.presentTear(
-                threadContent(item), handlers: threadHandlers(item),
-                anchorRows: resolveAnchorRows(item),
-                side: item.anchor?.side ?? .new)
+            revealThreadArea()
+            threadArea.render(threadContent(item), handlers: threadHandlers(item))
+            if let rows = resolveAnchorRows(item) {
+                content.showClaw(rows: rows, side: item.anchor?.side ?? .new)
+            } else {
+                content.clearClaw()
+            }
         case .compose(let anchor):
-            content.presentTear(
-                composeContent(anchor), handlers: composeHandlers(anchor),
-                anchorRows: anchor.rows, side: anchor.side)
+            revealThreadArea()
+            threadArea.render(composeContent(anchor), handlers: composeHandlers(anchor))
+            content.showClaw(rows: anchor.rows, side: anchor.side)
+        }
+    }
+
+    private func revealThreadArea() {
+        if feedbackItem?.isCollapsed == true {
+            feedbackItem?.animator().isCollapsed = false
         }
     }
 
@@ -730,9 +701,7 @@ extension CockpitViewController: FeedbackPanelDelegate {
                     body: body)
             else { return }
             self.refreshFeedbackViews()
-            let item = FeedbackNavItem.draft(draft)
-            self.feedbackPanel.highlight(item)
-            self.setTear(.thread(item))
+            self.setTear(.thread(.draft(draft)))
         }
         return handlers
     }
