@@ -75,24 +75,36 @@ struct StatusBarChips: View {
     // Receipts verdict — the one interactive chip; click opens the panel.
     @ViewBuilder private var receiptsChip: some View {
         let (symbol, text, tint) = receiptsVerdict
-        Button(action: { model.onReceiptsTap?() }) {
-            HStack(spacing: 4) {
-                if model.runInProgress {
-                    ProgressView()
-                        .controlSize(.mini)
-                } else {
-                    Image(systemName: symbol)
-                }
-                Text(text)
+        // Tinted icon, primary-color text: the verdict reads in the glyph
+        // and the label stays legible on any capsule/glass fill.
+        let label = HStack(spacing: 4) {
+            if model.runInProgress {
+                ProgressView()
+                    .controlSize(.mini)
+            } else {
+                Image(systemName: symbol)
+                    .foregroundStyle(tint)
             }
-            .font(.caption)
-            .foregroundStyle(tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .contentShape(Capsule())
+            Text(text)
+                .foregroundStyle(.primary)
+        }
+        .font(.caption)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .contentShape(Capsule())
+
+        Button(action: { model.onReceiptsTap?() }) {
+            // Glass belongs on the element itself, not on a background
+            // shape — a glass background composites as its own layer and
+            // can occlude the label.
+            if #available(macOS 26, *) {
+                label.glassEffect(
+                    .regular.tint(tint.opacity(0.2)).interactive(), in: .capsule)
+            } else {
+                label.background(Capsule().fill(tint.opacity(0.12)))
+            }
         }
         .buttonStyle(.plain)
-        .background(chipBackground(tint))
         .help("Receipts for the working tree — click for the panel (\u{2318}J)")
     }
 
@@ -139,18 +151,9 @@ struct StatusBarChips: View {
         }
     }
 
-    /// Glass for the interactive chip on Tahoe; flat capsule elsewhere.
-    @ViewBuilder private func chipBackground(_ tint: Color) -> some View {
-        if #available(macOS 26, *) {
-            Capsule().fill(.clear)
-                .glassEffect(.regular.tint(tint.opacity(0.2)).interactive(), in: .capsule)
-        } else {
-            Capsule().fill(tint.opacity(0.12))
-        }
-    }
 }
 
-/// A quiet, non-interactive statusbar chip.
+/// A quiet, non-interactive statusbar chip: tinted glyph, legible label.
 private struct Chip: View {
     let symbol: String
     let text: String
@@ -159,10 +162,11 @@ private struct Chip: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: symbol)
+                .foregroundStyle(tint)
             Text(text)
+                .foregroundStyle(.primary)
         }
         .font(.caption)
-        .foregroundStyle(tint)
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(Capsule().fill(tint.opacity(0.10)))
