@@ -85,9 +85,16 @@ final class ThreadAreaViewController: NSViewController {
         bodyStack.spacing = Metrics.paddingWide
 
         let document = ThreadAreaDocument(stack: bodyStack)
+        document.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = document
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
+        // Autolayout document: pin to the clip view, height from content.
+        NSLayoutConstraint.activate([
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+        ])
 
         statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         statusLabel.textColor = .secondaryLabelColor
@@ -106,7 +113,6 @@ final class ThreadAreaViewController: NSViewController {
         NSLayoutConstraint.activate([
             header.widthAnchor.constraint(equalTo: stack.widthAnchor),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            document.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             statusLabel.leadingAnchor.constraint(
                 equalTo: stack.leadingAnchor, constant: Metrics.paddingWide),
             statusLabel.widthAnchor.constraint(
@@ -149,10 +155,14 @@ final class ThreadAreaViewController: NSViewController {
 
         bodyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for entry in content.entries {
-            bodyStack.addArrangedSubview(entryBlock(entry))
+            let block = entryBlock(entry)
+            bodyStack.addArrangedSubview(block)
+            block.widthAnchor.constraint(equalTo: bodyStack.widthAnchor).isActive = true
         }
         for note in content.notes {
-            bodyStack.addArrangedSubview(noteBlock(note))
+            let block = noteBlock(note)
+            bodyStack.addArrangedSubview(block)
+            block.widthAnchor.constraint(equalTo: bodyStack.widthAnchor).isActive = true
         }
         if content.entries.isEmpty, content.notes.isEmpty, let empty = content.emptyText {
             let label = NSTextField(wrappingLabelWithString: empty)
