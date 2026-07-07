@@ -470,6 +470,30 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
         content.scrollToFile(fileIndex)
     }
 
+    /// Sidebar bubble → the first unresolved thread under that path
+    /// (files exactly, directories by prefix), drafts as fallback.
+    func sidebar(_ sidebar: SidebarViewController, openThreadsForPath path: String) {
+        let prefix = path + "/"
+        func matches(_ candidate: String) -> Bool {
+            candidate == path || candidate.hasPrefix(prefix)
+        }
+        let unresolved = FeedbackThread.group(prFeedback?.comments ?? [])
+            .filter { thread in
+                guard let threadPath = thread.root.path, matches(threadPath) else {
+                    return false
+                }
+                return prFeedback?.resolvedRootIds.contains(thread.root.id) != true
+            }
+            .sorted {
+                ($0.root.path ?? "", $0.root.line ?? 0) < ($1.root.path ?? "", $1.root.line ?? 0)
+            }
+        if let first = unresolved.first {
+            setTear(.thread(.thread(first)))
+        } else if let draft = (commentStore?.comments ?? []).first(where: { matches($0.path) }) {
+            setTear(.thread(.draft(draft)))
+        }
+    }
+
     func surface(_ surface: SurfaceViewController, didScrollToFile fileIndex: Int) {
         sidebar.highlight(fileIndex: fileIndex)
     }
@@ -543,7 +567,7 @@ extension CockpitViewController {
         case .conversation:
             revealThreadArea()
             content.clearClaw()
-            threadArea.render(conversationContent(), handlers: TearHandlers())
+            threadArea.render(conversationContent(), handlers: conversationHandlers())
         case .thread(let item):
             revealThreadArea()
             threadArea.render(threadContent(item), handlers: threadHandlers(item))
@@ -565,12 +589,22 @@ extension CockpitViewController {
         }
     }
 
+    /// Store path for PR-level draft notes (no file anchor).
+    static let conversationPath = "(conversation)"
+
+    private var conversationNotes: [LocalComment] {
+        (commentStore?.comments ?? []).filter { $0.path == Self.conversationPath }
+    }
+
     private func conversationContent() -> TearContent {
+        let notes = conversationNotes
         guard let feedback = prFeedback else {
             return TearContent(
-                breadcrumb: "Conversation", showBack: false, entries: [], notes: [],
-                url: nil, digest: "", composerPlaceholder: nil, focusComposer: false,
-                emptyText: "No PR feedback loaded \u{2014} refresh from the Feedback panel")
+                breadcrumb: "Conversation", showBack: false, entries: [], notes: notes,
+                url: nil, digest: formatDigest(notes.map(noteContext(_:))),
+                composerPlaceholder: "Add a PR note", focusComposer: false,
+                emptyText: notes.isEmpty
+                    ? "No PR feedback loaded \u{2014} refresh (\u{21bb}) or add a note" : nil)
         }
         let prLevel = FeedbackThread.group(feedback.comments)
             .filter { $0.root.path == nil }
@@ -580,12 +614,42 @@ extension CockpitViewController {
             breadcrumb: "#\(feedback.number)  \(feedback.title)",
             showBack: false,
             entries: prLevel.map(entry(_:)),
-            notes: [],
+            notes: notes,
             url: feedback.url,
-            digest: PrFeedback.digest(prLevel),
-            composerPlaceholder: nil,
+            digest: formatDigest(
+                prLevel.map(\.context) + notes.map(noteContext(_:))),
+            composerPlaceholder: "Add a PR note",
             focusComposer: false,
-            emptyText: "No PR-level conversation yet \u{2014} select a thread in a file")
+            emptyText: (prLevel.isEmpty && notes.isEmpty)
+                ? "No PR-level conversation yet \u{2014} click a bubble in the diff"
+                : nil)
+    }
+
+    private func noteContext(_ note: LocalComment) -> CommentContext {
+        CommentContext(
+            path: note.path, line: note.line, startLine: note.startLine,
+            lineText: note.quote ?? note.lineText, body: note.body, author: nil)
+    }
+
+    private func conversationHandlers() -> TearHandlers {
+        var handlers = TearHandlers()
+        handlers.saveNote = { [weak self] body in
+            guard let self else { return }
+            try? self.commentStore?.add(
+                path: Self.conversationPath, line: 0, side: .new, lineText: "", body: body)
+            self.refreshFeedbackViews()
+            self.setTear(.conversation)
+        }
+        handlers.updateNote = { [weak self] id, body in
+            try? self?.commentStore?.updateBody(id: id, body: body)
+            self?.refreshFeedbackViews()
+        }
+        handlers.deleteNote = { [weak self] id in
+            try? self?.commentStore?.remove(id: id)
+            self?.refreshFeedbackViews()
+            self?.setTear(.conversation)
+        }
+        return handlers
     }
 
     private func threadContent(_ item: FeedbackNavItem) -> TearContent {

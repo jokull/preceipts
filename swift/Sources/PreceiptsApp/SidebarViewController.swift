@@ -8,6 +8,8 @@ import PreceiptsKit
 
 protocol SidebarDelegate: AnyObject {
     func sidebar(_ sidebar: SidebarViewController, didSelectFile fileIndex: Int)
+    /// Bubble clicked — open the first thread under this path.
+    func sidebar(_ sidebar: SidebarViewController, openThreadsForPath path: String)
 }
 
 final class SidebarViewController: NSViewController {
@@ -129,6 +131,10 @@ extension SidebarViewController: NSOutlineViewDataSource, NSOutlineViewDelegate 
             outline.makeView(withIdentifier: identifier, owner: nil) as? FileTreeCellView
             ?? FileTreeCellView(identifier: identifier)
         cell.configure(node, comments: commentCount(for: node))
+        cell.onBubbleClick = { [weak self] in
+            guard let self else { return }
+            self.delegate?.sidebar(self, openThreadsForPath: node.path)
+        }
         return cell
     }
 
@@ -180,8 +186,9 @@ private final class FileTreeCellView: NSTableCellView {
         bubble.contentTintColor = .controlAccentColor
         bubble.setContentHuggingPriority(.required, for: .horizontal)
         bubble.setContentCompressionResistancePriority(.required, for: .horizontal)
-        bubble.isEnabled = false
-        bubble.toolTip = "Unresolved feedback in this file"
+        bubble.target = self
+        bubble.action = #selector(bubbleClicked(_:))
+        bubble.toolTip = "Unresolved feedback \u{2014} click to open"
 
         stats.font = .monospacedDigitSystemFont(
             ofSize: NSFont.smallSystemFontSize, weight: .regular)
@@ -212,6 +219,12 @@ private final class FileTreeCellView: NSTableCellView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    var onBubbleClick: (() -> Void)?
+
+    @objc private func bubbleClicked(_ sender: Any?) {
+        onBubbleClick?()
+    }
 
     func configure(_ node: FileTreeNode, comments: Int) {
         if comments > 0 {

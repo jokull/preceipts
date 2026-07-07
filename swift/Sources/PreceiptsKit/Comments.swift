@@ -83,11 +83,15 @@ public struct CommentContext {
 ///     This loop belongs in the reducer.
 ///
 public func formatComment(_ comment: CommentContext) -> String {
-    var out = "\(comment.path):"
-    if let start = comment.startLine, start != comment.line {
-        out += "\(min(start, comment.line))\u{2013}\(max(start, comment.line))\n"
+    var out: String
+    if comment.line < 1 {
+        // Unanchored (PR-level) note — no line reference.
+        out = "\(comment.path)\n"
+    } else if let start = comment.startLine, start != comment.line {
+        out =
+            "\(comment.path):\(min(start, comment.line))\u{2013}\(max(start, comment.line))\n"
     } else {
-        out += "\(comment.line)\n"
+        out = "\(comment.path):\(comment.line)\n"
     }
     for quoteLine in comment.lineText.split(separator: "\n", omittingEmptySubsequences: false) {
         let quoted = String(quoteLine).trimmingTrailingWhitespace()

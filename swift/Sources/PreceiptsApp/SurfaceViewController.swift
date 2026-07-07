@@ -86,6 +86,7 @@ final class SurfaceViewController: NSViewController {
         surfaceTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         surfaceTable.delegate = self
         surfaceTable.dataSource = self
+        surfaceTable.action = #selector(rowClicked(_:))
         surfaceTable.doubleAction = #selector(rowDoubleClicked(_:))
         surfaceTable.target = self
         surfaceTable.allowsMultipleSelection = true
@@ -416,6 +417,18 @@ final class SurfaceViewController: NSViewController {
     func selectRow(_ row: Int) {
         guard row >= 0, row < surface.rows.count else { return }
         surfaceTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+
+    /// Single click on a row's bubble opens its thread; clicks elsewhere
+    /// keep their selection semantics.
+    @objc private func rowClicked(_ sender: Any?) {
+        let row = surfaceTable.clickedRow
+        guard row >= 0, commentBadges[row] != nil, let event = NSApp.currentEvent
+        else { return }
+        let x = surfaceTable.convert(event.locationInWindow, from: nil).x
+        if x > surfaceTable.bounds.width - 56 {
+            delegate?.surface(self, openThreadAtRow: row)
+        }
     }
 
     @objc private func rowDoubleClicked(_ sender: Any?) {
