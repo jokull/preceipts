@@ -11,6 +11,13 @@ public enum ChangesetLoader {
         let workdir = try reader.workdir
         let head = try reader.headBranch()
 
+        // The engine's hud wants the base branch name in both scopes;
+        // "origin/main" and "main" both mean --base main.
+        let resolvedBase = try? reader.resolveBase()
+        let baseBranch = resolvedBase.map { name, _ in
+            name.hasPrefix("origin/") ? String(name.dropFirst("origin/".count)) : name
+        }
+
         let baseName: String
         let baseCommit: git_oid_boxed
         switch scope {
@@ -18,7 +25,7 @@ public enum ChangesetLoader {
             baseName = "HEAD"
             baseCommit = git_oid_boxed(head.oid)
         case .branch:
-            let base = try reader.resolveBase()
+            guard let base = resolvedBase else { throw PreceiptsError.noBase }
             baseName = "\(base.name)\u{2026}"
             baseCommit = git_oid_boxed(try reader.mergeBase(base.oid, head.oid))
         }
@@ -110,6 +117,7 @@ public enum ChangesetLoader {
         return Changeset(
             scope: scope,
             baseName: baseName,
+            baseBranch: baseBranch,
             branch: head.name,
             workdir: workdir,
             gitDir: reader.gitDir,

@@ -107,6 +107,9 @@ public struct Changeset: Sendable {
     public let scope: DiffScope
     /// Human name of the comparison base ("origin/main…" or "HEAD").
     public let baseName: String
+    /// Resolved base branch (e.g. "main"), independent of scope — what the
+    /// engine's hud compares against. Nil when no base candidate resolves.
+    public let baseBranch: String?
     public let branch: String?
     public let workdir: URL
     public let gitDir: URL
@@ -118,6 +121,7 @@ public struct Changeset: Sendable {
     public init(
         scope: DiffScope,
         baseName: String,
+        baseBranch: String? = nil,
         branch: String?,
         workdir: URL,
         gitDir: URL,
@@ -125,6 +129,7 @@ public struct Changeset: Sendable {
     ) {
         self.scope = scope
         self.baseName = baseName
+        self.baseBranch = baseBranch
         self.branch = branch
         self.workdir = workdir
         self.gitDir = gitDir
