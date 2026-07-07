@@ -1,0 +1,47 @@
+{
+  "": {
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/master.swiftdeps"
+  },
+  "/Users/jokull/Code/preceipts/swift/Sources/PreceiptsApp/AppDelegate.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/AppDelegate.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/AppDelegate.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/AppDelegate~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/AppDelegate.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/AppDelegate.dia"
+  },
+  "/Users/jokull/Code/preceipts/swift/Sources/PreceiptsApp/CockpitViewController.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/CockpitViewController.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/CockpitViewController.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/CockpitViewController~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/CockpitViewController.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/CockpitViewController.dia"
+  },
+  "/Users/jokull/Code/preceipts/swift/Sources/PreceiptsApp/DiffRowView.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/DiffRowView.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/DiffRowView.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/DiffRowView~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/DiffRowView.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/DiffRowView.dia"
+  },
+  "/Users/jokull/Code/preceipts/swift/Sources/PreceiptsApp/Theme.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Theme.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Theme.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Theme~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Theme.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Theme.dia"
+  },
+  "/Users/jokull/Code/preceipts/swift/Sources/PreceiptsApp/Watcher.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Watcher.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Watcher.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Watcher~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Watcher.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/Watcher.dia"
+  },
+  "/Users/jokull/Code/preceipts/swift/Sources/PreceiptsApp/main.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/main.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/main.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/main.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsApp.build/main.dia"
+  }
+}

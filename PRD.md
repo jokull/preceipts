@@ -380,3 +380,21 @@ user/agent action — `hud` reports staleness, it doesn't network.
     reference: file tree with actions/filters, bottom receipts panel, easy
     dirty ⇄ branch-diff scope toggle. Foundations research in
     docs/desktop-foundations.md; full design in docs/desktop-app-design.md.
+11. **All-native Swift app — no Rust core** (2026-07-07, user decision
+    after an architecture rethink). The desktop app must feel native, and
+    once the UI is Swift the Rust core inverts from convenience into a
+    permanent FFI tax: the heavyweight dependencies (libgit2, tree-sitter)
+    are C libraries Swift consumes first-class, and the novel logic
+    (similarity pairing, word-level intraline, segment composition, row
+    model) is ~500 tested lines that port in a day. So the Swift/AppKit
+    app owns UI *and* compute: libgit2 in-process for reads + line diffs
+    (patience + indent-heuristic — same xdiff lineage as histogram),
+    SwiftTreeSitter for highlighting, Swift ports of the display
+    algorithm with the same test suite, FSEvents watching, Keychain +
+    URLSession for GitHub. `preceipts-engine` (TS/Bun) is unchanged
+    behind its subprocess boundary (receipts/runs/hud as JSON/NDJSON).
+    The Rust workspace — TUI cockpit, preceipts-core, and the GPUI app
+    (decision 10) — is deprecated reference code until the Swift app
+    reaches parity, then removed. An intermediate "Swift shell over a
+    Rust-core C FFI" design was considered the same day and dropped
+    before any code shipped. Rationale in docs/desktop-app-design.md.

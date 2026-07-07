@@ -1,12 +1,28 @@
 # preceipts.app — desktop design
 
-*2026-07-07. Successor to the TUI cockpit (PRD decision 10). Stack per
-[desktop-foundations.md](./desktop-foundations.md): GPUI shell over a
-UI-agnostic `preceipts-core` Rust crate (gix reads, imara-diff, tree-sitter,
-watch), with the TS/Bun `preceipts-engine` unchanged behind its process
-boundary. Sublime spirit, macOS body: no vim keys, no modal input — Cmd-key
-conventions, native menus, system feel throughout. VS Code's chrome is the
-layout reference, not its weight.*
+*2026-07-07. Successor to the TUI cockpit (PRD decisions 10 + 11). Stack:
+**all-native Swift/AppKit** — the app owns UI *and* compute. libgit2 (C,
+in-process) provides git reads and line diffs (patience + indent-heuristic
+flags, the same xdiff lineage as git's histogram); SwiftTreeSitter provides
+highlighting; the display algorithm's novel passes (similarity-gated line
+pairing → word-level intraline → segment composition) are Swift ports of
+the tested Rust originals; FSEvents drives watch-mode reloads
+(single-flight, coalesced); Keychain + URLSession handle GitHub. The diff
+surface is a custom fixed-row-height Core Text view — the native path from
+[desktop-foundations.md](./desktop-foundations.md), proven by
+GitUp/Nova/Kaleidoscope. The TS/Bun `preceipts-engine` is unchanged behind
+its subprocess boundary. Sublime spirit, macOS body: Cmd-key conventions,
+native menus, system feel throughout. VS Code's chrome is the layout
+reference, not its weight.
+
+Architecture history, honestly: a GPUI implementation (decision 10,
+`app/`) validated the surface model, algorithm stack, watch discipline,
+and feedback/comments model in a day — its features port 1:1. A "Swift
+shell over a Rust-core C FFI" middle ground was considered and dropped the
+same day: the heavyweight dependencies are C libraries Swift consumes
+directly, so a Rust layer would be a permanent two-toolchain FFI tax
+guarding ~500 lines of portable logic. The Rust workspace (TUI, core, GPUI
+app) is deprecated reference code until this app reaches parity.*
 
 ## Layout
 
@@ -177,13 +193,27 @@ remappable the macOS way. `n/p/j/k/t/R` and friends are gone.
 
 ## Build shape
 
-Workspace: `core/` (preceipts-core: gix reads, imara-diff two-pass, tree-
-sitter highlight cache, FS watch, view models) · `app/` (GPUI shell) ·
-`engine/` (TS/Bun, unchanged) · existing TUI kept as-is during the
-transition, retired when the app reaches parity on the hard requirements.
+`swift/` — SPM package, the app:
+- `Clibgit2`: system-library target over Homebrew libgit2 (pkg-config);
+  static/vendored libgit2 comes with app-bundle packaging.
+- `PreceiptsKit`: the brains — GitReader (libgit2 reads), LineDiff
+  (libgit2 xdiff + pairing + intraline → DiffRow model), ChangesetLoader,
+  Segments. Fully covered by the test suite ported from the Rust core.
+- `PreceiptsApp`: AppKit shell — window, sidebar, fixed-row diff surface
+  (custom-drawn rows), statusbar, FSEvents watcher, menus.
+- Dev loop: `swift build && swift test` in `swift/`;
+  `swift run PreceiptsApp <repo>` to launch. App bundle + notarization
+  come later.
 
-Sequencing sketch: 1) core crate with diff/read/watch + a golden test
-against the TUI's output · 2) surface MVP (one file, side-by-side,
-virtualized) · 3) multibuffer + file tree + ⌘F · 4) chrome HUD + receipts
-panel wired to engine · 5) GitHub OAuth + PR chips · 6) polish (expand
-context, quick open, palette).
+`engine/` — TS/Bun, unchanged (receipts, runs, hud, land, sync, gc).
+
+Rust workspace (root TUI + `core/` + `app/` GPUI) — deprecated reference;
+delete when the Swift app reaches parity on the hard requirements.
+
+Sequencing from here: 1) SwiftTreeSitter highlighting (kit already
+renders segments; syntax spans plug into the same pipeline) · 2) ⌘F find
++ NSOutlineView file tree + sticky headers · 3) engine integration
+(receipts panel, statusbar HUD chips via `hud --json` / `run --events`)
+· 4) feedback viewer + draft comments port (models exist in the Rust
+reference) · 5) GitHub OAuth + Keychain · 6) app bundle, icon, vendored
+libgit2, notarization.

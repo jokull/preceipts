@@ -1,0 +1,19 @@
+{
+  "": {
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/master.swiftdeps"
+  },
+  "/Users/jokull/Code/preceipts/swift/Tests/PreceiptsKitTests/AlgorithmTests.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/AlgorithmTests.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/AlgorithmTests.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/AlgorithmTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/AlgorithmTests.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/AlgorithmTests.dia"
+  },
+  "/Users/jokull/Code/preceipts/swift/Tests/PreceiptsKitTests/ChangesetTests.swift": {
+    "dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/ChangesetTests.d",
+    "object": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/ChangesetTests.swift.o",
+    "swiftmodule": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/ChangesetTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/ChangesetTests.swiftdeps",
+    "diagnostics": "/Users/jokull/Code/preceipts/swift/.build/arm64-apple-macosx/debug/PreceiptsKitTests.build/ChangesetTests.dia"
+  }
+}
