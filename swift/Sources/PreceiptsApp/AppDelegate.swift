@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(editMenuItem())
         mainMenu.addItem(viewMenuItem())
         mainMenu.addItem(goMenuItem())
+        mainMenu.addItem(runMenuItem())
         NSApp.mainMenu = mainMenu
     }
 
@@ -116,10 +117,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "d")
         toggleScope.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(toggleScope)
+        let receipts = NSMenuItem(
+            title: "Toggle Receipts Panel",
+            action: #selector(CockpitViewController.toggleReceiptsPanel(_:)),
+            keyEquivalent: "j")
+        menu.addItem(receipts)
         menu.addItem(.separator())
-        menu.addItem(
-            withTitle: "Reload",
+        // ⌘R belongs to Run Checks (design keyboard map); watch mode makes
+        // manual reload the exception.
+        let reload = NSMenuItem(
+            title: "Reload",
             action: #selector(CockpitViewController.reload(_:)),
+            keyEquivalent: "r")
+        reload.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(reload)
+        item.submenu = menu
+        return item
+    }
+
+    private func runMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Run")
+        menu.addItem(
+            withTitle: "Run Checks",
+            action: #selector(CockpitViewController.runChecks(_:)),
             keyEquivalent: "r")
         item.submenu = menu
         return item

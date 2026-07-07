@@ -68,9 +68,11 @@ default branch `preceipts`). Everything committed and pushed.
    chrome colors, SF Symbols)~~ **done 2026-07-07**. Surface/FileTree/
    FindMatcher are Kit models with tests; chrome is semantic, the diff
    surface keeps One Dark (two-regime split per modern-macos-feel.md).
-3. Engine integration: statusbar HUD chips (`preceipts-engine hud
-   --json`), receipts panel (`run --events` NDJSON), single-flight
-   discipline (already the pattern in CockpitViewController).
+3. ~~Engine integration~~ **done 2026-07-07**: statusbar HUD chips
+   (SwiftUI island, glass gated macOS 26; hud --json single-flight on
+   watch events + 45s timer), receipts panel ⌘J (run --events NDJSON
+   streaming into disclosure rows), Run Checks ⌘R (Reload moved to
+   ⌘⇧R). Deferred: chip click actions for fetch/sync.
 4. Feedback viewer + draft comments (port from git history, above).
 5. GitHub OAuth device flow + Keychain.
 6. App bundle/icon/vendored libgit2/notarization via the vendored

@@ -16,6 +16,13 @@ final class CockpitViewController: NSSplitViewController {
     private var reloadQueued = false
     private var watcher: Watcher?
 
+    private var engine: EngineClient?
+    private var hudTimer: Timer?
+
+    deinit {
+        hudTimer?.invalidate()
+    }
+
     private let sidebar = SidebarViewController()
     private let content = SurfaceViewController()
     private var scopeControl: NSSegmentedControl?
@@ -154,9 +161,69 @@ final class CockpitViewController: NSSplitViewController {
             content.show(changeset: changeset, surface: surface)
             sidebar.show(tree: FileTree.build(changeset.files))
             updateWindowTitle(changeset)
+            ensureEngine(changeset)
+            refreshHud()
         case .failure(let error):
             content.showError(error.localizedDescription)
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Engine (hud + runs; timer + watch-event refresh, single-flight)
+
+    private func ensureEngine(_ changeset: Changeset) {
+        guard engine == nil else { return }
+        let engine = EngineClient(workdir: changeset.workdir)
+        self.engine = engine
+        content.statusModel.onReceiptsTap = { [weak self] in
+            self?.toggleReceiptsPanel(nil)
+        }
+        content.receiptsPanel.onRunClicked = { [weak self] in
+            self?.runChecks(nil)
+        }
+        guard engine.available else {
+            content.statusModel.hudError = "preceipts-engine not found"
+            return
+        }
+        hudTimer = Timer.scheduledTimer(withTimeInterval: 45, repeats: true) { [weak self] _ in
+            self?.refreshHud()
+        }
+    }
+
+    private func refreshHud() {
+        guard let engine, engine.available, let changeset else { return }
+        engine.refreshHud(base: changeset.baseBranch) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let hud):
+                self.content.statusModel.hud = hud
+                self.content.statusModel.hudError = nil
+                self.content.receiptsPanel.apply(status: hud.status)
+            case .failure(let error):
+                self.content.statusModel.hudError = error.localizedDescription
+            }
+        }
+    }
+
+    @objc func runChecks(_ sender: Any?) {
+        guard let engine, engine.available, !engine.runInProgress else { return }
+        content.showReceiptsPanel()
+        content.statusModel.runInProgress = true
+        content.receiptsPanel.beginRun()
+        engine.runChecks(
+            onEvent: { [weak self] event in
+                self?.content.receiptsPanel.handle(event)
+            },
+            completion: { [weak self] outcome in
+                guard let self else { return }
+                self.content.statusModel.runInProgress = false
+                self.content.receiptsPanel.endRun(outcome)
+                self.refreshHud()
+            })
+    }
+
+    @objc func toggleReceiptsPanel(_ sender: Any?) {
+        content.toggleReceiptsPanel()
     }
 
     private func ensureWatcher(_ changeset: Changeset) {

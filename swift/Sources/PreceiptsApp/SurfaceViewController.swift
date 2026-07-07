@@ -4,6 +4,7 @@
 
 import AppKit
 import PreceiptsKit
+import SwiftUI
 
 protocol SurfaceDelegate: AnyObject {
     func surface(_ surface: SurfaceViewController, didScrollToFile fileIndex: Int)
@@ -20,8 +21,10 @@ final class SurfaceViewController: NSViewController {
     private let stickyHeader = DiffRowView()
     private let findBar = FindBarView()
     private let ticks = FindTicksView()
-    private let statusLeft = NSTextField(labelWithString: "Loading\u{2026}")
-    private let statusRight = NSTextField(labelWithString: "")
+    /// HUD chips + file summary; the cockpit feeds hud/run state into it.
+    let statusModel = StatusBarModel()
+    /// Receipts panel (⌘J); the cockpit feeds status + run events into it.
+    let receiptsPanel = ReceiptsPanelView()
 
     private var findMatches: [Int] = []
     private var findCurrent = 0
@@ -78,7 +81,9 @@ final class SurfaceViewController: NSViewController {
         findBar.onStep = { [weak self] delta in self?.stepFindMatch(delta) }
         findBar.onClose = { [weak self] in self?.closeFind() }
 
-        let stack = NSStackView(views: [findBar, container, statusBar])
+        receiptsPanel.isHidden = true
+
+        let stack = NSStackView(views: [findBar, container, receiptsPanel, statusBar])
         stack.orientation = .vertical
         stack.spacing = 0
         stack.distribution = .fill
@@ -89,8 +94,10 @@ final class SurfaceViewController: NSViewController {
         NSLayoutConstraint.activate([
             findBar.heightAnchor.constraint(equalToConstant: Metrics.findBarHeight),
             statusBar.heightAnchor.constraint(equalToConstant: Metrics.statusBarHeight),
+            receiptsPanel.heightAnchor.constraint(equalToConstant: Metrics.receiptsPanelHeight),
             container.widthAnchor.constraint(equalTo: stack.widthAnchor),
             findBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            receiptsPanel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             statusBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
 
@@ -108,16 +115,9 @@ final class SurfaceViewController: NSViewController {
         let separator = NSBox()
         separator.boxType = .separator
 
-        statusLeft.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        statusLeft.textColor = .labelColor
-        statusRight.font = .monospacedDigitSystemFont(
-            ofSize: NSFont.smallSystemFontSize, weight: .regular)
-        statusRight.textColor = .secondaryLabelColor
-        for label in [statusLeft, statusRight] {
-            label.lineBreakMode = .byTruncatingTail
-        }
+        let chips = NSHostingView(rootView: StatusBarChips(model: statusModel))
 
-        for view in [separator, statusLeft, statusRight] as [NSView] {
+        for view in [separator, chips] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             bar.addSubview(view)
         }
@@ -125,16 +125,19 @@ final class SurfaceViewController: NSViewController {
             separator.topAnchor.constraint(equalTo: bar.topAnchor),
             separator.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-            statusLeft.leadingAnchor.constraint(
-                equalTo: bar.leadingAnchor, constant: Metrics.paddingWide),
-            statusLeft.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            statusRight.trailingAnchor.constraint(
-                equalTo: bar.trailingAnchor, constant: -Metrics.paddingWide),
-            statusRight.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            statusLeft.trailingAnchor.constraint(
-                lessThanOrEqualTo: statusRight.leadingAnchor, constant: -Metrics.paddingWide),
+            chips.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            chips.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            chips.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
         return bar
+    }
+
+    func toggleReceiptsPanel() {
+        receiptsPanel.isHidden.toggle()
+    }
+
+    func showReceiptsPanel() {
+        receiptsPanel.isHidden = false
     }
 
     // ------------------------------------------------------------------
@@ -171,18 +174,18 @@ final class SurfaceViewController: NSViewController {
     }
 
     func showError(_ message: String) {
-        statusLeft.stringValue = message
+        statusModel.message = message
     }
 
     private func updateStatusBar(_ changeset: Changeset) {
+        statusModel.message = nil
         let scopeLabel: String
         switch changeset.scope {
-        case .branch: scopeLabel = "Branch diff vs \(changeset.baseName)"
-        case .uncommitted: scopeLabel = "Uncommitted changes"
+        case .branch: scopeLabel = "vs \(changeset.baseName)"
+        case .uncommitted: scopeLabel = "uncommitted"
         }
-        statusLeft.stringValue = "\(scopeLabel) \u{2014} \(changeset.branch ?? "detached HEAD")"
-        statusRight.stringValue =
-            "\(changeset.files.count) files   +\(changeset.totalAdded) \u{2212}\(changeset.totalRemoved)"
+        statusModel.filesSummary =
+            "\(changeset.files.count) files  +\(changeset.totalAdded) \u{2212}\(changeset.totalRemoved)  \u{00b7}  \(scopeLabel)"
     }
 
     // ------------------------------------------------------------------
