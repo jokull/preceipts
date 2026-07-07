@@ -1,6 +1,6 @@
 // Intraline (word-level) diff for paired change rows — the fine pass of
 // the display algorithm (line diff → similarity pairing → word LCS).
-// Direct port of the tested Rust original (core/src/intraline.rs).
+// Direct port of the tested Rust original (core/src/intraline.rs, git history).
 // Byte offsets are UTF-8; tokens never split multi-byte characters.
 
 import Foundation

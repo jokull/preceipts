@@ -213,8 +213,13 @@ remappable the macOS way. `n/p/j/k/t/R` and friends are gone.
 
 `engine/` — TS/Bun, unchanged (receipts, runs, hud, land, sync, gc).
 
-Rust workspace (root TUI + `core/` + `app/` GPUI) — deprecated reference;
-delete when the Swift app reaches parity on the hard requirements.
+Rust workspace (root TUI + `core/` + `app/` GPUI) — **deleted 2026-07-07**
+once the algorithm suite was ported and highlighting landed. Everything
+is in git history (last present at `023b5a0`); the still-unported
+references for upcoming steps are `core/src/feedback.rs`,
+`core/src/comments.rs`, and the GPUI UI in `app/src/` (find bar,
+feedback panel, draft comments) — read them with
+`git show 023b5a0:<path>`.
 
 Sequencing from here: 1) ~~tree-sitter highlighting~~ **done** (raw C
 API; per-file parallel in the loader; 512KB cap so generated giants

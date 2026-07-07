@@ -1,6 +1,6 @@
 // Compose a diff line's render segments from two overlays: syntax spans
 // (foreground kind) and intraline changed ranges (background emphasis).
-// Port of the tested Rust original (app/src/segments.rs). Byte offsets
+// Port of the tested Rust original (app/src/segments.rs, git history). Byte offsets
 // are UTF-8; both producers emit character-aligned ranges so slices are
 // always valid.
 

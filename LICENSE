@@ -1,6 +1,12 @@
 MIT License
 
-Copyright (c) 2024 Sahaj Jain
+Copyright (c) 2026 Jökull Sólberg
+
+Historical note: revisions of this repository prior to July 2026 contain
+the Rust TUI derived from lumen (https://github.com/jnsahaj/lumen),
+Copyright (c) 2024 Sahaj Jain, MIT License. That code has been removed
+from the working tree but remains in git history under its original
+license.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

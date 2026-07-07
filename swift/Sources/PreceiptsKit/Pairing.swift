@@ -1,6 +1,6 @@
 // Similarity-gated pairing of removed/added lines inside a change block —
 // the middle pass of the display algorithm. Direct port of the tested
-// Rust original (core/src/pairing.rs). Positional pairing paints nonsense
+// Rust original (core/src/pairing.rs, git history). Positional pairing paints nonsense
 // intraline highlights whenever block shapes differ; order-preserving
 // alignment only pairs lines that plausibly are "the same line edited".
 

@@ -1,10 +1,10 @@
 // Tree-sitter highlight queries — mechanical port of the Rust registry
-// (core/src/highlight/queries.rs). Zig is dropped (no SPM grammar);
+// (core/src/highlight/queries.rs, git history). Zig is dropped (no SPM grammar);
 // elixir uses the grammar's bundled highlights.scm (Apache-2.0,
 // elixir-lang/tree-sitter-elixir v0.3.4).
 //
-// Regenerate with scratchpad convert-queries.py rather than editing the
-// query bodies by hand.
+// The generator script read the (now deleted) Rust file; edit query
+// bodies here directly from now on.
 
 enum HighlightQueries {
     static let typescript = #"""

@@ -33,27 +33,28 @@ Read [`PRD.md`](PRD.md) for the full design and decisions log.
 ## Quickstart
 
 ```sh
-# engine
-cd engine && bun install && bun run build   # → engine/dist/preceipts-engine
+# engine (receipts, runs, land)
+cd engine && bun install && bun run build     # → engine/dist/preceipts-engine
 
-# cockpit
-cargo build --release                        # → target/release/preceipts
+# desktop cockpit (macOS)
+cd swift && swift build                       # requires: brew install libgit2
+swift run PreceiptsApp /path/to/repo
 
 # in your repo
-preceipts init                               # scaffold .preceipts/
-preceipts run                                # run checks, mint receipts
-preceipts status                             # receipt table for the working tree
-preceipts hud                                # conflicts/freshness/sync at a glance
-preceipts land my-branch                     # squash + trailers + push, receipts willing
-preceipts                                    # open the cockpit
+preceipts-engine init         # scaffold .preceipts/
+preceipts-engine run          # run checks, mint receipts
+preceipts-engine status       # receipt table for the working tree
+preceipts-engine hud          # conflicts/freshness/sync at a glance
+preceipts-engine land my-branch   # squash + trailers + push, receipts willing
 ```
 
 Checks are plain executable files in `.preceipts/checks/` — exit 0 means
 pass. Required checks are listed in `.preceipts/config.toml`.
 
-## Credit
+## History
 
-The cockpit is built on [lumen](https://github.com/jnsahaj/lumen) by
-[@jnsahaj](https://github.com/jnsahaj) (MIT), whose upstream README is
-preserved at [`docs/LUMEN-README.md`](docs/LUMEN-README.md). We track
-upstream and intend to keep the diff-viewer core mergeable.
+preceipts started as a TUI built on [lumen](https://github.com/jnsahaj/lumen)
+by [@jnsahaj](https://github.com/jnsahaj) (MIT), then grew a Rust core and a
+GPUI prototype before landing on the all-native Swift app (PRD decisions
+10–11). The Rust workspace was removed from the working tree once its
+algorithms and tests were ported — mine it via git history if needed.

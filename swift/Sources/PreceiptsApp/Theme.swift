@@ -32,7 +32,7 @@ enum Theme {
     }
 
     // One Dark syntax palette, ported from the GPUI prototype
-    // (app/src/theme.rs). Kind indexes highlightNames; families map to
+    // (app/src/theme.rs, git history). Kind indexes highlightNames; families map to
     // colors, with variable.* refined by full name.
     static func syntaxColor(_ kind: UInt8?) -> NSColor {
         guard let kind, Int(kind) < highlightNames.count else { return fg }

@@ -1,5 +1,5 @@
 // Tree-sitter syntax highlighting: whole-file parse, per-line spans.
-// Port of the Rust registry (core/src/highlight/), directly on the
+// Port of the Rust registry (core/src/highlight/, now in git history only), directly on the
 // tree-sitter C API so byte offsets stay UTF-8 (the Swift wrapper layer
 // works in UTF-16). Compute per file, off the UI thread.
 //
