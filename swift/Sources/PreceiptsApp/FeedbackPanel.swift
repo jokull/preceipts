@@ -1,43 +1,47 @@
-// The feedback panel: PR review comments, review verdicts, conversation
-// comments (humans and bots), and local draft comments — one list with
-// filters and the copy affordances that feed coding agents
-// (docs/desktop-app-design.md "PR feedback viewer"). Chrome regime.
+// The feedback navigator: a compact source-list of PR threads and draft
+// comments — files as groups, one row per thread, no bodies. Reading
+// happens in the diff via the anchored thread card; this pane answers
+// "what's here, where" (docs/desktop-app-design.md "PR feedback viewer").
 
 import AppKit
 import PreceiptsKit
 
-enum FeedbackItem {
-    case github(FeedbackComment)
+enum FeedbackNavItem {
+    case thread(FeedbackThread)
     case draft(LocalComment)
 
-    var context: CommentContext {
+    var anchor: (path: String, range: ClosedRange<Int>, side: CommentSide)? {
         switch self {
-        case .github(let comment):
-            return comment.context
+        case .thread(let thread):
+            guard let path = thread.root.path, let range = thread.lineRange else { return nil }
+            return (path, range, thread.root.side)
         case .draft(let draft):
-            return CommentContext(
-                path: draft.path, line: draft.line, lineText: draft.lineText,
-                body: draft.body, author: nil)
+            return (draft.path, draft.line...draft.line, draft.side)
         }
     }
 
-    var anchor: (path: String, line: Int, side: CommentSide)? {
+    var contexts: [CommentContext] {
         switch self {
-        case .github(let comment):
-            guard let path = comment.path, let line = comment.line else { return nil }
-            return (path, line, .new)
+        case .thread(let thread):
+            return thread.comments.map(\.context)
         case .draft(let draft):
-            return (draft.path, draft.line, draft.side)
+            return [
+                CommentContext(
+                    path: draft.path, line: draft.line, lineText: draft.lineText,
+                    body: draft.body, author: nil)
+            ]
         }
     }
 }
 
 protocol FeedbackPanelDelegate: AnyObject {
     func feedbackPanelRequestsRefresh(_ panel: FeedbackPanelViewController)
-    func feedbackPanel(_ panel: FeedbackPanelViewController, scrollTo item: FeedbackItem)
+    /// Selection changed; nil = deselected. The cockpit opens/closes the
+    /// anchored thread card.
+    func feedbackPanel(_ panel: FeedbackPanelViewController, didSelect item: FeedbackNavItem?)
     func feedbackPanel(_ panel: FeedbackPanelViewController, deleteDraft id: UInt64)
     /// Nil when the anchor no longer matches the current changeset.
-    func feedbackPanel(_ panel: FeedbackPanelViewController, anchorRowFor item: FeedbackItem)
+    func feedbackPanel(_ panel: FeedbackPanelViewController, anchorRowFor item: FeedbackNavItem)
         -> Int?
 }
 
@@ -46,165 +50,236 @@ final class FeedbackPanelViewController: NSViewController {
 
     private var feedback: PrFeedback?
     private var drafts: [LocalComment] = []
-    private var visible: [FeedbackItem] = []
 
-    private let title_ = NSTextField(labelWithString: "Feedback")
-    private let refreshButton = NSButton()
-    private let authorFilter = NSSegmentedControl(
-        labels: ["All", "Humans", "Bots"], trackingMode: .selectOne, target: nil, action: nil)
-    private let outdatedToggle = NSButton(
-        checkboxWithTitle: "Outdated", target: nil, action: nil)
-    private let copyAllButton = NSButton()
-    private let table = NSTableView()
-    private let emptyLabel = NSTextField(wrappingLabelWithString: "")
+    // Filters
+    private var authorFilter: AuthorFilter = .all
+    private var showOutdated = true
+
+    private enum AuthorFilter: Int {
+        case all, humans, bots
+    }
+
+    // Outline model: groups of rows.
+    private final class Group {
+        let title: String
+        var items: [Row]
+        init(title: String, items: [Row]) {
+            self.title = title
+            self.items = items
+        }
+    }
+
+    private final class Row {
+        let item: FeedbackNavItem
+        let outdated: Bool
+        init(item: FeedbackNavItem, outdated: Bool) {
+            self.item = item
+            self.outdated = outdated
+        }
+    }
+
+    private var groups: [Group] = []
+
+    private let prTitle = NSTextField(labelWithString: "Feedback")
+    private let outline = NSOutlineView()
+    private let statusLabel = NSTextField(wrappingLabelWithString: "No feedback loaded")
+    private var suppressSelection = false
 
     // ------------------------------------------------------------------
     // View construction
 
     override func loadView() {
-        title_.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        title_.textColor = .labelColor
-        title_.lineBreakMode = .byTruncatingTail
+        prTitle.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        prTitle.lineBreakMode = .byTruncatingTail
 
-        refreshButton.image = NSImage(
+        let refresh = NSButton()
+        refresh.image = NSImage(
             systemSymbolName: "arrow.clockwise", accessibilityDescription: "refresh")
-        refreshButton.bezelStyle = .accessoryBarAction
-        refreshButton.controlSize = .small
-        refreshButton.target = self
-        refreshButton.action = #selector(refreshClicked(_:))
-        refreshButton.toolTip = "Fetch PR feedback (gh)"
+        refresh.isBordered = false
+        refresh.controlSize = .small
+        refresh.target = self
+        refresh.action = #selector(refreshClicked(_:))
+        refresh.toolTip = "Fetch PR feedback"
 
-        authorFilter.selectedSegment = 0
-        authorFilter.controlSize = .small
-        authorFilter.target = self
-        authorFilter.action = #selector(filtersChanged(_:))
-
-        outdatedToggle.state = .on
-        outdatedToggle.controlSize = .small
-        outdatedToggle.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        outdatedToggle.target = self
-        outdatedToggle.action = #selector(filtersChanged(_:))
-        outdatedToggle.toolTip = "Show comments whose anchor no longer matches the diff"
-
-        copyAllButton.title = "Copy All"
-        copyAllButton.image = NSImage(
+        let copyAll = NSButton()
+        copyAll.image = NSImage(
             systemSymbolName: "doc.on.doc", accessibilityDescription: "copy all")
-        copyAllButton.imagePosition = .imageLeading
-        copyAllButton.bezelStyle = .accessoryBarAction
-        copyAllButton.controlSize = .small
-        copyAllButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        copyAllButton.target = self
-        copyAllButton.action = #selector(copyAllClicked(_:))
-        copyAllButton.toolTip = "Copy every visible comment as a by-file digest"
+        copyAll.isBordered = false
+        copyAll.controlSize = .small
+        copyAll.target = self
+        copyAll.action = #selector(copyAllClicked(_:))
+        copyAll.toolTip = "Copy all visible comments as a by-file digest"
 
-        let headerRow = NSStackView(views: [title_, NSView(), refreshButton])
-        headerRow.orientation = .horizontal
-        headerRow.spacing = Metrics.padding
-        let filterRow = NSStackView(views: [authorFilter, outdatedToggle, NSView(), copyAllButton])
-        filterRow.orientation = .horizontal
-        filterRow.spacing = Metrics.padding
+        let filter = NSPopUpButton()
+        filter.pullsDown = true
+        filter.isBordered = false
+        filter.controlSize = .small
+        let filterMenu = NSMenu()
+        let iconItem = NSMenuItem()
+        iconItem.image = NSImage(
+            systemSymbolName: "line.3.horizontal.decrease.circle",
+            accessibilityDescription: "filter")
+        filterMenu.addItem(iconItem)  // pull-down title slot
+        for (title, tag) in [("All Authors", 0), ("Humans", 1), ("Bots", 2)] {
+            let item = NSMenuItem(
+                title: title, action: #selector(authorFilterChanged(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+            filterMenu.addItem(item)
+        }
+        filterMenu.addItem(.separator())
+        let outdatedItem = NSMenuItem(
+            title: "Show Outdated", action: #selector(toggleOutdated(_:)), keyEquivalent: "")
+        outdatedItem.target = self
+        filterMenu.addItem(outdatedItem)
+        filter.menu = filterMenu
+        filter.toolTip = "Filter feedback"
 
-        let column = NSTableColumn(identifier: .init("feedback"))
+        let header = NSStackView(views: [prTitle, NSView(), filter, copyAll, refresh])
+        header.orientation = .horizontal
+        header.spacing = Metrics.unit
+        header.edgeInsets = NSEdgeInsets(
+            top: Metrics.padding, left: Metrics.paddingWide,
+            bottom: 0, right: Metrics.padding)
+
+        let column = NSTableColumn(identifier: .init("nav"))
         column.resizingMask = .autoresizingMask
-        table.addTableColumn(column)
-        table.headerView = nil
-        table.usesAutomaticRowHeights = true
-        table.style = .inset
-        table.selectionHighlightStyle = .regular
-        table.intercellSpacing = NSSize(width: 0, height: 6)
-        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        table.delegate = self
-        table.dataSource = self
-        table.action = #selector(rowClicked(_:))
-        table.target = self
+        outline.addTableColumn(column)
+        outline.outlineTableColumn = column
+        outline.headerView = nil
+        outline.style = .sourceList
+        outline.rowSizeStyle = .small
+        outline.floatsGroupRows = false
+        outline.indentationPerLevel = 4
+        outline.autoresizesOutlineColumn = false
+        outline.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        outline.allowsEmptySelection = true
+        outline.delegate = self
+        outline.dataSource = self
+        outline.menu = makeContextMenu()
 
         let scroll = NSScrollView()
-        scroll.documentView = table
+        scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
-        table.backgroundColor = .clear
+        outline.backgroundColor = .clear
 
-        emptyLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.stringValue = "No feedback loaded"
+        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        statusLabel.textColor = .secondaryLabelColor
 
-        let stack = NSStackView(views: [headerRow, filterRow, scroll, emptyLabel])
+        let statusWrap = NSStackView(views: [statusLabel])
+        statusWrap.edgeInsets = NSEdgeInsets(
+            top: 0, left: Metrics.paddingWide, bottom: Metrics.padding,
+            right: Metrics.paddingWide)
+
+        let stack = NSStackView(views: [header, scroll, statusWrap])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = Metrics.padding
-        stack.edgeInsets = NSEdgeInsets(
-            top: Metrics.padding, left: Metrics.paddingWide,
-            bottom: Metrics.padding, right: Metrics.paddingWide)
+        stack.spacing = Metrics.unit
         scroll.setContentHuggingPriority(.init(1), for: .vertical)
-
         self.view = stack
         NSLayoutConstraint.activate([
-            headerRow.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
-            filterRow.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
-            scroll.widthAnchor.constraint(
-                equalTo: stack.widthAnchor, constant: -2 * Metrics.paddingWide),
+            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            statusWrap.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
     }
 
+    private func makeContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(
+            withTitle: "Copy", action: #selector(copyRowClicked(_:)), keyEquivalent: ""
+        ).target = self
+        menu.addItem(
+            withTitle: "Open on GitHub", action: #selector(openRowClicked(_:)),
+            keyEquivalent: ""
+        ).target = self
+        menu.addItem(
+            withTitle: "Delete Draft", action: #selector(deleteRowClicked(_:)),
+            keyEquivalent: ""
+        ).target = self
+        return menu
+    }
+
     // ------------------------------------------------------------------
-    // State from the cockpit
+    // State
 
     func apply(feedback: PrFeedback?, drafts: [LocalComment]) {
         self.feedback = feedback
         self.drafts = drafts
         if let feedback {
-            title_.stringValue = "#\(feedback.number) \(feedback.title)"
-            title_.toolTip = feedback.url
+            prTitle.stringValue = "#\(feedback.number) \(feedback.title)"
+            prTitle.toolTip = feedback.url
         }
         rebuild()
     }
 
     func showStatus(_ message: String) {
-        emptyLabel.stringValue = message
-        emptyLabel.isHidden = false
+        statusLabel.stringValue = message
+        statusLabel.isHidden = false
+    }
+
+    /// Deselect without echoing back (card closed from the diff side).
+    func clearSelection() {
+        suppressSelection = true
+        outline.deselectAll(nil)
+        suppressSelection = false
     }
 
     private func rebuild() {
-        var items: [FeedbackItem] = drafts.map { .draft($0) }
-        if let feedback {
-            items += feedback.comments.map { FeedbackItem.github($0) }
-        }
-        visible = items.filter { item in
-            switch item {
-            case .draft:
-                return true
-            case .github(let comment):
-                switch authorFilter.selectedSegment {
-                case 1 where comment.isBot: return false
-                case 2 where !comment.isBot: return false
-                default: break
-                }
-                if outdatedToggle.state == .off, isOutdated(item) {
-                    return false
-                }
-                return true
+        var fileGroups: [String: [Row]] = [:]
+        var conversation: [Row] = []
+
+        for thread in FeedbackThread.group(feedback?.comments ?? []) {
+            switch authorFilter {
+            case .humans where thread.root.isBot: continue
+            case .bots where !thread.root.isBot: continue
+            default: break
+            }
+            let item = FeedbackNavItem.thread(thread)
+            let outdated =
+                thread.root.outdated
+                || (item.anchor != nil
+                    && delegate?.feedbackPanel(self, anchorRowFor: item) == nil)
+            if outdated, !showOutdated { continue }
+            let row = Row(item: item, outdated: outdated)
+            if let path = thread.root.path {
+                fileGroups[path, default: []].append(row)
+            } else {
+                conversation.append(row)
             }
         }
-        table.reloadData()
-        emptyLabel.isHidden = !visible.isEmpty
-        if visible.isEmpty {
-            emptyLabel.stringValue =
-                feedback == nil
-                ? "No feedback loaded"
-                : "No comments match the current filters"
-        }
-    }
 
-    /// GitHub says outdated via nulled line; drafts (and github rows) are
-    /// also outdated when their anchor no longer resolves in this diff.
-    private func isOutdated(_ item: FeedbackItem) -> Bool {
-        if case .github(let comment) = item, comment.outdated {
-            return true
+        groups = []
+        if !drafts.isEmpty {
+            groups.append(
+                Group(
+                    title: "Drafts",
+                    items: drafts.map { draft in
+                        let item = FeedbackNavItem.draft(draft)
+                        let outdated =
+                            delegate?.feedbackPanel(self, anchorRowFor: item) == nil
+                        return Row(item: item, outdated: outdated)
+                    }))
         }
-        guard item.anchor != nil else { return false }
-        return delegate?.feedbackPanel(self, anchorRowFor: item) == nil
+        for path in fileGroups.keys.sorted() {
+            groups.append(Group(title: path, items: fileGroups[path]!))
+        }
+        if !conversation.isEmpty {
+            groups.append(Group(title: "Conversation", items: conversation))
+        }
+
+        suppressSelection = true
+        outline.reloadData()
+        outline.expandItem(nil, expandChildren: true)
+        suppressSelection = false
+
+        let count = groups.reduce(0) { $0 + $1.items.count }
+        statusLabel.isHidden = count > 0
+        if count == 0 {
+            statusLabel.stringValue =
+                feedback == nil ? "No feedback loaded" : "Nothing matches the filters"
+        }
     }
 
     // ------------------------------------------------------------------
@@ -215,167 +290,214 @@ final class FeedbackPanelViewController: NSViewController {
         delegate?.feedbackPanelRequestsRefresh(self)
     }
 
-    @objc private func filtersChanged(_ sender: Any?) {
+    @objc private func authorFilterChanged(_ sender: NSMenuItem) {
+        authorFilter = AuthorFilter(rawValue: sender.tag) ?? .all
+        sender.menu?.items.forEach { item in
+            if item.action == #selector(authorFilterChanged(_:)) {
+                item.state = item.tag == sender.tag ? .on : .off
+            }
+        }
+        rebuild()
+    }
+
+    @objc private func toggleOutdated(_ sender: NSMenuItem) {
+        showOutdated.toggle()
+        sender.state = showOutdated ? .on : .off
         rebuild()
     }
 
     @objc private func copyAllClicked(_ sender: Any?) {
-        let digest = formatDigest(visible.map(\.context))
+        let contexts = groups.flatMap(\.items).flatMap(\.item.contexts)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(digest, forType: .string)
+        NSPasteboard.general.setString(formatDigest(contexts), forType: .string)
     }
 
-    @objc private func rowClicked(_ sender: Any?) {
-        let row = table.clickedRow
-        guard row >= 0, row < visible.count else { return }
-        delegate?.feedbackPanel(self, scrollTo: visible[row])
+    private var clickedRow: Row? {
+        outline.item(atRow: outline.clickedRow) as? Row
     }
 
-    fileprivate func copy(_ item: FeedbackItem) {
+    @objc private func copyRowClicked(_ sender: Any?) {
+        guard let row = clickedRow else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(formatComment(item.context), forType: .string)
+        NSPasteboard.general.setString(
+            row.item.contexts.map(formatComment).joined(separator: "\n"), forType: .string)
     }
 
-    fileprivate func delete(_ item: FeedbackItem) {
-        if case .draft(let draft) = item {
-            delegate?.feedbackPanel(self, deleteDraft: draft.id)
-        }
+    @objc private func openRowClicked(_ sender: Any?) {
+        guard let row = clickedRow, case .thread(let thread) = row.item,
+            let url = URL(string: thread.root.url)
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func deleteRowClicked(_ sender: Any?) {
+        guard let row = clickedRow, case .draft(let draft) = row.item else { return }
+        delegate?.feedbackPanel(self, deleteDraft: draft.id)
     }
 }
 
 // ------------------------------------------------------------------
-// Table
+// Outline
 
-extension FeedbackPanelViewController: NSTableViewDataSource, NSTableViewDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        visible.count
+extension FeedbackPanelViewController: NSOutlineViewDataSource, NSOutlineViewDelegate {
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        if item == nil { return groups.count }
+        return (item as? Group)?.items.count ?? 0
     }
 
-    func tableView(
-        _ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if let group = item as? Group { return group.items[index] }
+        return groups[index]
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        item is Group
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
+        item is Group
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+        item is Row
+    }
+
+    func outlineView(
+        _ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any
     ) -> NSView? {
-        let identifier = NSUserInterfaceItemIdentifier("feedback-cell")
+        if let group = item as? Group {
+            let identifier = NSUserInterfaceItemIdentifier("nav-group")
+            let cell =
+                outline.makeView(withIdentifier: identifier, owner: nil) as? NSTableCellView
+                ?? {
+                    let cell = NSTableCellView()
+                    cell.identifier = identifier
+                    let label = NSTextField(labelWithString: "")
+                    label.font = .systemFont(
+                        ofSize: NSFont.smallSystemFontSize - 1, weight: .semibold)
+                    label.textColor = .secondaryLabelColor
+                    label.lineBreakMode = .byTruncatingHead
+                    label.translatesAutoresizingMaskIntoConstraints = false
+                    cell.addSubview(label)
+                    cell.textField = label
+                    NSLayoutConstraint.activate([
+                        label.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+                        label.trailingAnchor.constraint(
+                            lessThanOrEqualTo: cell.trailingAnchor),
+                        label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                    ])
+                    return cell
+                }()
+            cell.textField?.stringValue = group.title
+            cell.textField?.toolTip = group.title
+            return cell
+        }
+        guard let row = item as? Row else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("nav-row")
         let cell =
-            table.makeView(withIdentifier: identifier, owner: nil) as? FeedbackCellView
-            ?? FeedbackCellView(identifier: identifier)
-        let item = visible[row]
-        cell.configure(item, outdated: isOutdated(item))
-        cell.onCopy = { [weak self] in self?.copy(item) }
-        cell.onDelete = { [weak self] in self?.delete(item) }
+            outline.makeView(withIdentifier: identifier, owner: nil) as? FeedbackNavCellView
+            ?? FeedbackNavCellView(identifier: identifier)
+        cell.configure(row.item, outdated: row.outdated)
         return cell
+    }
+
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard !suppressSelection else { return }
+        let row = outline.item(atRow: outline.selectedRow) as? Row
+        delegate?.feedbackPanel(self, didSelect: row?.item)
     }
 }
 
-// One comment: header line (icon, author, badges, anchor), body, actions.
-private final class FeedbackCellView: NSTableCellView {
-    var onCopy: (() -> Void)?
-    var onDelete: (() -> Void)?
-
+// One navigator row: glyph · author · L-range · reply count. No bodies.
+private final class FeedbackNavCellView: NSTableCellView {
     private let icon = NSImageView()
-    private let author = NSTextField(labelWithString: "")
-    private let badge = NSTextField(labelWithString: "")
-    private let anchor = NSTextField(labelWithString: "")
-    private let body = NSTextField(wrappingLabelWithString: "")
-    private let copyButton = NSButton()
-    private let deleteButton = NSButton()
+    private let title = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
 
-        author.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
-        badge.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1)
-        badge.textColor = .secondaryLabelColor
-        anchor.font = .monospacedSystemFont(
+        title.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        title.textColor = .labelColor
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        detail.font = .monospacedDigitSystemFont(
             ofSize: NSFont.smallSystemFontSize - 1, weight: .regular)
-        anchor.textColor = .secondaryLabelColor
-        anchor.lineBreakMode = .byTruncatingHead
+        detail.textColor = .secondaryLabelColor
+        detail.setContentHuggingPriority(.required, for: .horizontal)
+        detail.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        body.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        body.textColor = .labelColor
-        body.maximumNumberOfLines = 12
-        body.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        copyButton.image = NSImage(
-            systemSymbolName: "doc.on.doc", accessibilityDescription: "copy")
-        copyButton.isBordered = false
-        copyButton.controlSize = .small
-        copyButton.target = self
-        copyButton.action = #selector(copyClicked(_:))
-        copyButton.toolTip = "Copy as a markdown block"
-
-        deleteButton.image = NSImage(
-            systemSymbolName: "trash", accessibilityDescription: "delete draft")
-        deleteButton.isBordered = false
-        deleteButton.controlSize = .small
-        deleteButton.target = self
-        deleteButton.action = #selector(deleteClicked(_:))
-        deleteButton.toolTip = "Delete this draft"
-
-        let header = NSStackView(views: [
-            icon, author, badge, anchor, NSView(), copyButton, deleteButton,
-        ])
-        header.orientation = .horizontal
-        header.spacing = 5
-        header.alignment = .centerY
-
-        let stack = NSStackView(views: [header, body])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 3
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        for view in [icon, title, detail] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        imageView = icon
+        textField = title
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            body.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            detail.leadingAnchor.constraint(
+                greaterThanOrEqualTo: title.trailingAnchor, constant: Metrics.padding),
+            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Metrics.unit),
+            detail.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func configure(_ item: FeedbackItem, outdated: Bool) {
+    func configure(_ item: FeedbackNavItem, outdated: Bool) {
         switch item {
         case .draft(let draft):
             icon.image = NSImage(
                 systemSymbolName: "square.and.pencil", accessibilityDescription: "draft")
             icon.contentTintColor = .controlAccentColor
-            author.stringValue = "Draft"
-            badge.stringValue = "never posted"
-            anchor.stringValue = "\(draft.path):\(draft.line)"
-            body.stringValue = draft.body
-            deleteButton.isHidden = false
-        case .github(let comment):
-            let (symbol, tint) = Self.glyph(comment)
+            title.stringValue = firstLine(draft.body)
+            detail.stringValue = "L\(draft.line)"
+        case .thread(let thread):
+            let (symbol, tint) = Self.glyph(thread.root, outdated: outdated)
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
             icon.contentTintColor = tint
-            author.stringValue = comment.author
-            var badges: [String] = []
-            if comment.isBot { badges.append("bot") }
-            if let state = comment.state, !state.isEmpty {
-                badges.append(state.lowercased().replacingOccurrences(of: "_", with: " "))
+            title.stringValue = thread.root.author
+            var parts: [String] = []
+            if let range = thread.lineRange {
+                parts.append(
+                    range.count == 1
+                        ? "L\(range.lowerBound)"
+                        : "L\(range.lowerBound)\u{2013}\(range.upperBound)")
             }
-            if outdated { badges.append("outdated") }
-            badge.stringValue = badges.joined(separator: " \u{00b7} ")
-            badge.textColor = outdated ? .systemOrange : .secondaryLabelColor
-            if let path = comment.path, let line = comment.line {
-                anchor.stringValue = "\(path):\(line)"
-            } else {
-                anchor.stringValue = ""
+            if !thread.replies.isEmpty {
+                parts.append("\u{21a9}\(thread.replies.count)")
             }
-            body.stringValue = comment.body
-            deleteButton.isHidden = true
+            if let state = thread.root.state, !state.isEmpty {
+                parts.append(state.lowercased().replacingOccurrences(of: "_", with: " "))
+            }
+            detail.stringValue = parts.joined(separator: "  ")
         }
-        body.toolTip = body.stringValue
+        detail.textColor = outdated ? .systemOrange : .secondaryLabelColor
+        toolTip = firstLine(item.contexts.first?.body ?? "")
     }
 
-    private static func glyph(_ comment: FeedbackComment) -> (String, NSColor) {
+    private func firstLine(_ text: String) -> String {
+        text.split(separator: "\n").first.map(String.init) ?? text
+    }
+
+    private static func glyph(
+        _ comment: FeedbackComment, outdated: Bool
+    ) -> (String, NSColor) {
+        if outdated {
+            return ("clock.arrow.circlepath", .systemOrange)
+        }
         switch comment.kind {
         case .reviewComment:
-            return ("text.bubble", .secondaryLabelColor)
+            return (
+                comment.isBot ? "gearshape.2" : "text.bubble",
+                .secondaryLabelColor
+            )
         case .review:
             switch comment.state {
             case "APPROVED": return ("checkmark.seal.fill", .systemGreen)
@@ -385,13 +507,5 @@ private final class FeedbackCellView: NSTableCellView {
         case .conversation:
             return ("bubble.left.and.bubble.right", .secondaryLabelColor)
         }
-    }
-
-    @objc private func copyClicked(_ sender: Any?) {
-        onCopy?()
-    }
-
-    @objc private func deleteClicked(_ sender: Any?) {
-        onDelete?()
     }
 }

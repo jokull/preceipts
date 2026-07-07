@@ -20,12 +20,20 @@ public enum FeedbackKind: Sendable, Equatable {
 
 public struct FeedbackComment: Sendable, Equatable {
     public let kind: FeedbackKind
+    /// GitHub id; 0 for kinds that never thread.
+    public let id: Int
+    /// Root comment this replies to — review-comment threads.
+    public let inReplyTo: Int?
     public let author: String
     public let isBot: Bool
     public let body: String
     /// Anchor, when the comment is line-anchored.
     public let path: String?
     public let line: Int?
+    /// First line of a multi-line anchor; nil for single-line comments.
+    public let startLine: Int?
+    /// Which version of the file the anchor points at (GitHub LEFT/RIGHT).
+    public let side: CommentSide
     /// The anchored diff line's text (tail of GitHub's diff_hunk).
     public let lineText: String
     /// Line-anchored but the diff moved on — still shown, flagged.
@@ -75,14 +83,19 @@ public func parseFeedback(
     for item in try jsonArray(reviewComments) {
         let line = item["line"] as? Int
         let originalLine = item["original_line"] as? Int
+        let startLine = item["start_line"] as? Int ?? item["original_start_line"] as? Int
         out.append(
             FeedbackComment(
                 kind: .reviewComment,
+                id: item["id"] as? Int ?? 0,
+                inReplyTo: item["in_reply_to_id"] as? Int,
                 author: authorLogin(item),
                 isBot: isBot(item),
                 body: string(item, "body"),
                 path: item["path"] as? String,
                 line: line ?? originalLine,
+                startLine: startLine,
+                side: string(item, "side") == "LEFT" ? .old : .new,
                 lineText: lastHunkLine(item["diff_hunk"] as? String ?? ""),
                 // GitHub nulls `line`/`position` when the diff has moved on.
                 outdated: line == nil,
@@ -103,11 +116,15 @@ public func parseFeedback(
         out.append(
             FeedbackComment(
                 kind: .review,
+                id: item["id"] as? Int ?? 0,
+                inReplyTo: nil,
                 author: authorLogin(item),
                 isBot: isBot(item),
                 body: body,
                 path: nil,
                 line: nil,
+                startLine: nil,
+                side: .new,
                 lineText: "",
                 outdated: false,
                 createdAt: string(item, "submitted_at"),
@@ -119,11 +136,15 @@ public func parseFeedback(
         out.append(
             FeedbackComment(
                 kind: .conversation,
+                id: item["id"] as? Int ?? 0,
+                inReplyTo: nil,
                 author: authorLogin(item),
                 isBot: isBot(item),
                 body: string(item, "body"),
                 path: nil,
                 line: nil,
+                startLine: nil,
+                side: .new,
                 lineText: "",
                 outdated: false,
                 createdAt: string(item, "created_at"),
@@ -132,6 +153,53 @@ public func parseFeedback(
     }
 
     return out.sorted { $0.createdAt < $1.createdAt }
+}
+
+// ------------------------------------------------------------------
+// Threads
+
+/// One review-comment conversation: a root and its replies, in time
+/// order. Reviews and conversation comments are single-comment threads.
+public struct FeedbackThread: Sendable, Equatable {
+    public let root: FeedbackComment
+    public let replies: [FeedbackComment]
+
+    public var comments: [FeedbackComment] { [root] + replies }
+
+    /// Anchored line span (start…end on `root.side`); nil when unanchored.
+    public var lineRange: ClosedRange<Int>? {
+        guard let line = root.line else { return nil }
+        let start = root.startLine ?? line
+        return min(start, line)...max(start, line)
+    }
+
+    public init(root: FeedbackComment, replies: [FeedbackComment]) {
+        self.root = root
+        self.replies = replies
+    }
+
+    /// Fold a flat, time-sorted comment list into threads. Replies whose
+    /// root is missing (rare pagination edge) become their own roots.
+    public static func group(_ comments: [FeedbackComment]) -> [FeedbackThread] {
+        var repliesByRoot: [Int: [FeedbackComment]] = [:]
+        var roots: [FeedbackComment] = []
+        for comment in comments {
+            if let parent = comment.inReplyTo {
+                repliesByRoot[parent, default: []].append(comment)
+            } else {
+                roots.append(comment)
+            }
+        }
+        // Orphaned replies (root not fetched) surface as roots.
+        let rootIds = Set(roots.map(\.id))
+        for (parent, orphans) in repliesByRoot where !rootIds.contains(parent) {
+            roots.append(contentsOf: orphans)
+            repliesByRoot[parent] = nil
+        }
+        return roots
+            .sorted { $0.createdAt < $1.createdAt }
+            .map { FeedbackThread(root: $0, replies: repliesByRoot[$0.id] ?? []) }
+    }
 }
 
 private func jsonArray(_ data: Data) throws -> [[String: Any]] {

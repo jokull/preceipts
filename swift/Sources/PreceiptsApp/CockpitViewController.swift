@@ -74,6 +74,9 @@ final class CockpitViewController: NSSplitViewController {
         sidebar.delegate = self
         content.delegate = self
         feedbackPanel.delegate = self
+        content.onThreadDismissed = { [weak self] in
+            self?.feedbackPanel.clearSelection()
+        }
 
         if let token = Keychain.loadToken() {
             github = GitHubClient(token: token)
@@ -237,6 +240,9 @@ final class CockpitViewController: NSSplitViewController {
             ensureEngine(changeset)
             refreshHud()
             ensureCommentStore(changeset)
+            // Anchor rows shifted with the new changeset; a mispointed
+            // claw is worse than a closed card.
+            content.dismissThread(notify: true)
             refreshFeedbackViews()
             refreshPrStatus()
         case .failure(let error):
@@ -259,7 +265,8 @@ final class CockpitViewController: NSSplitViewController {
     }
 
     /// Panel list + surface badges from the current feedback and drafts —
-    /// anchors re-resolve against every new changeset.
+    /// anchors re-resolve against every new changeset. Badges sit on each
+    /// thread's root row and count the whole conversation.
     private func refreshFeedbackViews() {
         feedbackPanel.apply(feedback: prFeedback, drafts: commentStore?.comments ?? [])
         var badges: [Int: Int] = [:]
@@ -274,12 +281,12 @@ final class CockpitViewController: NSSplitViewController {
                 badges[row, default: 0] += 1
             }
         }
-        for comment in prFeedback?.comments ?? [] {
-            if let path = comment.path, let line = comment.line,
+        for thread in FeedbackThread.group(prFeedback?.comments ?? []) {
+            if let path = thread.root.path, let line = thread.root.line,
                 let row = surface.anchorRow(
-                    path: path, line: line, side: .new, changeset: changeset)
+                    path: path, line: line, side: thread.root.side, changeset: changeset)
             {
-                badges[row, default: 0] += 1
+                badges[row, default: 0] += thread.comments.count
             }
         }
         content.setCommentBadges(badges)
@@ -439,31 +446,47 @@ extension CockpitViewController: FeedbackPanelDelegate {
         refreshFeedback()
     }
 
-    func feedbackPanel(_ panel: FeedbackPanelViewController, scrollTo item: FeedbackItem) {
-        guard let changeset, let anchor = item.anchor,
-            let row = surface.anchorRow(
-                path: anchor.path, line: anchor.line, side: anchor.side, changeset: changeset)
-        else { return }
-        content.scrollToRow(row, centered: true)
-        content.selectRow(row)
+    func feedbackPanel(
+        _ panel: FeedbackPanelViewController, didSelect item: FeedbackNavItem?
+    ) {
+        guard let item else {
+            content.dismissThread()
+            return
+        }
+        content.presentThread(
+            threadCardModel(item),
+            anchorRows: resolveAnchorRows(item),
+            side: item.anchor?.side ?? .new)
     }
 
     func feedbackPanel(_ panel: FeedbackPanelViewController, deleteDraft id: UInt64) {
         try? commentStore?.remove(id: id)
+        content.dismissThread()
         refreshFeedbackViews()
     }
 
     func feedbackPanel(
-        _ panel: FeedbackPanelViewController, anchorRowFor item: FeedbackItem
+        _ panel: FeedbackPanelViewController, anchorRowFor item: FeedbackNavItem
     ) -> Int? {
+        resolveAnchorRows(item)?.lowerBound
+    }
+
+    /// Surface-row span for an item's line range; nil when it no longer
+    /// resolves in this changeset (partial ranges clamp to what does).
+    private func resolveAnchorRows(_ item: FeedbackNavItem) -> ClosedRange<Int>? {
         guard let changeset, let anchor = item.anchor else { return nil }
-        guard
-            let row = surface.anchorRow(
-                path: anchor.path, line: anchor.line, side: anchor.side, changeset: changeset)
-        else { return nil }
+        var resolved: [Int] = []
+        for line in anchor.range {
+            if let row = surface.anchorRow(
+                path: anchor.path, line: line, side: anchor.side, changeset: changeset)
+            {
+                resolved.append(row)
+            }
+        }
+        guard let low = resolved.min(), let high = resolved.max() else { return nil }
         // Drafts also go outdated when the anchored line's text changed.
         if case .draft(let draft) = item,
-            case .line(let file, let hunk, let rowIndex) = surface.rows[row]
+            case .line(let file, let hunk, let rowIndex) = surface.rows[low]
         {
             let diffRow = changeset.files[file].hunks[hunk].rows[rowIndex]
             let current = draft.side == .new ? diffRow.new?.text : diffRow.old?.text
@@ -471,7 +494,50 @@ extension CockpitViewController: FeedbackPanelDelegate {
                 return nil
             }
         }
-        return row
+        return low...high
+    }
+
+    private func threadCardModel(_ item: FeedbackNavItem) -> ThreadCardModel {
+        switch item {
+        case .thread(let thread):
+            let title: String
+            if let path = thread.root.path, let range = thread.lineRange {
+                title =
+                    range.count == 1
+                    ? "\(path):\(range.lowerBound)"
+                    : "\(path):\(range.lowerBound)\u{2013}\(range.upperBound)"
+            } else if let state = thread.root.state {
+                title = state.lowercased().replacingOccurrences(of: "_", with: " ")
+            } else {
+                title = "Conversation"
+            }
+            return ThreadCardModel(
+                title: title,
+                entries: thread.comments.map { comment in
+                    ThreadCardModel.Entry(
+                        author: comment.author,
+                        meta: Self.relativeTime(comment.createdAt),
+                        body: comment.body)
+                },
+                url: thread.root.url,
+                digest: formatDigest(thread.comments.map(\.context)))
+        case .draft(let draft):
+            return ThreadCardModel(
+                title: "\(draft.path):\(draft.line)",
+                entries: [
+                    ThreadCardModel.Entry(
+                        author: "Draft", meta: "never posted", body: draft.body)
+                ],
+                url: nil,
+                digest: item.contexts.map(formatComment).joined(separator: "\n"))
+        }
+    }
+
+    private static func relativeTime(_ iso: String) -> String {
+        guard let date = ISO8601DateFormatter().date(from: iso) else { return "" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

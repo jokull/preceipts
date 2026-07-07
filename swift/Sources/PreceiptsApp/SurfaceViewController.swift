@@ -45,6 +45,14 @@ final class SurfaceViewController: NSViewController {
     private var commentBadges: [Int: Int] = [:]
     private var composePopover: NSPopover?
 
+    /// The open thread: card + clawed row range (nil rows = unanchored,
+    /// card pins under the toolbar). One at a time.
+    private let threadCard = ThreadCardView()
+    private var threadOpen = false
+    private var threadAnchor: (rows: ClosedRange<Int>, side: CommentSide)?
+    private var threadCardHeight: CGFloat = 0
+    var onThreadDismissed: (() -> Void)?
+
     // ------------------------------------------------------------------
     // View construction
 
@@ -82,7 +90,11 @@ final class SurfaceViewController: NSViewController {
         ])
         stickyHeader.isHidden = true
         ticks.isHidden = true
+        threadCard.isHidden = true
+        threadCard.onClose = { [weak self] in self?.dismissThread(notify: true) }
+        container.clipsToBounds = true
         container.addSubview(stickyHeader)
+        container.addSubview(threadCard)
         container.addSubview(ticks)
 
         let statusBar = makeStatusBar()
@@ -238,7 +250,24 @@ final class SurfaceViewController: NSViewController {
         } else {
             stickyHeader.isHidden = true
         }
+        layoutThreadCard()
         layoutTicks()
+    }
+
+    /// The card rides beside its anchor range, top-aligned with it, and
+    /// clamps below the sticky header so it stays readable while the
+    /// range's code scrolls.
+    private func layoutThreadCard() {
+        guard threadOpen else { return }
+        let anchorTop =
+            threadAnchor.map { CGFloat($0.rows.lowerBound) * rowHeight - scrollY }
+            ?? (rowHeight + Metrics.unit)
+        let y = max(rowHeight + Metrics.unit, anchorTop)
+        threadCard.frame = NSRect(
+            x: scroll.frame.width - ThreadCardView.width - 24,
+            y: y,
+            width: ThreadCardView.width,
+            height: threadCardHeight)
     }
 
     private func layoutTicks() {
@@ -295,6 +324,46 @@ final class SurfaceViewController: NSViewController {
         }
         if let target {
             scrollToRow(target)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Thread card (one open conversation, anchored to a line range)
+
+    /// Show `model` clawed around `anchorRows` (nil = unanchored: the
+    /// card pins under the toolbar, no claw).
+    func presentThread(
+        _ model: ThreadCardModel, anchorRows: ClosedRange<Int>?, side: CommentSide
+    ) {
+        threadOpen = true
+        if let anchorRows {
+            threadAnchor = (anchorRows, side)
+            scrollToRow(anchorRows.lowerBound, centered: true)
+        } else {
+            threadAnchor = nil
+        }
+        threadCardHeight = threadCard.show(model)
+        threadCard.isHidden = false
+        layoutThreadCard()
+        refreshVisibleRows()
+    }
+
+    func dismissThread(notify: Bool = false) {
+        guard threadOpen else { return }
+        threadOpen = false
+        threadAnchor = nil
+        threadCard.isHidden = true
+        refreshVisibleRows()
+        if notify {
+            onThreadDismissed?()
+        }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if threadOpen {
+            dismissThread(notify: true)
+        } else if findBar.isOpen {
+            closeFind()
         }
     }
 
@@ -434,6 +503,18 @@ final class SurfaceViewController: NSViewController {
             && findMatches[findCurrent] == row
         cell.isRowSelected = surfaceTable.selectedRow == row
         cell.commentBadge = commentBadges[row] ?? 0
+        if let threadAnchor, threadAnchor.rows.contains(row) {
+            let segment: DiffRowView.ClawSegment
+            switch (row == threadAnchor.rows.lowerBound, row == threadAnchor.rows.upperBound) {
+            case (true, true): segment = .single
+            case (true, false): segment = .top
+            case (false, true): segment = .bottom
+            case (false, false): segment = .middle
+            }
+            cell.claw = (segment, threadAnchor.side)
+        } else {
+            cell.claw = nil
+        }
     }
 }
 

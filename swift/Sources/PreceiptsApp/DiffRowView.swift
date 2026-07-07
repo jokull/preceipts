@@ -17,6 +17,13 @@ final class DiffRowView: NSView {
     /// Comments anchored to this row — drawn as a trailing badge.
     var commentBadge = 0
 
+    /// This row's slice of the open thread's claw — the accent bracket
+    /// hugging the anchored line range on the commented side.
+    enum ClawSegment {
+        case single, top, middle, bottom
+    }
+    var claw: (segment: ClawSegment, side: CommentSide)?
+
     override var isFlipped: Bool { true }
 
     private static let gutterWidth: CGFloat = 46
@@ -39,9 +46,35 @@ final class DiffRowView: NSView {
         if commentBadge > 0 {
             drawCommentBadge()
         }
+        if let claw {
+            drawClaw(claw.segment, side: claw.side)
+        }
         if isRowSelected {
             NSColor.controlAccentColor.setFill()
             NSRect(x: 0, y: 0, width: 3, height: bounds.height).fill()
+        }
+    }
+
+    /// A 2px accent bracket at the commented half's edge: nubs at the
+    /// range ends, a straight rail between — a claw around the lines.
+    private func drawClaw(_ segment: ClawSegment, side: CommentSide) {
+        let x = side == .old ? 3.0 : bounds.width / 2 + 3.0
+        let width = 2.0
+        let nub = 6.0
+        // Wash the commented half so the range reads even mid-scroll.
+        NSColor.controlAccentColor.withAlphaComponent(0.07).setFill()
+        let half = NSRect(
+            x: side == .old ? 0 : bounds.width / 2, y: 0,
+            width: bounds.width / 2, height: bounds.height)
+        half.fill()
+
+        NSColor.controlAccentColor.setFill()
+        NSRect(x: x, y: 0, width: width, height: bounds.height).fill()
+        if segment == .top || segment == .single {
+            NSRect(x: x, y: 0, width: nub, height: width).fill()
+        }
+        if segment == .bottom || segment == .single {
+            NSRect(x: x, y: bounds.height - width, width: nub, height: width).fill()
         }
     }
 

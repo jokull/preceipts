@@ -174,6 +174,52 @@ final class FeedbackParseTests: XCTestCase {
         XCTAssertTrue(digest.contains("\u{2014} codex[bot]: this loop is O(n^2)"))
     }
 
+    func testThreadGroupingByInReplyTo() throws {
+        let reviewComments = Data(
+            """
+            [
+              {"id": 1, "user": {"login": "codex[bot]"}, "body": "root",
+               "path": "a.ts", "line": 12, "start_line": 8, "side": "RIGHT",
+               "diff_hunk": "@@\\n+x", "created_at": "2026-07-07T00:00:00Z",
+               "html_url": "u1"},
+              {"id": 2, "in_reply_to_id": 1, "user": {"login": "jokull"},
+               "body": "reply", "path": "a.ts", "line": 12, "side": "RIGHT",
+               "diff_hunk": "@@\\n+x", "created_at": "2026-07-07T01:00:00Z",
+               "html_url": "u2"},
+              {"id": 3, "user": {"login": "jokull"}, "body": "old side",
+               "path": "b.ts", "line": 4, "side": "LEFT",
+               "diff_hunk": "@@\\n-y", "created_at": "2026-07-07T02:00:00Z",
+               "html_url": "u3"}
+            ]
+            """.utf8)
+        let comments = try parseFeedback(
+            reviewComments: reviewComments, reviews: empty, conversation: empty)
+        let threads = FeedbackThread.group(comments)
+        XCTAssertEqual(threads.count, 2)
+        XCTAssertEqual(threads[0].root.id, 1)
+        XCTAssertEqual(threads[0].replies.map(\.id), [2])
+        XCTAssertEqual(threads[0].lineRange, 8...12)
+        XCTAssertEqual(threads[0].root.side, .new)
+        XCTAssertEqual(threads[1].root.side, .old)
+        XCTAssertEqual(threads[1].lineRange, 4...4)
+    }
+
+    func testOrphanedRepliesBecomeRoots() throws {
+        let reviewComments = Data(
+            """
+            [{"id": 9, "in_reply_to_id": 999, "user": {"login": "a"},
+              "body": "orphan", "path": "a.ts", "line": 1, "side": "RIGHT",
+              "diff_hunk": "@@\\n+x", "created_at": "2026-07-07T00:00:00Z",
+              "html_url": "u"}]
+            """.utf8)
+        let comments = try parseFeedback(
+            reviewComments: reviewComments, reviews: empty, conversation: empty)
+        let threads = FeedbackThread.group(comments)
+        XCTAssertEqual(threads.count, 1)
+        XCTAssertEqual(threads[0].root.id, 9)
+        XCTAssertTrue(threads[0].replies.isEmpty)
+    }
+
     func testConversationCommentsAndSorting() throws {
         let conversation = Data(
             """
