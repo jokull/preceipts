@@ -1,3 +1,9 @@
+# preceipts is a workspace: this root package is the TUI cockpit (lumen
+# fork), core/ is the UI-agnostic engine crate, app/ is the macOS desktop
+# app (GPUI). See docs/desktop-app-design.md.
+[workspace]
+members = ["core", "app"]
+
 [package]
 name = "lumen"
 version = "2.30.0"

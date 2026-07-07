@@ -82,6 +82,35 @@ refusal). Statusbar chip is its summary; the panel is its detail.
 - Out of scope for v1: posting reviews/comments, merging from the app
   (landing stays the agent's job via the engine).
 
+## PR feedback viewer (new)
+
+Review feedback is part of the cockpit, not a browser tab:
+
+- **Sources**: PR review comments (line-anchored), review bodies, and
+  conversation comments — across **users and GitHub Apps** (codex,
+  CodeRabbit, CI bots…). Fetched with the same GitHub auth; interim
+  implementation may shell to `gh api` before OAuth lands.
+- **Two views of one model**: inline anchors in the scroll surface
+  (collapsed chips under the anchored row — expand to read thread), and a
+  **Feedback panel** listing all comments with filters: author, app/bot vs
+  human, file, resolved, outdated. Clicking a comment scrolls the surface
+  to its anchor. Comments whose anchor no longer matches the current tree
+  are marked *outdated* but still listed.
+- **Local comments (drafts, never posted)**: add a comment on any diff row
+  (gutter “+” or ⌘⇧M). Stored locally per repo (`.git/preceipts/`), scoped
+  to the branch. These are notes-to-agent, not GitHub state.
+- **Copy to Clipboard affordances** (the point — feeding coding agents):
+  - Per comment: copies a markdown block with full context —
+    ```
+    apps/next/components/foo.tsx:123
+    > const x = useMemo(() => props.a + props.b, [props.a, props.b])
+    This memo is unnecessary — props are primitives.
+    ```
+  - **Copy all** (per filter selection): one digest of every visible
+    comment, grouped by file, same format — paste straight into an agent
+    session as a worklist.
+  - GitHub comments get the same affordance (author attribution included).
+
 ## File tree
 
 - **Filters**: fuzzy path filter field (focus: ⌘⇧F… no — see keys: ⌥⌘F),

@@ -1,0 +1,16 @@
+[package]
+name = "preceipts-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "UI-agnostic core for the preceipts desktop cockpit: git reads, diff row model, local review comments"
+
+[dependencies]
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+imara-diff = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3"

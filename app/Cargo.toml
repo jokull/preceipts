@@ -1,0 +1,14 @@
+[package]
+name = "preceipts-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "preceipts desktop cockpit for macOS (GPUI)"
+
+[[bin]]
+name = "preceipts-app"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "0.2"
+preceipts-core = { path = "../core" }
