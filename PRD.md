@@ -368,4 +368,15 @@ user/agent action — `hud` reports staleness, it doesn't network.
    agent's job through the engine CLI. Lumen's AI commands and flags are
    hidden from `--help` (still compiled, minimizing upstream divergence).
    Defaults: PR diff scope, watch on, async reloads, timer-refreshed
-   HUD/status. `t` toggles PR ⇄ uncommitted scope.
+   HUD/status. `t` toggles PR ⇄ uncommitted scope.10. **Desktop app, macOS-native, GPUI** (2026-07-07, user decision). The
+    cockpit moves out of the TUI into a macOS desktop app: GPUI shell over a
+    UI-agnostic `preceipts-core` crate (gix, imara-diff, tree-sitter, watch);
+    engine boundary unchanged. One scroll surface (Zed-style multibuffer, not
+    per-file panes). Vim-style keys dropped for macOS conventions (⌘F search,
+    ⌘P quick open, ⌘K palette, real menus). The HUD is rethought as app
+    chrome (statusbar chips + titlebar), extended with GitHub via OAuth
+    device flow + Keychain (PR association, mergeability, CI rollup —
+    optional, degrades to local-only). VS Code chrome is the layout
+    reference: file tree with actions/filters, bottom receipts panel, easy
+    dirty ⇄ branch-diff scope toggle. Foundations research in
+    docs/desktop-foundations.md; full design in docs/desktop-app-design.md.
