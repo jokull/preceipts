@@ -28,8 +28,6 @@ struct TearContent {
 
     var breadcrumb: String
     var showBack: Bool
-    /// Anchored code context (thread anchor line / draft selection block).
-    var quote: String?
     /// Thread resolution; nil when the view isn't a resolvable thread.
     var isResolved: Bool?
     var isOutdated: Bool
@@ -38,7 +36,6 @@ struct TearContent {
     /// Editable local draft notes.
     var notes: [LocalComment]
     var url: String?
-    var digest: String
     /// Nil hides the composer.
     var composerPlaceholder: String?
     var focusComposer: Bool
@@ -46,20 +43,18 @@ struct TearContent {
     var emptyText: String?
 
     init(
-        breadcrumb: String, showBack: Bool, quote: String? = nil,
+        breadcrumb: String, showBack: Bool,
         isResolved: Bool? = nil, isOutdated: Bool = false,
-        entries: [Entry], notes: [LocalComment], url: String?, digest: String,
+        entries: [Entry], notes: [LocalComment], url: String?,
         composerPlaceholder: String?, focusComposer: Bool, emptyText: String?
     ) {
         self.breadcrumb = breadcrumb
         self.showBack = showBack
-        self.quote = quote
         self.isResolved = isResolved
         self.isOutdated = isOutdated
         self.entries = entries
         self.notes = notes
         self.url = url
-        self.digest = digest
         self.composerPlaceholder = composerPlaceholder
         self.focusComposer = focusComposer
         self.emptyText = emptyText
@@ -75,6 +70,8 @@ struct TearHandlers {
     var setResolved: ((Bool) -> Void)?
     /// PATCH the viewer's own comment body on GitHub.
     var editComment: ((TearContent.Entry, String) -> Void)?
+    /// Scroll the diff to the anchored lines (breadcrumb click).
+    var jumpToAnchor: (() -> Void)?
 }
 
 /// Pane-wide layout + type tokens. Body text is standard macOS 13pt;
@@ -87,6 +84,18 @@ enum ThreadStyle {
     static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)
     static let avatarSize: CGFloat = 24
     static let cardGap: CGFloat = 8
+
+    /// Wrapping, selectable rich-text label for rendered markdown.
+    static func bodyTextField(_ text: NSAttributedString) -> NSTextField {
+        let label = NSTextField(labelWithString: "")
+        label.attributedStringValue = text
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.isSelectable = true
+        label.allowsEditingTextAttributes = true  // clickable links
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
 
     /// Borderless SF Symbol button with a real (HIG) hit target.
     static func iconButton(
@@ -285,7 +294,7 @@ final class CommentCardView: NSView {
                 let weight = segment.lineWeight
                 let display = weight > budget ? Self.truncate(text, toLines: budget) : text
                 budget -= weight
-                let label = Self.bodyTextField(display)
+                let label = ThreadStyle.bodyTextField(display)
                 bodyStack.addArrangedSubview(label)
                 label.widthAnchor.constraint(equalTo: bodyStack.widthAnchor).isActive = true
             case .image(let url, let alt):
@@ -297,17 +306,6 @@ final class CommentCardView: NSView {
             }
         }
         expandButton?.title = expanded ? "Show less" : "Show more"
-    }
-
-    private static func bodyTextField(_ text: NSAttributedString) -> NSTextField {
-        let label = NSTextField(labelWithString: "")
-        label.attributedStringValue = text
-        label.lineBreakMode = .byWordWrapping
-        label.maximumNumberOfLines = 0
-        label.isSelectable = true
-        label.allowsEditingTextAttributes = true  // clickable links
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return label
     }
 
     @objc private func toggleExpanded() {

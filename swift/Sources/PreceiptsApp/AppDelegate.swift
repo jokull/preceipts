@@ -170,6 +170,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(CockpitViewController.toggleReceiptsPanel(_:)),
             keyEquivalent: "j")
         menu.addItem(receipts)
+        let prPanel = NSMenuItem(
+            title: "Toggle Pull Request Panel",
+            action: #selector(CockpitViewController.togglePrPanel(_:)),
+            keyEquivalent: "p")
+        prPanel.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(prPanel)
         let feedback = NSMenuItem(
             title: "Toggle Feedback Panel",
             action: #selector(CockpitViewController.toggleFeedbackPanel(_:)),

@@ -354,6 +354,74 @@ final class FeedbackParseTests: XCTestCase {
             comments[0].avatarUrl, "https://avatars.githubusercontent.com/in/1?v=4")
     }
 
+    func testParsePrOverviewGraphQL() throws {
+        let json = Data(
+            """
+            {"data": {"repository": {"pullRequests": {"nodes": [{
+              "number": 2548, "title": "feat: chat", "body": "The body",
+              "url": "https://github.com/o/r/pull/2548",
+              "reviewDecision": "REVIEW_REQUIRED",
+              "history": {"nodes": [
+                {"commit": {"abbreviatedOid": "abc1234",
+                  "messageHeadline": "first", "committedDate": "2026-07-01T00:00:00Z",
+                  "author": {"name": "J", "user": {"login": "jokull"}}}},
+                {"commit": {"abbreviatedOid": "def5678",
+                  "messageHeadline": "second", "committedDate": "2026-07-02T00:00:00Z",
+                  "author": {"name": "Codex", "user": null}}}
+              ]},
+              "head": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
+                {"context": "Vercel", "state": "SUCCESS",
+                 "targetUrl": "https://vercel.com/d/1", "description": "Deployed"},
+                {"name": "test", "status": "COMPLETED", "conclusion": "FAILURE",
+                 "detailsUrl": "https://github.com/checks/1", "title": "2 failed"},
+                {"name": "build", "status": "IN_PROGRESS", "conclusion": null,
+                 "detailsUrl": null, "title": null}
+              ]}}}}]}
+            }]}}}}
+            """.utf8)
+        let overview = try XCTUnwrap(parsePrOverview(json))
+        XCTAssertEqual(overview.number, 2548)
+        XCTAssertEqual(overview.body, "The body")
+        // Newest commit first; login preferred over name.
+        XCTAssertEqual(overview.commits.map(\.sha), ["def5678", "abc1234"])
+        XCTAssertEqual(overview.commits[1].author, "jokull")
+        XCTAssertEqual(overview.commits[0].author, "Codex")
+        XCTAssertEqual(overview.checks.count, 3)
+        XCTAssertEqual(overview.checks[0].name, "Vercel")
+        XCTAssertEqual(overview.checks[0].state, .success)
+        XCTAssertEqual(overview.checks[0].detailsUrl, "https://vercel.com/d/1")
+        XCTAssertEqual(overview.checks[1].state, .failure)
+        XCTAssertEqual(overview.checks[2].state, .pending)
+
+        XCTAssertNil(try parsePrOverview(Data("{}".utf8)))
+    }
+
+    func testParsePrOverviewGh() throws {
+        let json = Data(
+            """
+            {"number": 7, "title": "t", "body": "b", "url": "u",
+             "reviewDecision": "",
+             "commits": [
+               {"oid": "abcdef0123456789", "messageHeadline": "one",
+                "committedDate": "2026-07-01T00:00:00Z",
+                "authors": [{"login": "jokull", "name": "J"}]}
+             ],
+             "statusCheckRollup": [
+               {"context": "Cloudflare Pages", "state": "PENDING",
+                "targetUrl": "https://dash.cloudflare.com/x"},
+               {"name": "i18n", "status": "COMPLETED", "conclusion": "SUCCESS",
+                "detailsUrl": "d"}
+             ]}
+            """.utf8)
+        let overview = try XCTUnwrap(parsePrOverviewGh(json))
+        XCTAssertEqual(overview.number, 7)
+        XCTAssertNil(overview.reviewDecision)
+        XCTAssertEqual(overview.commits[0].sha, "abcdef0")
+        XCTAssertEqual(overview.commits[0].author, "jokull")
+        XCTAssertEqual(overview.checks[0].state, .pending)
+        XCTAssertEqual(overview.checks[1].state, .success)
+    }
+
     func testLastHunkLineTrailingNewline() {
         XCTAssertEqual(lastHunkLine("@@\n+added\n"), "added")
         XCTAssertEqual(lastHunkLine(""), "")

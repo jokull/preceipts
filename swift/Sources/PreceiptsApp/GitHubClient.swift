@@ -102,6 +102,15 @@ final class GitHubClient {
             threadMeta: (try? await meta) ?? [:])
     }
 
+    /// The PR drawer's payload: title/body, commit log, checks board
+    /// (deployments included — statusCheckRollup contexts).
+    func fetchPrOverview(repo: GitHubRepo, branch: String) async throws -> PrOverview? {
+        let data = try await graphql(
+            query: prOverviewQuery,
+            variables: ["owner": repo.owner, "name": repo.name, "branch": branch])
+        return try parsePrOverview(data)
+    }
+
     private func reviewThreadMeta(
         repo: GitHubRepo, number: Int
     ) async throws -> [Int: ReviewThreadMeta] {

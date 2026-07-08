@@ -136,6 +136,31 @@ default branch `preceipts`). Everything committed and pushed.
 - Live-verified against trip PR #2548: resolve → unresolve round-trip,
   avatars, markdown cleanup. 65 XCTests green.
 
+### PR chrome (2026-07-08) — HUD-centric, drawer for depth
+
+- The toolbar is sparse (sidebar toggle + scope control). PR identity,
+  colored ±stats, un-truncated "vs origin/main", and reload all live in
+  the bottom HUD's trailing cluster (`StatusBarChips`; PrChip.swift
+  deleted). The considered glass-island scope toggle was rejected:
+  scope is a toolbar concern (HIG); PR info is repo state → HUD.
+- Clicking the HUD PR chip (or ⌘⇧P, or `poke pr`) opens the **PR
+  drawer** (`PrPanel.swift`, 280pt, mutually exclusive with the
+  receipts drawer): three scrolling columns — rendered-markdown
+  description, commit log (newest first), and the checks board.
+  **Deployments have a defined GraphQL seat** — the head commit's
+  `statusCheckRollup.contexts` (StatusContext = Vercel/Cloudflare
+  deploys with targetUrl; CheckRun = Actions) — parsed by
+  `PreceiptsKit/PrOverview.swift` (tested), fetched via GraphQL
+  aliases (`history:`/`head:` commits) or `gh pr view --json`.
+- Thread pane: the quote strip is gone — the breadcrumb (file:line) is
+  the affordance; clicking it scrolls the diff to the claw. The
+  copy-thread header button is gone (per-comment Copy remains).
+- Gotcha: `baseName` no longer carries the git range "…" suffix — in a
+  status label it read as truncation. NSStackView gravity distribution
+  does NOT stretch nested scroll columns — set `.fill` distribution +
+  hugging(1) down the chain (PrPanel), and `Text(verbatim:)` for
+  numbers (SwiftUI locale-formats Int interpolation: "#2,548").
+
 ### Vision loop (2026-07-08) — how to SEE the UI from the harness
 
 `DebugBridge` (PreceiptsApp) listens on distributed notification

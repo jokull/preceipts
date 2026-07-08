@@ -11,11 +11,19 @@ final class StatusBarModel: ObservableObject {
     @Published var hud: EngineHud?
     @Published var hudError: String?
     @Published var runInProgress = false
-    /// "181 files  +1200 −340" — set by the surface on each changeset.
-    @Published var filesSummary = ""
+    /// Diff stats — set by the surface on each changeset.
+    @Published var filesCount = 0
+    @Published var added = 0
+    @Published var removed = 0
+    @Published var scopeLabel = ""
+    /// The branch's open PR — identity + review/CI state, click for the
+    /// drawer. Nil hides the component (local-only degradation).
+    @Published var pr: PrStatus?
     /// Load failure text; replaces the chip row while present.
     @Published var message: String?
     var onReceiptsTap: (() -> Void)?
+    var onPrTap: (() -> Void)?
+    var onReloadTap: (() -> Void)?
 }
 
 struct StatusBarChips: View {
@@ -32,12 +40,105 @@ struct StatusBarChips: View {
                 chipRow
             }
             Spacer(minLength: 12)
-            Text(model.filesSummary)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            // Trailing cluster never truncates — the chips yield instead.
+            HStack(spacing: 10) {
+                if model.pr != nil {
+                    prChip
+                }
+                statsText
+                    .font(.caption.monospacedDigit())
+                reloadButton
+            }
+            .fixedSize()
+            .layoutPriority(1)
         }
         .padding(.horizontal, 12)
+    }
+
+    /// "#2548 title · review · CI" — identity lives in the HUD with the
+    /// rest of the repo state; click opens the PR drawer.
+    @ViewBuilder private var prChip: some View {
+        if let pr = model.pr {
+            let label = HStack(spacing: 5) {
+                Text(verbatim: "#\(pr.number)")
+                    .fontWeight(.semibold)
+                Text(pr.title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 260, alignment: .leading)
+                    .foregroundStyle(.secondary)
+                if let review = pr.reviewDecision {
+                    reviewIcon(review)
+                }
+                if let ci = pr.ciState {
+                    ciIcon(ci)
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .contentShape(Capsule())
+
+            Button(action: { model.onPrTap?() }) {
+                if #available(macOS 26, *) {
+                    label.glassEffect(.regular.interactive(), in: .capsule)
+                } else {
+                    label.background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+            }
+            .buttonStyle(.plain)
+            .help("\(pr.title) \u{2014} pull request panel")
+        }
+    }
+
+    private var statsText: Text {
+        Text(verbatim: "\(model.filesCount) files ").foregroundColor(.secondary)
+            + Text(verbatim: "+\(model.added)").foregroundColor(.green)
+            + Text(verbatim: " \u{2212}\(model.removed)").foregroundColor(.red)
+            + Text(verbatim: "  \u{00b7}  \(model.scopeLabel)").foregroundColor(.secondary)
+    }
+
+    private var reloadButton: some View {
+        Button(action: { model.onReloadTap?() }) {
+            Image(systemName: "arrow.clockwise")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Reload the diff (\u{2318}\u{21e7}R)")
+    }
+
+    @ViewBuilder private func reviewIcon(_ decision: PrStatus.ReviewDecision) -> some View {
+        switch decision {
+        case .approved:
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundStyle(.green)
+                .help("Approved")
+        case .changesRequested:
+            Image(systemName: "exclamationmark.octagon.fill")
+                .foregroundStyle(.red)
+                .help("Changes requested")
+        case .reviewRequired:
+            Image(systemName: "hourglass.circle")
+                .foregroundStyle(.secondary)
+                .help("Review required")
+        }
+    }
+
+    @ViewBuilder private func ciIcon(_ state: PrStatus.CiState) -> some View {
+        switch state {
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .help("CI green")
+        case .failure, .error:
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red)
+                .help("CI failing")
+        case .pending, .expected:
+            Image(systemName: "clock.badge.questionmark")
+                .foregroundStyle(.orange)
+                .help("CI running")
+        }
     }
 
     @ViewBuilder private var chipRow: some View {

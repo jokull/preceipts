@@ -43,6 +43,7 @@ final class SurfaceViewController: NSViewController {
     let statusModel = StatusBarModel()
     /// Receipts panel (⌘J); the cockpit feeds status + run events into it.
     let receiptsPanel = ReceiptsPanelView()
+    let prPanel = PrPanelView()
 
     private var findMatches: [Int] = []
     private var findCurrent = 0
@@ -120,8 +121,9 @@ final class SurfaceViewController: NSViewController {
         findBar.onClose = { [weak self] in self?.closeFind() }
 
         receiptsPanel.isHidden = true
+        prPanel.isHidden = true
 
-        let stack = NSStackView(views: [findBar, container, receiptsPanel, statusBar])
+        let stack = NSStackView(views: [findBar, container, prPanel, receiptsPanel, statusBar])
         stack.orientation = .vertical
         stack.spacing = 0
         stack.distribution = .fill
@@ -133,9 +135,11 @@ final class SurfaceViewController: NSViewController {
             findBar.heightAnchor.constraint(equalToConstant: Metrics.findBarHeight),
             statusBar.heightAnchor.constraint(equalToConstant: Metrics.statusBarHeight),
             receiptsPanel.heightAnchor.constraint(equalToConstant: Metrics.receiptsPanelHeight),
+            prPanel.heightAnchor.constraint(equalToConstant: Metrics.prPanelHeight),
             container.widthAnchor.constraint(equalTo: stack.widthAnchor),
             findBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
             receiptsPanel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            prPanel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             statusBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
 
@@ -172,11 +176,25 @@ final class SurfaceViewController: NSViewController {
 
     func toggleReceiptsPanel() {
         receiptsPanel.isHidden.toggle()
+        if !receiptsPanel.isHidden {
+            prPanel.isHidden = true
+        }
     }
 
     func showReceiptsPanel() {
         receiptsPanel.isHidden = false
+        prPanel.isHidden = true
     }
+
+    /// One drawer at a time — PR and receipts share the bottom edge.
+    func togglePrPanel() {
+        prPanel.isHidden.toggle()
+        if !prPanel.isHidden {
+            receiptsPanel.isHidden = true
+        }
+    }
+
+    var prPanelVisible: Bool { !prPanel.isHidden }
 
     // ------------------------------------------------------------------
     // Content
@@ -219,13 +237,13 @@ final class SurfaceViewController: NSViewController {
 
     private func updateStatusBar(_ changeset: Changeset) {
         statusModel.message = nil
-        let scopeLabel: String
+        statusModel.filesCount = changeset.files.count
+        statusModel.added = changeset.totalAdded
+        statusModel.removed = changeset.totalRemoved
         switch changeset.scope {
-        case .branch: scopeLabel = "vs \(changeset.baseName)"
-        case .uncommitted: scopeLabel = "uncommitted"
+        case .branch: statusModel.scopeLabel = "vs \(changeset.baseName)"
+        case .uncommitted: statusModel.scopeLabel = "uncommitted"
         }
-        statusModel.filesSummary =
-            "\(changeset.files.count) files  +\(changeset.totalAdded) \u{2212}\(changeset.totalRemoved)  \u{00b7}  \(scopeLabel)"
     }
 
     // ------------------------------------------------------------------

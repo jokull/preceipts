@@ -26,7 +26,9 @@ public enum ChangesetLoader {
             baseCommit = git_oid_boxed(head.oid)
         case .branch:
             guard let base = resolvedBase else { throw PreceiptsError.noBase }
-            baseName = "\(base.name)\u{2026}"
+            // No range-syntax ellipsis — in a status label it reads as
+            // a truncated string, not as merge-base semantics.
+            baseName = base.name
             baseCommit = git_oid_boxed(try reader.mergeBase(base.oid, head.oid))
         }
 

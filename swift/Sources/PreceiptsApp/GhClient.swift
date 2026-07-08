@@ -138,6 +138,30 @@ final class GhClient {
             completion: completion)
     }
 
+    /// The PR drawer's payload via `gh pr view`. Completion on main.
+    func fetchPrOverview(completion: @escaping (Result<PrOverview, Error>) -> Void) {
+        guard let binary else {
+            completion(.failure(GhError.notInstalled))
+            return
+        }
+        let workdir = workdir
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { () throws -> PrOverview in
+                let data = try Self.run(
+                    binary: binary, workdir: workdir,
+                    arguments: [
+                        "pr", "view", "--json",
+                        "number,title,body,url,reviewDecision,commits,statusCheckRollup",
+                    ])
+                guard let overview = try parsePrOverviewGh(data) else {
+                    throw GhError.noPr
+                }
+                return overview
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     /// Signed-in login (for the edit-own-comments affordance).
     /// Completion on the main thread; nil when unavailable.
     func fetchViewer(completion: @escaping (String?) -> Void) {

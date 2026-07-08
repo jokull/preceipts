@@ -16,6 +16,7 @@ enum Metrics {
     static let statusBarHeight: CGFloat = 28
     static let findBarHeight: CGFloat = 36
     static let receiptsPanelHeight: CGFloat = 240
+    static let prPanelHeight: CGFloat = 280
     static let sidebarMinWidth: CGFloat = 200
     static let sidebarInitialWidth: CGFloat = 260
     static let surfaceMinWidth: CGFloat = 480

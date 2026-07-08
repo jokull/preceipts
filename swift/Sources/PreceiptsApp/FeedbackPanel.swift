@@ -77,10 +77,10 @@ final class ThreadAreaViewController: NSViewController {
         breadcrumb.font = .systemFont(ofSize: 13, weight: .semibold)
         breadcrumb.lineBreakMode = .byTruncatingHead
         breadcrumb.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The location IS the affordance: click scrolls the diff there.
+        breadcrumb.addGestureRecognizer(
+            NSClickGestureRecognizer(target: self, action: #selector(breadcrumbClicked(_:))))
 
-        let copy = ThreadStyle.iconButton(
-            "doc.on.doc", tooltip: "Copy thread as markdown",
-            target: self, action: #selector(copyClicked(_:)))
         let open = ThreadStyle.iconButton(
             "safari", tooltip: "Open on GitHub",
             target: self, action: #selector(openClicked(_:)))
@@ -89,7 +89,7 @@ final class ThreadAreaViewController: NSViewController {
             target: self, action: #selector(refreshClicked(_:)))
 
         let header = NSStackView(views: [
-            backButton, breadcrumb, NSView(), copy, open, refresh,
+            backButton, breadcrumb, NSView(), open, refresh,
         ])
         header.orientation = .horizontal
         header.alignment = .centerY
@@ -179,12 +179,15 @@ final class ThreadAreaViewController: NSViewController {
 
         backButton.isHidden = !content.showBack
         breadcrumb.stringValue = content.breadcrumb
-        breadcrumb.toolTip = content.breadcrumb
+        breadcrumb.toolTip =
+            handlers.jumpToAnchor != nil
+            ? "\(content.breadcrumb) \u{2014} click to reveal in the diff"
+            : content.breadcrumb
 
         bodyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        if content.quote != nil || content.isOutdated || content.isResolved == true {
-            let strip = quoteStrip(content)
+        if content.isOutdated || content.isResolved == true {
+            let strip = chipStrip(content)
             bodyStack.addArrangedSubview(strip)
             strip.widthAnchor.constraint(equalTo: bodyStack.widthAnchor).isActive = true
         }
@@ -250,14 +253,9 @@ final class ThreadAreaViewController: NSViewController {
         line.widthAnchor.constraint(equalTo: bodyStack.widthAnchor).isActive = true
     }
 
-    /// Anchored-code context strip: the quoted line(s) plus lifecycle
-    /// chips (Resolved / outdated) — what the thread is *about*.
-    private func quoteStrip(_ content: TearContent) -> NSView {
-        let strip = NSStackView()
-        strip.orientation = .vertical
-        strip.alignment = .leading
-        strip.spacing = Metrics.unit + 2
-
+    /// Lifecycle chips (Resolved / outdated) — the code context itself
+    /// lives in the diff; the breadcrumb click reveals it.
+    private func chipStrip(_ content: TearContent) -> NSView {
         var chips: [NSView] = []
         if content.isResolved == true {
             chips.append(ChipView("Resolved", color: .systemGreen))
@@ -265,37 +263,10 @@ final class ThreadAreaViewController: NSViewController {
         if content.isOutdated {
             chips.append(ChipView("outdated", color: .systemOrange))
         }
-        if !chips.isEmpty {
-            let chipRow = NSStackView(views: chips + [NSView()])
-            chipRow.orientation = .horizontal
-            chipRow.spacing = Metrics.unit + 2
-            strip.addArrangedSubview(chipRow)
-        }
-
-        if let quote = content.quote, !quote.isEmpty {
-            let box = NSView()
-            box.wantsLayer = true
-            box.layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
-            box.layer?.cornerRadius = 6
-
-            let lines = quote.split(separator: "\n", omittingEmptySubsequences: false)
-            let shown = lines.prefix(4).joined(separator: "\n")
-                + (lines.count > 4 ? "\n\u{2026}" : "")
-            let label = NSTextField(wrappingLabelWithString: shown)
-            label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-            label.textColor = .secondaryLabelColor
-            label.translatesAutoresizingMaskIntoConstraints = false
-            box.addSubview(label)
-            NSLayoutConstraint.activate([
-                label.topAnchor.constraint(equalTo: box.topAnchor, constant: 6),
-                label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -6),
-                label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 8),
-                label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -8),
-            ])
-            strip.addArrangedSubview(box)
-            box.widthAnchor.constraint(equalTo: strip.widthAnchor).isActive = true
-        }
-        return strip
+        let chipRow = NSStackView(views: chips + [NSView()])
+        chipRow.orientation = .horizontal
+        chipRow.spacing = Metrics.unit + 2
+        return chipRow
     }
 
     private func emptyState(_ text: String) -> NSView {
@@ -405,10 +376,8 @@ final class ThreadAreaViewController: NSViewController {
         onRefresh?()
     }
 
-    @objc private func copyClicked(_ sender: Any?) {
-        guard let content else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(content.digest, forType: .string)
+    @objc private func breadcrumbClicked(_ sender: Any?) {
+        handlers.jumpToAnchor?()
     }
 
     @objc private func openClicked(_ sender: Any?) {

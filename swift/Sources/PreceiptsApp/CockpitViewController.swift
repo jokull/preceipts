@@ -35,9 +35,10 @@ final class CockpitViewController: NSSplitViewController {
     /// Signed-in login — gates the edit-own-comments affordance.
     private var viewerLogin: String?
     private var viewerFetchAttempted = false
-    private let prChipModel = PrChipModel()
     private var prTimer: Timer?
     private var prStatusInFlight = false
+    private var prOverviewInFlight = false
+    private var prOverviewLoaded = false
 
     /// The thread area's navigation stack: conversation is the empty
     /// state, threads/compose sit one level in, back pops.
@@ -101,6 +102,12 @@ final class CockpitViewController: NSSplitViewController {
         threadArea.onRefresh = { [weak self] in
             self?.refreshFeedback()
         }
+        content.statusModel.onPrTap = { [weak self] in
+            self?.togglePrPanel(nil)
+        }
+        content.statusModel.onReloadTap = { [weak self] in
+            self?.requestReload()
+        }
         // Esc pops the thread area one level: thread → conversation →
         // pane collapsed.
         content.onEscape = { [weak self] in
@@ -136,6 +143,7 @@ final class CockpitViewController: NSSplitViewController {
         prFeedback = nil
         viewerLogin = nil
         viewerFetchAttempted = false
+        prOverviewLoaded = false
         refreshViewer()
         refreshPrStatus()
         if feedbackItem?.isCollapsed == false {
@@ -155,12 +163,12 @@ final class CockpitViewController: NSSplitViewController {
         if let github, let repo = changeset.githubRepo, let branch = changeset.branch {
             Task { @MainActor [weak self] in
                 let status = try? await github.prStatus(repo: repo, branch: branch)
-                self?.prChipModel.status = status
+                self?.content.statusModel.pr = status
                 self?.prStatusInFlight = false
             }
         } else if let gh, gh.available {
             gh.fetchPrStatus { [weak self] status in
-                self?.prChipModel.status = status
+                self?.content.statusModel.pr = status
                 self?.prStatusInFlight = false
             }
         } else {
@@ -169,12 +177,56 @@ final class CockpitViewController: NSSplitViewController {
     }
 
     // ------------------------------------------------------------------
+    // PR drawer
+
+    @objc func togglePrPanel(_ sender: Any?) {
+        content.togglePrPanel()
+        if content.prPanelVisible, !prOverviewLoaded {
+            refreshPrOverview()
+        }
+    }
+
+    private func refreshPrOverview() {
+        guard !prOverviewInFlight else { return }
+        prOverviewInFlight = true
+        content.prPanel.showLoading()
+        let apply: (Result<PrOverview?, Error>) -> Void = { [weak self] result in
+            guard let self else { return }
+            self.prOverviewInFlight = false
+            switch result {
+            case .success(let overview):
+                if let overview {
+                    self.prOverviewLoaded = true
+                    self.content.prPanel.apply(overview)
+                } else {
+                    self.content.prPanel.showEmpty("No pull request for this branch")
+                }
+            case .failure(let error):
+                self.content.prPanel.showEmpty(error.localizedDescription)
+            }
+        }
+        if let github, let repo = changeset?.githubRepo, let branch = changeset?.branch {
+            Task { @MainActor in
+                do {
+                    apply(.success(try await github.fetchPrOverview(repo: repo, branch: branch)))
+                } catch {
+                    apply(.failure(error))
+                }
+            }
+        } else if let gh, gh.available {
+            gh.fetchPrOverview { result in
+                apply(result.map { $0 })
+            }
+        } else {
+            apply(.failure(GhError.notInstalled))
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Toolbar
 
     private enum ToolbarID {
         static let scope = NSToolbarItem.Identifier("preceipts.scope")
-        static let reload = NSToolbarItem.Identifier("preceipts.reload")
-        static let pr = NSToolbarItem.Identifier("preceipts.pr")
     }
 
     func makeToolbar() -> NSToolbar {
@@ -758,7 +810,7 @@ extension CockpitViewController {
         guard let feedback = prFeedback else {
             return TearContent(
                 breadcrumb: "Conversation", showBack: false, entries: [], notes: notes,
-                url: nil, digest: formatDigest(notes.map(noteContext(_:))),
+                url: nil,
                 composerPlaceholder: "Add a PR note", focusComposer: false,
                 emptyText: notes.isEmpty
                     ? "No PR feedback loaded \u{2014} refresh (\u{21bb}) or add a note" : nil)
@@ -773,8 +825,6 @@ extension CockpitViewController {
             entries: prLevel.map(entry(_:)),
             notes: notes,
             url: feedback.url,
-            digest: formatDigest(
-                prLevel.map(\.context) + notes.map(noteContext(_:))),
             composerPlaceholder: "Add a PR note",
             focusComposer: false,
             emptyText: (prLevel.isEmpty && notes.isEmpty)
@@ -827,13 +877,11 @@ extension CockpitViewController {
             return TearContent(
                 breadcrumb: breadcrumb,
                 showBack: true,
-                quote: thread.root.lineText,
                 isResolved: prFeedback?.threadMeta[thread.root.id]?.isResolved,
                 isOutdated: thread.root.outdated,
                 entries: thread.comments.map(entry(_:)),
                 notes: notesMatching(item),
                 url: thread.root.url,
-                digest: formatDigest(thread.comments.map(\.context)),
                 composerPlaceholder: "Add a draft note",
                 focusComposer: false,
                 emptyText: nil)
@@ -841,11 +889,9 @@ extension CockpitViewController {
             return TearContent(
                 breadcrumb: breadcrumb,
                 showBack: true,
-                quote: draft.quote ?? draft.lineText,
                 entries: [],
                 notes: [draft],
                 url: nil,
-                digest: item.contexts.map(formatComment).joined(separator: "\n"),
                 composerPlaceholder: "Add a draft note",
                 focusComposer: false,
                 emptyText: nil)
@@ -860,7 +906,7 @@ extension CockpitViewController {
             breadcrumb: "\(anchor.path):\(range)",
             showBack: true,
             entries: [], notes: [],
-            url: nil, digest: "",
+            url: nil,
             composerPlaceholder: "Draft comment",
             focusComposer: true,
             emptyText: nil)
@@ -891,6 +937,10 @@ extension CockpitViewController {
         }
         handlers.editComment = { [weak self] entry, body in
             self?.performEditComment(entry, body: body)
+        }
+        handlers.jumpToAnchor = { [weak self] in
+            guard let self, let rows = self.resolveAnchorRows(item) else { return }
+            self.content.scrollToRow(rows.lowerBound, centered: true)
         }
         handlers.updateNote = { [weak self] id, body in
             try? self?.commentStore?.updateBody(id: id, body: body)
@@ -932,6 +982,9 @@ extension CockpitViewController {
         var handlers = TearHandlers()
         handlers.back = { [weak self] in
             self?.setTear(.conversation)
+        }
+        handlers.jumpToAnchor = { [weak self] in
+            self?.content.scrollToRow(anchor.rows.lowerBound, centered: true)
         }
         handlers.saveNote = { [weak self] body in
             guard let self,
@@ -994,6 +1047,19 @@ extension CockpitViewController {
         case "sidebar":
             guard parts.count > 1, let width = Double(parts[1]) else { return }
             splitView.setPosition(CGFloat(width), ofDividerAt: 0)
+        case "pr":
+            togglePrPanel(nil)
+        case "dump":
+            func walk(_ view: NSView, _ depth: Int) {
+                let name = String(describing: type(of: view))
+                print(
+                    "\(String(repeating: "  ", count: depth))\(name) "
+                        + "\(view.frame) hidden=\(view.isHidden)")
+                for child in view.subviews {
+                    walk(child, depth + 1)
+                }
+            }
+            walk(content.prPanel, 0)
         case "preview":
             // Render a markdown file as a comment card — the renderer's
             // test bench (images, tables, details…).
@@ -1008,7 +1074,7 @@ extension CockpitViewController {
             threadArea.render(
                 TearContent(
                     breadcrumb: "Renderer preview", showBack: true,
-                    entries: [entry], notes: [], url: nil, digest: body,
+                    entries: [entry], notes: [], url: nil,
                     composerPlaceholder: nil, focusComposer: false, emptyText: nil),
                 handlers: TearHandlers())
         default:
@@ -1053,11 +1119,10 @@ extension FeedbackFilter {
 // Toolbar delegate
 
 extension CockpitViewController: NSToolbarDelegate {
+    // PR identity, status, and reload live in the bottom HUD with the
+    // rest of the repo state — the toolbar stays sparse (scope only).
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [
-            .toggleSidebar, .sidebarTrackingSeparator, ToolbarID.scope, .flexibleSpace,
-            ToolbarID.pr, ToolbarID.reload,
-        ]
+        [.toggleSidebar, .sidebarTrackingSeparator, ToolbarID.scope, .flexibleSpace]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -1082,23 +1147,6 @@ extension CockpitViewController: NSToolbarDelegate {
             item.view = control
             item.label = "Scope"
             item.toolTip = "Diff scope (\u{2318}\u{21e7}D)"
-            return item
-        case ToolbarID.pr:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            let host = NSHostingView(rootView: PrChipView(model: prChipModel))
-            host.sizingOptions = .intrinsicContentSize
-            item.view = host
-            item.label = "Pull Request"
-            return item
-        case ToolbarID.reload:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.image = NSImage(
-                systemSymbolName: "arrow.clockwise", accessibilityDescription: "reload")
-            item.label = "Reload"
-            item.toolTip = "Reload the diff (\u{2318}R)"
-            item.isBordered = true
-            item.target = self
-            item.action = #selector(reload(_:))
             return item
         default:
             return nil
