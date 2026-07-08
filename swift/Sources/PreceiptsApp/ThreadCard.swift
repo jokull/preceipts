@@ -155,7 +155,6 @@ final class CommentCardView: NSView {
     private var expandButton: NSButton?
     private var editBox: NSView?
     private var editTextView: NSTextView?
-    private var trackingArea: NSTrackingArea?
 
     /// Bodies longer than this collapse behind "Show more" — bot walls
     /// of text must not bury the conversation.
@@ -195,28 +194,34 @@ final class CommentCardView: NSView {
         header.addArrangedSubview(time)
         header.addArrangedSubview(NSView())
 
+        // Actions stay visible — hover-reveals shift layout and hide
+        // affordances; quiet tertiary tint keeps them subordinate.
         actions.orientation = .horizontal
         actions.spacing = 0
-        actions.addArrangedSubview(
+        var buttons = [
             ThreadStyle.iconButton(
                 "doc.on.doc", tooltip: "Copy with context",
                 target: self, action: #selector(copyClicked),
-                pointSize: 11, hitTarget: 22))
+                pointSize: 11, hitTarget: 22)
+        ]
         if entry.canEdit, onEdit != nil {
-            actions.addArrangedSubview(
+            buttons.append(
                 ThreadStyle.iconButton(
                     "pencil", tooltip: "Edit comment",
                     target: self, action: #selector(editClicked),
                     pointSize: 11, hitTarget: 22))
         }
         if entry.url != nil {
-            actions.addArrangedSubview(
+            buttons.append(
                 ThreadStyle.iconButton(
                     "arrow.up.right.square", tooltip: "Open on GitHub",
                     target: self, action: #selector(openClicked),
                     pointSize: 11, hitTarget: 22))
         }
-        actions.isHidden = true
+        for button in buttons {
+            button.contentTintColor = .tertiaryLabelColor
+            actions.addArrangedSubview(button)
+        }
         header.addArrangedSubview(actions)
 
         bodyLabel.lineBreakMode = .byWordWrapping
@@ -308,27 +313,6 @@ final class CommentCardView: NSView {
         case "changes requested": return .systemRed
         default: return .secondaryLabelColor
         }
-    }
-
-    // Hover → reveal actions.
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea {
-            removeTrackingArea(trackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow],
-            owner: self, userInfo: nil)
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        actions.isHidden = false
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        actions.isHidden = true
     }
 
     @objc private func copyClicked() {

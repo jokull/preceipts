@@ -25,6 +25,10 @@ let package = Package(
         .package(url: "https://github.com/tree-sitter/tree-sitter-c-sharp", exact: "0.23.1"),
         .package(url: "https://github.com/tree-sitter/tree-sitter-ruby", exact: "0.23.1"),
         .package(url: "https://github.com/elixir-lang/tree-sitter-elixir", exact: "0.3.4"),
+        // GFM parser (Apple's cmark-gfm binding) for PR comment bodies —
+        // structured tables/lists/emphasis; rendering stays native (our
+        // NSAttributedString visitor), HTML noise stays sanitized out.
+        .package(url: "https://github.com/swiftlang/swift-markdown", exact: "0.8.0"),
     ],
     targets: [
         // Homebrew libgit2 via pkg-config; vendored/static build comes with
@@ -60,7 +64,12 @@ let package = Package(
             // stepping through kit code.
             swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]
         ),
-        .executableTarget(name: "PreceiptsApp", dependencies: ["PreceiptsKit"]),
+        .executableTarget(
+            name: "PreceiptsApp",
+            dependencies: [
+                "PreceiptsKit",
+                .product(name: "Markdown", package: "swift-markdown"),
+            ]),
         .testTarget(name: "PreceiptsKitTests", dependencies: ["PreceiptsKit"]),
     ]
 )

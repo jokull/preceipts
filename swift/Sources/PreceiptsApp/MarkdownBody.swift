@@ -1,51 +1,26 @@
-// Comment bodies are GitHub-flavored markdown, and bot comments are full
-// of HTML scaffolding (badges, <details> prompt blobs, hidden markers).
-// This is a deliberately small renderer: sanitize the HTML noise, style
-// the markdown people actually read (headings, bold/italic/code, links,
-// quotes, lists, fences) into an NSAttributedString. Not a browser — a
-// triage surface.
+// Comment bodies are GitHub-flavored markdown, and bot comments wrap it
+// in HTML scaffolding (badges, <details> prompt blobs, hidden markers).
+// Parsing is swift-markdown (Apple's cmark-gfm binding — real nested
+// lists, tables, strikethrough, entities); rendering stays native via
+// the visitor below. HTML is deliberately condensed, not rendered:
+// this is a triage surface, not a browser.
 
 import AppKit
+import Markdown
 
 enum MarkdownBody {
     static func render(_ raw: String) -> NSAttributedString {
-        let cleaned = sanitize(raw)
-        let out = NSMutableAttributedString()
-        var inFence = false
-        var first = true
-        for line in cleaned.split(separator: "\n", omittingEmptySubsequences: false) {
-            if !first {
-                out.append(NSAttributedString(string: "\n"))
-            }
-            first = false
-            let text = String(line)
-            if text.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                inFence.toggle()
-                continue
-            }
-            if inFence {
-                out.append(
-                    NSAttributedString(
-                        string: text,
-                        attributes: [
-                            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
-                            .foregroundColor: NSColor.secondaryLabelColor,
-                        ]))
-                continue
-            }
-            out.append(block(text))
-        }
+        let document = Document(parsing: sanitize(raw))
+        var renderer = AttributedRenderer()
+        let out = NSMutableAttributedString(attributedString: renderer.visit(document))
         trimBlankEdges(out)
         return out
     }
 
-    /// Line count of the rendered body — drives the collapse affordance.
-    static func lineCount(_ raw: String) -> Int {
-        sanitize(raw).split(separator: "\n", omittingEmptySubsequences: false).count
-    }
-
     // ------------------------------------------------------------------
-    // Sanitize: strip the HTML scaffolding bots wrap around content.
+    // Sanitize: condense the HTML scaffolding before parsing. cmark
+    // handles entities/reference definitions; we only remove what we
+    // never want structure for.
 
     private static func sanitize(_ raw: String) -> String {
         var text = raw.replacingOccurrences(of: "\r\n", with: "\n")
@@ -56,178 +31,13 @@ enum MarkdownBody {
             text,
             pattern: "<details[^>]*>\\s*<summary>([\\s\\S]*?)</summary>[\\s\\S]*?</details>",
             with: "\u{25b8} $1")
-        // Badge images and bare images carry no text.
+        // Badge images carry no text; drop them anchor and all.
         text = regexReplace(
             text, pattern: "<a[^>]*>\\s*(?:<picture>[\\s\\S]*?</picture>|<img[^>]*/?>)\\s*</a>",
             with: "")
         text = regexReplace(text, pattern: "<picture>[\\s\\S]*?</picture>", with: "")
-        text = regexReplace(text, pattern: "<img[^>]*/?>", with: "")
-        text = regexReplace(text, pattern: "!\\[[^\\]]*\\]\\([^)]*\\)", with: "")
-        // Known tags only — never touch `Array<T>` in prose or code.
-        text = regexReplace(
-            text,
-            pattern: "</?(?:a|p|br|div|span|source|summary|details|b|i|em|strong|code|pre|ul"
-                + "|ol|li|table|thead|tbody|tr|td|th|sub|sup|kbd|blockquote|h[1-6]|hr)\\b[^>]*>",
-            with: "")
-        // Reference-style link definitions ([vc]: #base64blob…).
-        text = regexReplace(
-            text, pattern: "(?m)^\\s*\\[[^\\]]+\\]:\\s+\\S.*$", with: "")
-        // Entities the tag strip leaves behind.
-        for (entity, plain) in [
-            ("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"),
-            ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&"),
-        ] {
-            text = text.replacingOccurrences(of: entity, with: plain)
-        }
-        // Tables → dot-joined rows; alignment rows and rules vanish.
-        text = regexReplace(
-            text, pattern: "(?m)^\\s*\\|?[\\s|:-]*-[\\s|:-]*\\|?\\s*$", with: "")
-        text = flattenTableRows(text)
-        // Collapse the blank-line runs the stripping leaves behind.
-        text = regexReplace(text, pattern: "\n{3,}", with: "\n\n")
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-
-    /// "| a | b | c |" → "a · b · c" — a triage surface, not a grid.
-    private static func flattenTableRows(_ text: String) -> String {
-        text.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { line -> String in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard trimmed.hasPrefix("|"), trimmed.hasSuffix("|"), trimmed.count > 2
-                else { return String(line) }
-                let cells = trimmed.dropFirst().dropLast()
-                    .split(separator: "|")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-                return cells.joined(separator: " \u{00b7} ")
-            }
-            .joined(separator: "\n")
-    }
-
-    // ------------------------------------------------------------------
-    // Block styling
-
-    private static func block(_ line: String) -> NSAttributedString {
-        // Headings: bold, body-size — hierarchy without shouting.
-        if let match = firstMatch(line, pattern: "^(#{1,6})\\s+(.*)$") {
-            return inline(
-                match[2],
-                font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                color: .labelColor)
-        }
-        // Blockquotes: dim.
-        if let match = firstMatch(line, pattern: "^>\\s?(.*)$") {
-            return inline(match[1], font: ThreadStyle.bodyFont, color: .secondaryLabelColor)
-        }
-        // Bullets: typographic dot, preserved indent.
-        if let match = firstMatch(line, pattern: "^(\\s*)[-*+]\\s+(.*)$") {
-            let out = NSMutableAttributedString(
-                string: match[1] + "\u{2022} ",
-                attributes: [.font: ThreadStyle.bodyFont, .foregroundColor: NSColor.labelColor])
-            out.append(inline(match[2], font: ThreadStyle.bodyFont, color: .labelColor))
-            return out
-        }
-        return inline(line, font: ThreadStyle.bodyFont, color: .labelColor)
-    }
-
-    // ------------------------------------------------------------------
-    // Inline styling: code, bold, italic, links — earliest match wins,
-    // then recurse on the remainder.
-
-    private static let inlinePatterns: [(NSRegularExpression, Style)] = {
-        func regex(_ pattern: String) -> NSRegularExpression {
-            try! NSRegularExpression(pattern: pattern)
-        }
-        return [
-            (regex("`([^`]+)`"), .code),
-            (regex("\\*\\*([^*]+)\\*\\*"), .bold),
-            (regex("__([^_]+)__"), .bold),
-            (regex("\\*([^*\\s][^*]*)\\*"), .italic),
-            (regex("\\[([^\\]]+)\\]\\(([^)\\s]+)\\)"), .link),
-        ]
-    }()
-
-    private enum Style {
-        case code, bold, italic, link
-    }
-
-    private static func inline(
-        _ text: String, font: NSFont, color: NSColor
-    ) -> NSAttributedString {
-        let out = NSMutableAttributedString()
-        var remainder = text
-        while !remainder.isEmpty {
-            let ns = remainder as NSString
-            let full = NSRange(location: 0, length: ns.length)
-            var earliest: (NSTextCheckingResult, Style)?
-            for (regex, style) in inlinePatterns {
-                guard let match = regex.firstMatch(in: remainder, range: full) else {
-                    continue
-                }
-                if earliest == nil || match.range.location < earliest!.0.range.location {
-                    earliest = (match, style)
-                }
-            }
-            guard let (match, style) = earliest else {
-                out.append(
-                    NSAttributedString(
-                        string: remainder,
-                        attributes: [.font: font, .foregroundColor: color]))
-                break
-            }
-            let prefix = ns.substring(to: match.range.location)
-            if !prefix.isEmpty {
-                out.append(
-                    NSAttributedString(
-                        string: prefix, attributes: [.font: font, .foregroundColor: color]))
-            }
-            let content = ns.substring(with: match.range(at: 1))
-            switch style {
-            case .code:
-                out.append(
-                    NSAttributedString(
-                        string: content,
-                        attributes: [
-                            .font: NSFont.monospacedSystemFont(
-                                ofSize: font.pointSize - 1.5, weight: .regular),
-                            .foregroundColor: color,
-                            .backgroundColor: NSColor.quaternarySystemFill,
-                        ]))
-            case .bold:
-                out.append(
-                    NSAttributedString(
-                        string: content,
-                        attributes: [
-                            .font: NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask),
-                            .foregroundColor: color,
-                        ]))
-            case .italic:
-                out.append(
-                    NSAttributedString(
-                        string: content,
-                        attributes: [
-                            .font: NSFontManager.shared.convert(
-                                font, toHaveTrait: .italicFontMask),
-                            .foregroundColor: color,
-                        ]))
-            case .link:
-                var attributes: [NSAttributedString.Key: Any] = [
-                    .font: font,
-                    .foregroundColor: NSColor.linkColor,
-                ]
-                if match.numberOfRanges > 2,
-                    let url = URL(string: ns.substring(with: match.range(at: 2)))
-                {
-                    attributes[.link] = url
-                }
-                out.append(NSAttributedString(string: content, attributes: attributes))
-            }
-            remainder = ns.substring(from: match.range.location + match.range.length)
-        }
-        return out
-    }
-
-    // ------------------------------------------------------------------
 
     private static func regexReplace(
         _ text: String, pattern: String, with template: String
@@ -237,23 +47,281 @@ enum MarkdownBody {
             in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template)
     }
 
-    private static func firstMatch(_ text: String, pattern: String) -> [String]? {
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-            let match = regex.firstMatch(
-                in: text, range: NSRange(text.startIndex..., in: text))
-        else { return nil }
-        let ns = text as NSString
-        return (0..<match.numberOfRanges).map {
-            match.range(at: $0).location == NSNotFound ? "" : ns.substring(with: match.range(at: $0))
-        }
-    }
-
     private static func trimBlankEdges(_ text: NSMutableAttributedString) {
-        while text.string.hasSuffix("\n") {
+        while text.string.hasSuffix("\n") || text.string.hasSuffix(" ") {
             text.deleteCharacters(in: NSRange(location: text.length - 1, length: 1))
         }
         while text.string.hasPrefix("\n") {
             text.deleteCharacters(in: NSRange(location: 0, length: 1))
         }
+    }
+}
+
+// ------------------------------------------------------------------
+// Markup → NSAttributedString. Blocks end with "\n"; paragraph spacing
+// comes from paragraph styles, not blank lines.
+
+private struct AttributedRenderer: MarkupVisitor {
+    typealias Result = NSAttributedString
+
+    private var listDepth = 0
+    private var quoteDepth = 0
+
+    // ---- helpers
+
+    private var baseColor: NSColor {
+        quoteDepth > 0 ? .secondaryLabelColor : .labelColor
+    }
+
+    private func paragraphStyle(indent: CGFloat = 0) -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = 5
+        style.headIndent = indent
+        style.firstLineHeadIndent = indent
+        return style
+    }
+
+    private func baseAttributes(_ font: NSFont) -> [NSAttributedString.Key: Any] {
+        [
+            .font: font,
+            .foregroundColor: baseColor,
+            .paragraphStyle: paragraphStyle(indent: CGFloat(listDepth) * 14),
+        ]
+    }
+
+    private mutating func children(_ markup: Markup) -> NSMutableAttributedString {
+        let out = NSMutableAttributedString()
+        for child in markup.children {
+            out.append(visit(child))
+        }
+        return out
+    }
+
+    /// Re-style every run in `text` (bold/italic/strike wrap arbitrary
+    /// inline content — merge, don't clobber inline-code fonts).
+    private func transformFonts(
+        _ text: NSMutableAttributedString, _ transform: (NSFont) -> NSFont
+    ) {
+        text.enumerateAttribute(
+            .font, in: NSRange(location: 0, length: text.length)
+        ) { value, range, _ in
+            if let font = value as? NSFont {
+                text.addAttribute(.font, value: transform(font), range: range)
+            }
+        }
+    }
+
+    private func block(_ text: NSAttributedString) -> NSAttributedString {
+        let out = NSMutableAttributedString(attributedString: text)
+        out.append(
+            NSAttributedString(string: "\n", attributes: baseAttributes(ThreadStyle.bodyFont)))
+        return out
+    }
+
+    // ---- structure
+
+    mutating func defaultVisit(_ markup: Markup) -> NSAttributedString {
+        children(markup)
+    }
+
+    mutating func visitDocument(_ document: Document) -> NSAttributedString {
+        children(document)
+    }
+
+    mutating func visitParagraph(_ paragraph: Paragraph) -> NSAttributedString {
+        block(children(paragraph))
+    }
+
+    mutating func visitHeading(_ heading: Heading) -> NSAttributedString {
+        let size: CGFloat = heading.level <= 2 ? 14 : 13
+        let text = children(heading)
+        text.setAttributes(
+            [
+                .font: NSFont.systemFont(ofSize: size, weight: .semibold),
+                .foregroundColor: baseColor,
+                .paragraphStyle: paragraphStyle(),
+            ],
+            range: NSRange(location: 0, length: text.length))
+        return block(text)
+    }
+
+    mutating func visitBlockQuote(_ blockQuote: BlockQuote) -> NSAttributedString {
+        quoteDepth += 1
+        defer { quoteDepth -= 1 }
+        let inner = children(blockQuote)
+        inner.addAttribute(
+            .foregroundColor, value: NSColor.secondaryLabelColor,
+            range: NSRange(location: 0, length: inner.length))
+        return inner
+    }
+
+    mutating func visitCodeBlock(_ codeBlock: CodeBlock) -> NSAttributedString {
+        var code = codeBlock.code
+        while code.hasSuffix("\n") {
+            code.removeLast()
+        }
+        return block(
+            NSAttributedString(
+                string: code,
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .paragraphStyle: paragraphStyle(indent: CGFloat(listDepth) * 14 + 8),
+                ]))
+    }
+
+    mutating func visitThematicBreak(_ thematicBreak: ThematicBreak) -> NSAttributedString {
+        NSAttributedString()
+    }
+
+    // ---- lists
+
+    mutating func visitUnorderedList(_ list: UnorderedList) -> NSAttributedString {
+        renderList(list) { item, _ in
+            if let checkbox = item.checkbox {
+                return checkbox == .checked ? "\u{2611} " : "\u{2610} "
+            }
+            return "\u{2022} "
+        }
+    }
+
+    mutating func visitOrderedList(_ list: OrderedList) -> NSAttributedString {
+        let start = Int(list.startIndex)
+        return renderList(list) { _, index in "\(start + index). " }
+    }
+
+    private mutating func renderList(
+        _ list: Markup, marker: (ListItem, Int) -> String
+    ) -> NSAttributedString {
+        listDepth += 1
+        defer { listDepth -= 1 }
+        let out = NSMutableAttributedString()
+        for (index, child) in list.children.enumerated() {
+            guard let item = child as? ListItem else { continue }
+            out.append(
+                NSAttributedString(
+                    string: marker(item, index),
+                    attributes: baseAttributes(ThreadStyle.bodyFont)))
+            out.append(children(item))
+        }
+        return out
+    }
+
+    // ---- tables (dot-joined rows: triage, not a grid)
+
+    mutating func visitTable(_ table: Table) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let head = renderRow(table.head.cells)
+        transformFonts(head) { font in
+            NSFont.systemFont(ofSize: font.pointSize, weight: .semibold)
+        }
+        out.append(block(head))
+        for row in table.body.rows {
+            out.append(block(renderRow(row.cells)))
+        }
+        return out
+    }
+
+    private mutating func renderRow(
+        _ cells: some Sequence<Table.Cell>
+    ) -> NSMutableAttributedString {
+        let out = NSMutableAttributedString()
+        var first = true
+        for cell in cells {
+            let content = children(cell)
+            guard content.length > 0 else { continue }
+            if !first {
+                out.append(
+                    NSAttributedString(
+                        string: " \u{00b7} ",
+                        attributes: [
+                            .font: ThreadStyle.bodyFont,
+                            .foregroundColor: NSColor.tertiaryLabelColor,
+                        ]))
+            }
+            first = false
+            out.append(content)
+        }
+        return out
+    }
+
+    // ---- inline
+
+    mutating func visitText(_ text: Text) -> NSAttributedString {
+        NSAttributedString(string: text.string, attributes: baseAttributes(ThreadStyle.bodyFont))
+    }
+
+    mutating func visitSoftBreak(_ softBreak: SoftBreak) -> NSAttributedString {
+        NSAttributedString(string: " ", attributes: baseAttributes(ThreadStyle.bodyFont))
+    }
+
+    mutating func visitLineBreak(_ lineBreak: LineBreak) -> NSAttributedString {
+        NSAttributedString(string: "\n", attributes: baseAttributes(ThreadStyle.bodyFont))
+    }
+
+    mutating func visitEmphasis(_ emphasis: Emphasis) -> NSAttributedString {
+        let out = children(emphasis)
+        transformFonts(out) { NSFontManager.shared.convert($0, toHaveTrait: .italicFontMask) }
+        return out
+    }
+
+    mutating func visitStrong(_ strong: Strong) -> NSAttributedString {
+        let out = children(strong)
+        transformFonts(out) { NSFontManager.shared.convert($0, toHaveTrait: .boldFontMask) }
+        return out
+    }
+
+    mutating func visitStrikethrough(_ strikethrough: Strikethrough) -> NSAttributedString {
+        let out = children(strikethrough)
+        out.addAttribute(
+            .strikethroughStyle, value: NSUnderlineStyle.single.rawValue,
+            range: NSRange(location: 0, length: out.length))
+        return out
+    }
+
+    mutating func visitInlineCode(_ inlineCode: InlineCode) -> NSAttributedString {
+        NSAttributedString(
+            string: inlineCode.code,
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11.5, weight: .regular),
+                .foregroundColor: baseColor,
+                .backgroundColor: NSColor.quaternarySystemFill,
+                .paragraphStyle: paragraphStyle(indent: CGFloat(listDepth) * 14),
+            ])
+    }
+
+    mutating func visitLink(_ link: Link) -> NSAttributedString {
+        let out = children(link)
+        var attributes: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.linkColor
+        ]
+        if let url = link.destination.flatMap(URL.init(string:)) {
+            attributes[.link] = url
+        }
+        out.addAttributes(attributes, range: NSRange(location: 0, length: out.length))
+        return out
+    }
+
+    mutating func visitImage(_ image: Image) -> NSAttributedString {
+        // No inline images (yet) — show the alt text, dimmed, so the
+        // reader knows something was here.
+        let alt = image.plainText
+        guard !alt.isEmpty else { return NSAttributedString() }
+        return NSAttributedString(
+            string: "[\(alt)]",
+            attributes: [
+                .font: ThreadStyle.metaFont,
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ])
+    }
+
+    mutating func visitInlineHTML(_ inlineHTML: InlineHTML) -> NSAttributedString {
+        // Tags vanish; their inner text arrives as sibling Text nodes.
+        NSAttributedString()
+    }
+
+    mutating func visitHTMLBlock(_ html: HTMLBlock) -> NSAttributedString {
+        // Whatever survived sanitize() as an HTML block is scaffolding.
+        NSAttributedString()
     }
 }

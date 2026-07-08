@@ -106,10 +106,16 @@ default branch `preceipts`). Everything committed and pushed.
   node ids in `PrFeedback.threadMeta`) and **edit your own comments**
   (REST PATCH; `viewerLogin` gates the pencil). Posting stays out.
 - Cards: `AvatarStore`/`AvatarView` (async, cached, initial-letter
-  placeholder), bot/verdict `ChipView`s, hover copy/edit/open,
-  `MarkdownBody` (sanitizes bot HTML — comments, `<details>`→summary,
-  badges, entities, tables→dot-rows — and styles headings/bold/code/
-  links), "Show more" collapse past 18 rendered lines.
+  placeholder), bot/verdict `ChipView`s, always-visible tertiary-tint
+  copy/edit/open actions (NO hover reveals — they shift layout),
+  "Show more" collapse past 18 rendered lines. `MarkdownBody` parses
+  GFM with **swift-markdown 0.8** (real nested lists, tables→dot-rows,
+  strikethrough, task lists) rendered natively via a MarkupVisitor →
+  NSAttributedString; a regex pre-pass condenses bot HTML (comments,
+  `<details>`→"▸ summary", badge anchors); Image nodes render as dim
+  `[alt]`. Webviews were considered and rejected (per-comment WKWebView
+  = async height negotiation + non-native selection/theming); if ever
+  needed, ONE webview for the whole pane is the only sane variant.
 - **Sidebar filter bar** above the tree: All/People/Bots segmented +
   an `ellipsis.circle` view-options menu (Show Resolved / Show
   Outdated checkmark items — both default OFF, mirroring GitHub; the
