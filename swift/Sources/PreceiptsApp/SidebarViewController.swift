@@ -37,10 +37,9 @@ final class SidebarViewController: NSViewController {
     private let spinner = NSProgressIndicator()
     private let authorsControl = NSSegmentedControl(
         labels: ["All", "People", "Bots"], trackingMode: .selectOne, target: nil, action: nil)
-    private let resolvedCheckbox = NSButton(
-        checkboxWithTitle: "Show resolved", target: nil, action: nil)
-    private let outdatedCheckbox = NSButton(
-        checkboxWithTitle: "Show outdated", target: nil, action: nil)
+    private let moreButton = NSButton()
+    /// Mirror of the cockpit-owned filter, for menu checkmarks.
+    private var filter = FeedbackFilter()
 
     override func loadView() {
         let column = NSTableColumn(identifier: .init("file"))
@@ -107,12 +106,25 @@ final class SidebarViewController: NSViewController {
         authorsControl.target = self
         authorsControl.action = #selector(filterControlChanged(_:))
 
-        for checkbox in [resolvedCheckbox, outdatedCheckbox] {
-            checkbox.controlSize = .regular
-            checkbox.font = .systemFont(ofSize: 13)
-            checkbox.target = self
-            checkbox.action = #selector(filterControlChanged(_:))
-        }
+        // Low-frequency view options live behind "…" (Finder-style),
+        // with checkmark items; the button tints when any is active so
+        // hidden threads never go unexplained.
+        moreButton.isBordered = false
+        moreButton.imagePosition = .imageOnly
+        moreButton.target = self
+        moreButton.action = #selector(moreClicked(_:))
+        moreButton.toolTip = "Thread view options"
+        moreButton.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            moreButton.widthAnchor.constraint(equalToConstant: 24),
+            moreButton.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        updateMoreButton()
+
+        let controlRow = NSStackView(views: [authorsControl, moreButton])
+        controlRow.orientation = .horizontal
+        controlRow.alignment = .centerY
+        controlRow.spacing = Metrics.unit
 
         filterBar.orientation = .vertical
         filterBar.alignment = .leading
@@ -121,14 +133,11 @@ final class SidebarViewController: NSViewController {
             top: Metrics.padding, left: Metrics.paddingWide,
             bottom: Metrics.unit, right: Metrics.paddingWide)
         filterBar.addArrangedSubview(titleRow)
-        filterBar.addArrangedSubview(authorsControl)
-        filterBar.addArrangedSubview(resolvedCheckbox)
-        filterBar.addArrangedSubview(outdatedCheckbox)
-        filterBar.setCustomSpacing(Metrics.unit, after: resolvedCheckbox)
+        filterBar.addArrangedSubview(controlRow)
         let inset = 2 * Metrics.paddingWide
         NSLayoutConstraint.activate([
             titleRow.widthAnchor.constraint(equalTo: filterBar.widthAnchor, constant: -inset),
-            authorsControl.widthAnchor.constraint(
+            controlRow.widthAnchor.constraint(
                 equalTo: filterBar.widthAnchor, constant: -inset),
         ])
         filterBar.isHidden = true
@@ -136,13 +145,22 @@ final class SidebarViewController: NSViewController {
 
     /// Reflect cockpit-owned filter state without firing the callback.
     func setFilter(_ filter: FeedbackFilter) {
+        self.filter = filter
         switch filter.authors {
         case .all: authorsControl.selectedSegment = 0
         case .humans: authorsControl.selectedSegment = 1
         case .bots: authorsControl.selectedSegment = 2
         }
-        resolvedCheckbox.state = filter.showResolved ? .on : .off
-        outdatedCheckbox.state = filter.showOutdated ? .on : .off
+        updateMoreButton()
+    }
+
+    private func updateMoreButton() {
+        let active = filter.showResolved || filter.showOutdated
+        moreButton.image = NSImage(
+            systemSymbolName: active ? "ellipsis.circle.fill" : "ellipsis.circle",
+            accessibilityDescription: "thread view options")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+        moreButton.contentTintColor = active ? .controlAccentColor : .secondaryLabelColor
     }
 
     func setFeedbackState(_ state: FeedbackLoadState) {
@@ -166,17 +184,44 @@ final class SidebarViewController: NSViewController {
     }
 
     @objc private func filterControlChanged(_ sender: Any?) {
-        let authors: FeedbackFilter.Authors
         switch authorsControl.selectedSegment {
-        case 1: authors = .humans
-        case 2: authors = .bots
-        default: authors = .all
+        case 1: filter.authors = .humans
+        case 2: filter.authors = .bots
+        default: filter.authors = .all
         }
-        onFilterChange?(
-            FeedbackFilter(
-                authors: authors,
-                showResolved: resolvedCheckbox.state == .on,
-                showOutdated: outdatedCheckbox.state == .on))
+        emitFilter()
+    }
+
+    @objc private func moreClicked(_ sender: NSButton) {
+        let menu = NSMenu()
+        let resolved = NSMenuItem(
+            title: "Show Resolved", action: #selector(toggleResolved(_:)), keyEquivalent: "")
+        resolved.target = self
+        resolved.state = filter.showResolved ? .on : .off
+        menu.addItem(resolved)
+        let outdated = NSMenuItem(
+            title: "Show Outdated", action: #selector(toggleOutdated(_:)), keyEquivalent: "")
+        outdated.target = self
+        outdated.state = filter.showOutdated ? .on : .off
+        menu.addItem(outdated)
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: 0, y: sender.bounds.height + Metrics.unit), in: sender)
+    }
+
+    @objc private func toggleResolved(_ sender: Any?) {
+        filter.showResolved.toggle()
+        emitFilter()
+    }
+
+    @objc private func toggleOutdated(_ sender: Any?) {
+        filter.showOutdated.toggle()
+        emitFilter()
+    }
+
+    private func emitFilter() {
+        updateMoreButton()
+        onFilterChange?(filter)
     }
 
     func show(tree: [FileTreeNode]) {

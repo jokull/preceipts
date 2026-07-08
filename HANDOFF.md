@@ -111,9 +111,11 @@ default branch `preceipts`). Everything committed and pushed.
   badges, entities, tables→dot-rows — and styles headings/bold/code/
   links), "Show more" collapse past 18 rendered lines.
 - **Sidebar filter bar** above the tree: All/People/Bots segmented +
-  Show resolved checkbox (persisted in UserDefaults), spinner while
-  fetching, "N open · M resolved" counts. `FeedbackFilter` (Kit,
-  tested) scopes bubbles, row badges, and navigation.
+  an `ellipsis.circle` view-options menu (Show Resolved / Show
+  Outdated checkmark items — both default OFF, mirroring GitHub; the
+  button tints accent when any is on). Persisted in UserDefaults;
+  spinner while fetching, "N open · M resolved" counts.
+  `FeedbackFilter` (Kit, tested) scopes bubbles, badges, navigation.
 - Sizing follows HIG (13pt bodies, 26pt icon-button hit targets, 16pt
   pane insets) — deliberately away from VS Code-tiny; resolved a
   clipped refresh icon under the pane's rounded corner. Sidebar split
