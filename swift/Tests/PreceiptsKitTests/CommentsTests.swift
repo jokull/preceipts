@@ -308,13 +308,18 @@ final class FeedbackParseTests: XCTestCase {
                "created_at": "2026-07-07T00:00:00Z", "html_url": "u1"},
               {"id": 2, "user": {"login": "jokull"}, "body": "h",
                "path": "b.ts", "line": 2, "side": "RIGHT", "diff_hunk": "@@\\n+y",
-               "created_at": "2026-07-07T01:00:00Z", "html_url": "u2"}
+               "created_at": "2026-07-07T01:00:00Z", "html_url": "u2"},
+              {"id": 3, "user": {"login": "jokull"}, "body": "moved on",
+               "path": "c.ts", "line": null, "original_line": 9, "side": "RIGHT",
+               "diff_hunk": "@@\\n+z", "created_at": "2026-07-07T02:00:00Z",
+               "html_url": "u3"}
             ]
             """.utf8)
         let threads = FeedbackThread.group(
             try parseFeedback(reviewComments: reviewComments, reviews: empty, conversation: empty))
         let bot = threads[0]
         let human = threads[1]
+        let outdated = threads[2]
 
         XCTAssertTrue(FeedbackFilter().includes(bot, resolved: false))
         XCTAssertFalse(FeedbackFilter().includes(bot, resolved: true))
@@ -324,6 +329,14 @@ final class FeedbackParseTests: XCTestCase {
         XCTAssertTrue(FeedbackFilter(authors: .humans).includes(human, resolved: false))
         XCTAssertTrue(FeedbackFilter(authors: .bots).includes(bot, resolved: false))
         XCTAssertFalse(FeedbackFilter(authors: .bots).includes(human, resolved: false))
+
+        // Outdated threads hide by default, like GitHub.
+        XCTAssertTrue(outdated.root.outdated)
+        XCTAssertFalse(FeedbackFilter().includes(outdated, resolved: false))
+        XCTAssertTrue(
+            FeedbackFilter(showOutdated: true).includes(outdated, resolved: false))
+        XCTAssertFalse(
+            FeedbackFilter(showOutdated: true).includes(outdated, resolved: true))
     }
 
     func testParseAvatarUrls() throws {

@@ -1013,19 +1013,22 @@ extension CockpitViewController {
 extension FeedbackFilter {
     private static let authorsKey = "feedback.filter.authors"
     private static let resolvedKey = "feedback.filter.showResolved"
+    private static let outdatedKey = "feedback.filter.showOutdated"
 
     static func fromDefaults() -> FeedbackFilter {
         let defaults = UserDefaults.standard
         return FeedbackFilter(
             authors: defaults.string(forKey: authorsKey).flatMap(Authors.init(rawValue:))
                 ?? .all,
-            showResolved: defaults.bool(forKey: resolvedKey))
+            showResolved: defaults.bool(forKey: resolvedKey),
+            showOutdated: defaults.bool(forKey: outdatedKey))
     }
 
     func saveToDefaults() {
         let defaults = UserDefaults.standard
         defaults.set(authors.rawValue, forKey: Self.authorsKey)
         defaults.set(showResolved, forKey: Self.resolvedKey)
+        defaults.set(showOutdated, forKey: Self.outdatedKey)
     }
 }
 

@@ -39,6 +39,8 @@ final class SidebarViewController: NSViewController {
         labels: ["All", "People", "Bots"], trackingMode: .selectOne, target: nil, action: nil)
     private let resolvedCheckbox = NSButton(
         checkboxWithTitle: "Show resolved", target: nil, action: nil)
+    private let outdatedCheckbox = NSButton(
+        checkboxWithTitle: "Show outdated", target: nil, action: nil)
 
     override func loadView() {
         let column = NSTableColumn(identifier: .init("file"))
@@ -105,10 +107,12 @@ final class SidebarViewController: NSViewController {
         authorsControl.target = self
         authorsControl.action = #selector(filterControlChanged(_:))
 
-        resolvedCheckbox.controlSize = .regular
-        resolvedCheckbox.font = .systemFont(ofSize: 13)
-        resolvedCheckbox.target = self
-        resolvedCheckbox.action = #selector(filterControlChanged(_:))
+        for checkbox in [resolvedCheckbox, outdatedCheckbox] {
+            checkbox.controlSize = .regular
+            checkbox.font = .systemFont(ofSize: 13)
+            checkbox.target = self
+            checkbox.action = #selector(filterControlChanged(_:))
+        }
 
         filterBar.orientation = .vertical
         filterBar.alignment = .leading
@@ -119,6 +123,8 @@ final class SidebarViewController: NSViewController {
         filterBar.addArrangedSubview(titleRow)
         filterBar.addArrangedSubview(authorsControl)
         filterBar.addArrangedSubview(resolvedCheckbox)
+        filterBar.addArrangedSubview(outdatedCheckbox)
+        filterBar.setCustomSpacing(Metrics.unit, after: resolvedCheckbox)
         let inset = 2 * Metrics.paddingWide
         NSLayoutConstraint.activate([
             titleRow.widthAnchor.constraint(equalTo: filterBar.widthAnchor, constant: -inset),
@@ -136,6 +142,7 @@ final class SidebarViewController: NSViewController {
         case .bots: authorsControl.selectedSegment = 2
         }
         resolvedCheckbox.state = filter.showResolved ? .on : .off
+        outdatedCheckbox.state = filter.showOutdated ? .on : .off
     }
 
     func setFeedbackState(_ state: FeedbackLoadState) {
@@ -166,7 +173,10 @@ final class SidebarViewController: NSViewController {
         default: authors = .all
         }
         onFilterChange?(
-            FeedbackFilter(authors: authors, showResolved: resolvedCheckbox.state == .on))
+            FeedbackFilter(
+                authors: authors,
+                showResolved: resolvedCheckbox.state == .on,
+                showOutdated: outdatedCheckbox.state == .on))
     }
 
     func show(tree: [FileTreeNode]) {

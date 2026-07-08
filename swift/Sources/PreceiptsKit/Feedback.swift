@@ -224,10 +224,15 @@ public struct FeedbackFilter: Equatable, Sendable {
 
     public var authors: Authors
     public var showResolved: Bool
+    public var showOutdated: Bool
 
-    public init(authors: Authors = .all, showResolved: Bool = false) {
+    /// Defaults mirror GitHub: unresolved, current-diff threads only.
+    public init(
+        authors: Authors = .all, showResolved: Bool = false, showOutdated: Bool = false
+    ) {
         self.authors = authors
         self.showResolved = showResolved
+        self.showOutdated = showOutdated
     }
 
     public func includes(_ thread: FeedbackThread, resolved: Bool) -> Bool {
@@ -238,6 +243,9 @@ public struct FeedbackFilter: Equatable, Sendable {
             if thread.root.isBot { return false }
         case .bots:
             if !thread.root.isBot { return false }
+        }
+        if !showOutdated, thread.root.outdated {
+            return false
         }
         return showResolved || !resolved
     }
