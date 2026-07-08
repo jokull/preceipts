@@ -341,18 +341,7 @@ final class ThreadAreaViewController: NSViewController {
         time.font = ThreadStyle.metaFont
         time.textColor = .secondaryLabelColor
 
-        let copy = ThreadStyle.iconButton(
-            "doc.on.doc", tooltip: "Copy with context",
-            target: self, action: #selector(copyNoteClicked(_:)),
-            pointSize: 11, hitTarget: 22)
-        copy.tag = Int(bitPattern: UInt(note.id))
-        let delete = ThreadStyle.iconButton(
-            "trash", tooltip: "Delete this draft",
-            target: self, action: #selector(deleteNoteClicked(_:)),
-            pointSize: 11, hitTarget: 22)
-        delete.tag = Int(bitPattern: UInt(note.id))
-
-        let headRow = NSStackView(views: [head, time, NSView(), copy, delete])
+        let headRow = NSStackView(views: [head, time, NSView()])
         headRow.orientation = .horizontal
         headRow.alignment = .centerY
         headRow.spacing = 6
@@ -361,10 +350,17 @@ final class ThreadAreaViewController: NSViewController {
             self?.handlers.updateNote?(id, body)
         }
 
-        let column = NSStackView(views: [headRow, editor])
+        // Same footer pattern as comment cards: plain-text actions.
+        let copy = noteLinkButton("Copy", #selector(copyNoteClicked(_:)), note.id)
+        let delete = noteLinkButton("Delete", #selector(deleteNoteClicked(_:)), note.id)
+        let footer = NSStackView(views: [copy, delete])
+        footer.orientation = .horizontal
+        footer.spacing = Metrics.paddingWide
+
+        let column = NSStackView(views: [headRow, editor, footer])
         column.orientation = .vertical
         column.alignment = .leading
-        column.spacing = 3
+        column.spacing = Metrics.unit + 2
 
         let row = NSStackView(views: [glyph, column])
         row.orientation = .horizontal
@@ -375,6 +371,20 @@ final class ThreadAreaViewController: NSViewController {
             editor.widthAnchor.constraint(equalTo: column.widthAnchor),
         ])
         return row
+    }
+
+    private func noteLinkButton(_ title: String, _ action: Selector, _ id: UInt64) -> NSButton {
+        let button = NSButton(title: "", target: self, action: action)
+        button.isBordered = false
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.tag = Int(bitPattern: UInt(id))
+        return button
     }
 
     private static func relativeTime(unixSeconds: UInt64) -> String {

@@ -8,13 +8,89 @@
 import AppKit
 import Markdown
 
+/// One rendered piece of a comment body. Text segments are attributed
+/// strings; images become native views (GIFs animate) — no webviews.
+enum BodySegment {
+    case text(NSAttributedString)
+    case image(url: URL, alt: String)
+
+    /// Collapse accounting: how many "lines" this segment occupies.
+    var lineWeight: Int {
+        switch self {
+        case .text(let text):
+            return text.string.components(separatedBy: "\n").count
+        case .image:
+            return 8
+        }
+    }
+}
+
 enum MarkdownBody {
-    static func render(_ raw: String) -> NSAttributedString {
+    static func render(_ raw: String) -> [BodySegment] {
         let document = Document(parsing: sanitize(raw))
         var renderer = AttributedRenderer()
-        let out = NSMutableAttributedString(attributedString: renderer.visit(document))
-        trimBlankEdges(out)
-        return out
+        var segments: [BodySegment] = []
+        let current = NSMutableAttributedString()
+
+        func flush() {
+            trimBlankEdges(current)
+            if current.length > 0 {
+                segments.append(.text(NSAttributedString(attributedString: current)))
+            }
+            current.setAttributedString(NSAttributedString())
+        }
+
+        for block in document.blockChildren {
+            if let images = standaloneImages(block) {
+                flush()
+                for (url, alt) in images {
+                    segments.append(.image(url: url, alt: alt))
+                }
+            } else {
+                current.append(renderer.visit(block))
+            }
+        }
+        flush()
+        return segments
+    }
+
+    /// A paragraph that is only images (possibly link-wrapped — GitHub
+    /// screenshots) renders as native image views.
+    private static func standaloneImages(_ block: BlockMarkup) -> [(URL, String)]? {
+        guard let paragraph = block as? Paragraph else { return nil }
+        var images: [(URL, String)] = []
+        for child in paragraph.inlineChildren {
+            switch child {
+            case let image as Image:
+                guard let url = renderableURL(image) else { return nil }
+                images.append((url, image.plainText))
+            case let link as Link:
+                let inner = Array(link.children)
+                guard inner.count == 1, let image = inner[0] as? Image,
+                    let url = renderableURL(image)
+                else { return nil }
+                images.append((url, image.plainText))
+            case let text as Text:
+                guard text.string.trimmingCharacters(in: .whitespaces).isEmpty else {
+                    return nil
+                }
+            case is SoftBreak, is LineBreak, is InlineHTML:
+                continue
+            default:
+                return nil
+            }
+        }
+        return images.isEmpty ? nil : images
+    }
+
+    /// Raster images (png/jpg/gif/webp) render; SVGs are almost always
+    /// status badges — those stay as dim [alt] text.
+    private static func renderableURL(_ image: Image) -> URL? {
+        guard let source = image.source, let url = URL(string: source),
+            url.scheme == "https" || url.scheme == "http",
+            !url.path.lowercased().hasSuffix(".svg")
+        else { return nil }
+        return url
     }
 
     // ------------------------------------------------------------------
@@ -26,17 +102,49 @@ enum MarkdownBody {
         var text = raw.replacingOccurrences(of: "\r\n", with: "\n")
         // Hidden markers (<!-- kami:review-progress -->).
         text = regexReplace(text, pattern: "<!--[\\s\\S]*?-->", with: "")
-        // <details> blobs (AI-fix prompts, file lists) → just the summary.
+        // <details> unwrap to summary caption + full content — the
+        // card-level "Show more" collapse contains the length.
         text = regexReplace(
             text,
-            pattern: "<details[^>]*>\\s*<summary>([\\s\\S]*?)</summary>[\\s\\S]*?</details>",
-            with: "\u{25b8} $1")
-        // Badge images carry no text; drop them anchor and all.
-        text = regexReplace(
-            text, pattern: "<a[^>]*>\\s*(?:<picture>[\\s\\S]*?</picture>|<img[^>]*/?>)\\s*</a>",
-            with: "")
+            pattern:
+                "<details[^>]*>\\s*<summary>([\\s\\S]*?)</summary>([\\s\\S]*?)</details>",
+            with: "\u{25b8} $1\n\n$2")
+        // <picture> badges (responsive light/dark status SVGs).
         text = regexReplace(text, pattern: "<picture>[\\s\\S]*?</picture>", with: "")
+        // Raw <img> tags → markdown images so real screenshots/GIFs
+        // survive tag stripping and render natively.
+        text = convertImgTags(text)
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func convertImgTags(_ text: String) -> String {
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: "<img[^>]*>", options: [.caseInsensitive])
+        else { return text }
+        let ns = text as NSString
+        var result = ""
+        var last = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            result += ns.substring(with: NSRange(location: last, length: match.range.location - last))
+            let tag = ns.substring(with: match.range)
+            if let src = attribute(tag, "src") {
+                let alt = attribute(tag, "alt") ?? ""
+                result += "![\(alt)](\(src))"
+            }
+            last = match.range.location + match.range.length
+        }
+        result += ns.substring(from: last)
+        return result
+    }
+
+    private static func attribute(_ tag: String, _ name: String) -> String? {
+        guard
+            let regex = try? NSRegularExpression(
+                pattern: "\(name)=\"([^\"]*)\"", options: [.caseInsensitive]),
+            let match = regex.firstMatch(in: tag, range: NSRange(tag.startIndex..., in: tag))
+        else { return nil }
+        return (tag as NSString).substring(with: match.range(at: 1))
     }
 
     private static func regexReplace(

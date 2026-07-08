@@ -140,19 +140,21 @@ final class ChipView: NSView {
 }
 
 // ------------------------------------------------------------------
-// Comment card: one GitHub comment. Hover reveals copy/edit/open;
-// edit swaps the body for a text view with Save/Cancel.
+// Comment card: one GitHub comment. Body renders as segments — text
+// interleaved with native image views (GIFs animate). Actions are
+// plain-text buttons in a footer row: Copy (flips to "Copied!"),
+// Visit GitHub, Edit for the viewer's own comments.
 
 final class CommentCardView: NSView {
     private let entry: TearContent.Entry
     private let onEdit: ((TearContent.Entry, String) -> Void)?
 
-    private let actions = NSStackView()
     private let contentColumn = NSStackView()
-    private let bodyLabel: NSTextField
-    private let fullBody: NSAttributedString
+    private let bodyStack = NSStackView()
+    private var segments: [BodySegment]
     private var expanded = false
     private var expandButton: NSButton?
+    private var copyButton: NSButton?
     private var editBox: NSView?
     private var editTextView: NSTextView?
 
@@ -164,8 +166,7 @@ final class CommentCardView: NSView {
     init(entry: TearContent.Entry, onEdit: ((TearContent.Entry, String) -> Void)?) {
         self.entry = entry
         self.onEdit = onEdit
-        self.fullBody = MarkdownBody.render(entry.body)
-        self.bodyLabel = NSTextField(labelWithString: "")
+        self.segments = MarkdownBody.render(entry.body)
         super.init(frame: .zero)
 
         let avatar = AvatarView(diameter: ThreadStyle.avatarSize)
@@ -194,50 +195,17 @@ final class CommentCardView: NSView {
         header.addArrangedSubview(time)
         header.addArrangedSubview(NSView())
 
-        // Actions stay visible — hover-reveals shift layout and hide
-        // affordances; quiet tertiary tint keeps them subordinate.
-        actions.orientation = .horizontal
-        actions.spacing = 0
-        var buttons = [
-            ThreadStyle.iconButton(
-                "doc.on.doc", tooltip: "Copy with context",
-                target: self, action: #selector(copyClicked),
-                pointSize: 11, hitTarget: 22)
-        ]
-        if entry.canEdit, onEdit != nil {
-            buttons.append(
-                ThreadStyle.iconButton(
-                    "pencil", tooltip: "Edit comment",
-                    target: self, action: #selector(editClicked),
-                    pointSize: 11, hitTarget: 22))
-        }
-        if entry.url != nil {
-            buttons.append(
-                ThreadStyle.iconButton(
-                    "arrow.up.right.square", tooltip: "Open on GitHub",
-                    target: self, action: #selector(openClicked),
-                    pointSize: 11, hitTarget: 22))
-        }
-        for button in buttons {
-            button.contentTintColor = .tertiaryLabelColor
-            actions.addArrangedSubview(button)
-        }
-        header.addArrangedSubview(actions)
-
-        bodyLabel.lineBreakMode = .byWordWrapping
-        bodyLabel.maximumNumberOfLines = 0
-        bodyLabel.isSelectable = true
-        bodyLabel.allowsEditingTextAttributes = true  // clickable links
-        bodyLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        bodyStack.orientation = .vertical
+        bodyStack.alignment = .leading
+        bodyStack.spacing = Metrics.padding
 
         contentColumn.orientation = .vertical
         contentColumn.alignment = .leading
-        contentColumn.spacing = 3
+        contentColumn.spacing = Metrics.unit
         contentColumn.addArrangedSubview(header)
-        contentColumn.addArrangedSubview(bodyLabel)
+        contentColumn.addArrangedSubview(bodyStack)
 
-        let renderedLines = fullBody.string.components(separatedBy: "\n").count
-        if renderedLines > Self.collapseThreshold {
+        if segments.reduce(0, { $0 + $1.lineWeight }) > Self.collapseThreshold {
             let button = NSButton(
                 title: "Show more", target: self, action: #selector(toggleExpanded))
             button.isBordered = false
@@ -246,7 +214,26 @@ final class CommentCardView: NSView {
             contentColumn.addArrangedSubview(button)
             expandButton = button
         }
-        applyBody()
+        populateBody()
+
+        // Footer: plain-text actions, quiet but always present.
+        let copy = Self.linkButton("Copy", target: self, action: #selector(copyClicked))
+        copyButton = copy
+        var footerButtons = [copy]
+        if entry.url != nil {
+            footerButtons.append(
+                Self.linkButton(
+                    "Visit GitHub", target: self, action: #selector(openClicked)))
+        }
+        if entry.canEdit, onEdit != nil {
+            footerButtons.append(
+                Self.linkButton("Edit", target: self, action: #selector(editClicked)))
+        }
+        let footer = NSStackView(views: footerButtons)
+        footer.orientation = .horizontal
+        footer.spacing = Metrics.paddingWide
+        contentColumn.addArrangedSubview(footer)
+        contentColumn.setCustomSpacing(Metrics.unit + 2, after: bodyStack)
 
         let row = NSStackView(views: [avatar, contentColumn])
         row.orientation = .horizontal
@@ -260,25 +247,72 @@ final class CommentCardView: NSView {
             row.trailingAnchor.constraint(equalTo: trailingAnchor),
             row.bottomAnchor.constraint(equalTo: bottomAnchor),
             header.widthAnchor.constraint(equalTo: contentColumn.widthAnchor),
-            bodyLabel.widthAnchor.constraint(equalTo: contentColumn.widthAnchor),
+            bodyStack.widthAnchor.constraint(equalTo: contentColumn.widthAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    private func applyBody() {
-        if expanded || expandButton == nil {
-            bodyLabel.attributedStringValue = fullBody
-        } else {
-            bodyLabel.attributedStringValue = Self.truncate(
-                fullBody, toLines: Self.collapsedLines)
+    private static func linkButton(
+        _ title: String, target: AnyObject, action: Selector
+    ) -> NSButton {
+        let button = NSButton(title: "", target: target, action: action)
+        button.isBordered = false
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        setLinkTitle(button, title, color: .secondaryLabelColor)
+        return button
+    }
+
+    private static func setLinkTitle(_ button: NSButton, _ title: String, color: NSColor) {
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: color,
+            ])
+    }
+
+    // ------------------------------------------------------------------
+    // Body segments + collapse
+
+    private func populateBody() {
+        bodyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        var budget = (expanded || expandButton == nil) ? Int.max : Self.collapsedLines
+        for segment in segments {
+            guard budget > 0 else { break }
+            switch segment {
+            case .text(let text):
+                let weight = segment.lineWeight
+                let display = weight > budget ? Self.truncate(text, toLines: budget) : text
+                budget -= weight
+                let label = Self.bodyTextField(display)
+                bodyStack.addArrangedSubview(label)
+                label.widthAnchor.constraint(equalTo: bodyStack.widthAnchor).isActive = true
+            case .image(let url, let alt):
+                budget -= segment.lineWeight
+                let view = BodyImageView(url: url, alt: alt)
+                bodyStack.addArrangedSubview(view)
+                view.widthAnchor.constraint(
+                    lessThanOrEqualTo: bodyStack.widthAnchor).isActive = true
+            }
         }
         expandButton?.title = expanded ? "Show less" : "Show more"
     }
 
+    private static func bodyTextField(_ text: NSAttributedString) -> NSTextField {
+        let label = NSTextField(labelWithString: "")
+        label.attributedStringValue = text
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.isSelectable = true
+        label.allowsEditingTextAttributes = true  // clickable links
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
     @objc private func toggleExpanded() {
         expanded.toggle()
-        applyBody()
+        populateBody()
     }
 
     private static func truncate(_ text: NSAttributedString, toLines limit: Int) -> NSAttributedString {
@@ -318,6 +352,12 @@ final class CommentCardView: NSView {
     @objc private func copyClicked() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(entry.copyText, forType: .string)
+        guard let copyButton else { return }
+        Self.setLinkTitle(copyButton, "Copied!", color: .systemGreen)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak copyButton] in
+            guard let copyButton else { return }
+            Self.setLinkTitle(copyButton, "Copy", color: .secondaryLabelColor)
+        }
     }
 
     @objc private func openClicked() {
@@ -330,7 +370,7 @@ final class CommentCardView: NSView {
 
     @objc private func editClicked() {
         guard editBox == nil else { return }
-        bodyLabel.isHidden = true
+        bodyStack.isHidden = true
 
         let scroll = NSTextView.scrollableTextView()
         let textView = scroll.documentView as! NSTextView
@@ -377,7 +417,7 @@ final class CommentCardView: NSView {
         editBox?.removeFromSuperview()
         editBox = nil
         editTextView = nil
-        bodyLabel.isHidden = false
+        bodyStack.isHidden = false
     }
 
     @objc private func saveEditClicked() {
@@ -388,10 +428,53 @@ final class CommentCardView: NSView {
             return
         }
         // Optimistic: show the new text now; the refetch confirms it.
-        bodyLabel.attributedStringValue = MarkdownBody.render(body)
+        segments = MarkdownBody.render(body)
+        populateBody()
         cancelEditClicked()
         onEdit?(entry, body)
     }
+}
+
+// ------------------------------------------------------------------
+// Inline body image: async-loaded, aspect-sized, GIFs animate. Native
+// all the way down — no webviews.
+
+final class BodyImageView: NSImageView {
+    init(url: URL, alt: String) {
+        super.init(frame: .zero)
+        imageScaling = .scaleProportionallyDown
+        animates = true
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
+        toolTip = alt.isEmpty ? url.absoluteString : alt
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let placeholderHeight = heightAnchor.constraint(equalToConstant: 96)
+        let placeholderWidth = widthAnchor.constraint(equalToConstant: 200)
+        placeholderWidth.priority = .defaultLow
+        NSLayoutConstraint.activate([placeholderHeight, placeholderWidth])
+
+        AvatarStore.shared.image(for: url.absoluteString) { [weak self] image in
+            guard let self, let image, image.size.width > 0 else { return }
+            self.image = image
+            placeholderHeight.isActive = false
+            placeholderWidth.isActive = false
+            self.layer?.backgroundColor = NSColor.clear.cgColor
+            // Natural size, capped by the card width (outer ≤ pin);
+            // height follows the aspect ratio so nothing letterboxes.
+            let natural = self.widthAnchor.constraint(equalToConstant: image.size.width)
+            natural.priority = .defaultLow
+            let aspect = self.heightAnchor.constraint(
+                equalTo: self.widthAnchor,
+                multiplier: image.size.height / image.size.width)
+            aspect.priority = .init(999)
+            NSLayoutConstraint.activate([natural, aspect])
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 }
 
 // ------------------------------------------------------------------

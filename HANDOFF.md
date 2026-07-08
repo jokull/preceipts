@@ -106,16 +106,22 @@ default branch `preceipts`). Everything committed and pushed.
   node ids in `PrFeedback.threadMeta`) and **edit your own comments**
   (REST PATCH; `viewerLogin` gates the pencil). Posting stays out.
 - Cards: `AvatarStore`/`AvatarView` (async, cached, initial-letter
-  placeholder), bot/verdict `ChipView`s, always-visible tertiary-tint
-  copy/edit/open actions (NO hover reveals — they shift layout),
-  "Show more" collapse past 18 rendered lines. `MarkdownBody` parses
-  GFM with **swift-markdown 0.8** (real nested lists, tables→dot-rows,
-  strikethrough, task lists) rendered natively via a MarkupVisitor →
-  NSAttributedString; a regex pre-pass condenses bot HTML (comments,
-  `<details>`→"▸ summary", badge anchors); Image nodes render as dim
-  `[alt]`. Webviews were considered and rejected (per-comment WKWebView
-  = async height negotiation + non-native selection/theming); if ever
-  needed, ONE webview for the whole pane is the only sane variant.
+  placeholder), bot/verdict `ChipView`s, and a footer of plain-text
+  actions — "Copy" (flips to "Copied!" 1.5s), "Visit GitHub", "Edit"
+  for own comments (NO hover reveals — they shift layout). "Show more"
+  collapse past 18 weighted lines (an image weighs 8). `MarkdownBody`
+  parses GFM with **swift-markdown 0.8** via a MarkupVisitor and
+  returns `[BodySegment]`: attributed text interleaved with
+  `.image(url:alt:)` — standalone-image paragraphs (markdown or raw
+  `<img>` tags, converted in the sanitizer) render as native
+  `BodyImageView`s (aspect-sized, width-capped, **GIFs animate** via
+  NSImageView.animates; SVGs = badges stay as dim `[alt]`). The regex
+  pre-pass strips HTML comments, unwraps `<details>` to a "▸ summary"
+  caption + full content (card collapse contains length), drops
+  `<picture>` badges. Webviews were considered and rejected
+  (per-comment WKWebView = async height negotiation + non-native
+  selection/theming); `poke preview <file.md>` renders any markdown
+  file as a card — the renderer's test bench.
 - **Sidebar filter bar** above the tree: All/People/Bots segmented +
   an `ellipsis.circle` view-options menu (Show Resolved / Show
   Outdated checkmark items — both default OFF, mirroring GitHub; the

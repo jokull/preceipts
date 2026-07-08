@@ -994,6 +994,23 @@ extension CockpitViewController {
         case "sidebar":
             guard parts.count > 1, let width = Double(parts[1]) else { return }
             splitView.setPosition(CGFloat(width), ofDividerAt: 0)
+        case "preview":
+            // Render a markdown file as a comment card — the renderer's
+            // test bench (images, tables, details…).
+            guard parts.count > 1,
+                let body = try? String(contentsOfFile: parts[1], encoding: .utf8)
+            else { return }
+            revealThreadArea()
+            let entry = TearContent.Entry(
+                commentId: 0, kind: .conversation, author: "preview", isBot: false,
+                avatarUrl: nil, timeText: "now", verdict: nil, body: body,
+                url: "https://github.com", canEdit: false, copyText: body)
+            threadArea.render(
+                TearContent(
+                    breadcrumb: "Renderer preview", showBack: true,
+                    entries: [entry], notes: [], url: nil, digest: body,
+                    composerPlaceholder: nil, focusComposer: false, emptyText: nil),
+                handlers: TearHandlers())
         default:
             break
         }
