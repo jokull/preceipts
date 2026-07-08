@@ -128,34 +128,79 @@ default path.
 - Out of scope for v1: posting reviews/comments, merging from the app
   (landing stays the agent's job via the engine).
 
-## PR feedback viewer (new)
+## PR feedback: the thread area (mental model, revised 2026-07-08)
 
-Review feedback is part of the cockpit, not a browser tab:
+### GitHub's review model (the ground truth we mirror)
 
-- **Sources**: PR review comments (line-anchored), review bodies, and
-  conversation comments — across **users and GitHub Apps** (codex,
-  CodeRabbit, CI bots…). Fetched with the same GitHub auth; interim
-  implementation may shell to `gh api` before OAuth lands.
-- **Two views of one model**: inline anchors in the scroll surface
-  (collapsed chips under the anchored row — expand to read thread), and a
-  **Feedback panel** listing all comments with filters: author, app/bot vs
-  human, file, resolved, outdated. Clicking a comment scrolls the surface
-  to its anchor. Comments whose anchor no longer matches the current tree
-  are marked *outdated* but still listed.
-- **Local comments (drafts, never posted)**: add a comment on any diff row
-  (gutter “+” or ⌘⇧M). Stored locally per repo (`.git/preceipts/`), scoped
-  to the branch. These are notes-to-agent, not GitHub state.
-- **Copy to Clipboard affordances** (the point — feeding coding agents):
-  - Per comment: copies a markdown block with full context —
-    ```
-    apps/next/components/foo.tsx:123
-    > const x = useMemo(() => props.a + props.b, [props.a, props.b])
-    This memo is unnecessary — props are primitives.
-    ```
-  - **Copy all** (per filter selection): one digest of every visible
-    comment, grouped by file, same format — paste straight into an agent
-    session as a worklist.
-  - GitHub comments get the same affordance (author attribution included).
+GitHub PR feedback is four distinct object kinds, and the UX must not
+blur them:
+
+1. **Review threads** — line-anchored conversations. A thread is a root
+   review comment plus flat (non-nested) replies, pinned to a
+   `path` + line range + side (LEFT = old, RIGHT = new). Threads carry
+   two lifecycle bits: **resolved** (a human judgment, toggled by anyone
+   with push access via the GraphQL `resolveReviewThread` /
+   `unresolveReviewThread` mutations — REST has no resolution API at
+   all) and **outdated** (a mechanical fact: the diff moved and the
+   anchor no longer maps; REST nulls `line`/`position`).
+2. **Reviews** — verdict events (APPROVED / CHANGES_REQUESTED /
+   COMMENTED) with an optional body. They are timeline *events*, not
+   conversations: no replies, no resolution. Empty COMMENTED bodies are
+   shells around line comments and never shown.
+3. **Conversation comments** — PR-level (issue) comments. Flat, no
+   anchor, no resolution.
+4. **Authors** — humans and GitHub Apps (`user.type == "Bot"`), each
+   with `avatar_url`. Bot feedback (codex, CodeRabbit) is first-class
+   here — it's the primary input the whole app exists to triage.
+
+Editing: a comment's author can edit it (REST `PATCH
+pulls/comments/{id}` for review comments, `PATCH issues/comments/{id}`
+for conversation comments). Review verdict bodies are immutable to us.
+
+### The cockpit mapping
+
+The diff surface carries only **bubbles** (per-row comment indicators)
+and the **claw** (the accent bracket marking the active thread's line
+range). Everything conversational lives in the trailing pane — the
+**thread area** — a breadcrumb-navigated stack:
+
+- **Conversation** (default): PR-level timeline — review verdicts as
+  compact event rows, conversation comments as full cards, plus a
+  composer for PR-level draft notes.
+- **Thread**: one line-anchored conversation. Quoted code context on
+  top, comment cards below, resolve/unresolve in the header, reply
+  composer pinned at the bottom. Back (or Esc) pops to Conversation.
+- **Compose**: a draft form for a new note on a selected line range.
+
+Card anatomy (native, not a GitHub clone): 20px circular avatar,
+author + relative time header (verdict chip for reviews, "bot" badge
+for apps), selectable body, hover-revealed actions (copy as markdown
+context block, edit for `viewer`'s own comments, open on GitHub).
+
+### Write operations (deliberate scope)
+
+The app **does** write these to GitHub, because they are triage acts,
+not authorship: **resolve/unresolve threads** and **edit your own
+comments**. It still does *not* post new comments or reviews — replies
+you type are local draft notes for the agent (below). Landing stays the
+engine's job.
+
+### Local drafts (never posted)
+
+Notes-to-agent on any diff row or range (double-click / drag + the
+composer), stored per-branch in `.git/preceipts/comments.json`. They
+render in the same thread area as editable cards, and everything —
+drafts and GitHub feedback alike — shares the **copy as context**
+affordance:
+
+```
+apps/next/components/foo.tsx:123
+> const x = useMemo(() => props.a + props.b, [props.a, props.b])
+— coderabbit[bot]: This memo is unnecessary — props are primitives.
+```
+
+Per-thread copy and copy-all digests (grouped by file) are the point:
+paste-ready worklists for a coding agent.
 
 ## File tree
 

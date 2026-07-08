@@ -11,6 +11,8 @@ enum Metrics {
     static let unit: CGFloat = 4
     static let padding: CGFloat = 8
     static let paddingWide: CGFloat = 12
+    /// Pane-edge padding (inspector/sidebar content regions).
+    static let paddingXL: CGFloat = 16
     static let statusBarHeight: CGFloat = 28
     static let findBarHeight: CGFloat = 36
     static let receiptsPanelHeight: CGFloat = 240

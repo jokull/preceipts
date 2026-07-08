@@ -78,24 +78,99 @@ final class GhClient {
             reviews: normalizeSeams(try api("pulls/\(number)/reviews")),
             conversation: normalizeSeams(try api("issues/\(number)/comments")))
 
-        // Resolution is GraphQL-only; best-effort, empty on any failure.
-        var resolved: Set<Int> = []
+        // Thread meta (node ids + resolution) is GraphQL-only;
+        // best-effort, empty on any failure.
+        var meta: [Int: ReviewThreadMeta] = [:]
         if let repo,
             let data = try? run(
                 binary: binary, workdir: workdir,
                 arguments: [
                     "api", "graphql",
-                    "-f", "query=\(reviewThreadResolutionQuery)",
+                    "-f", "query=\(reviewThreadMetaQuery)",
                     "-F", "owner=\(repo.owner)",
                     "-F", "name=\(repo.name)",
                     "-F", "number=\(number)",
                 ])
         {
-            resolved = (try? parseReviewThreadResolution(data)) ?? []
+            meta = (try? parseReviewThreadMeta(data)) ?? [:]
         }
         return PrFeedback(
             number: number, title: title, url: url, comments: comments,
-            resolvedRootIds: resolved)
+            threadMeta: meta)
+    }
+
+    /// Toggle a review thread's resolution via `gh api graphql`.
+    /// Completion on the main thread with any error.
+    func setThreadResolved(
+        nodeId: String, resolved: Bool, completion: @escaping (Error?) -> Void
+    ) {
+        guard let binary else {
+            completion(GhError.notInstalled)
+            return
+        }
+        let mutation = resolved ? "resolveReviewThread" : "unresolveReviewThread"
+        let query = """
+            mutation($threadId: ID!) {
+              \(mutation)(input: {threadId: $threadId}) { thread { isResolved } }
+            }
+            """
+        runAsync(
+            binary: binary,
+            arguments: ["api", "graphql", "-f", "query=\(query)", "-F", "threadId=\(nodeId)"],
+            completion: completion)
+    }
+
+    /// Edit the viewer's own comment (review vs conversation namespace).
+    func editComment(
+        kind: FeedbackKind, id: Int, body: String, completion: @escaping (Error?) -> Void
+    ) {
+        guard let binary else {
+            completion(GhError.notInstalled)
+            return
+        }
+        let namespace = kind == .conversation ? "issues" : "pulls"
+        runAsync(
+            binary: binary,
+            arguments: [
+                "api", "-X", "PATCH", "repos/{owner}/{repo}/\(namespace)/comments/\(id)",
+                "-f", "body=\(body)",
+            ],
+            completion: completion)
+    }
+
+    /// Signed-in login (for the edit-own-comments affordance).
+    /// Completion on the main thread; nil when unavailable.
+    func fetchViewer(completion: @escaping (String?) -> Void) {
+        guard let binary else {
+            completion(nil)
+            return
+        }
+        let workdir = workdir
+        DispatchQueue.global(qos: .utility).async {
+            let data = try? Self.run(
+                binary: binary, workdir: workdir, arguments: ["api", "user", "--jq", ".login"])
+            let login = data.map { String(decoding: $0, as: UTF8.self) }?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                completion((login?.isEmpty ?? true) ? nil : login)
+            }
+        }
+    }
+
+    private func runAsync(
+        binary: URL, arguments: [String], completion: @escaping (Error?) -> Void
+    ) {
+        let workdir = workdir
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try Self.run(binary: binary, workdir: workdir, arguments: arguments) }
+            DispatchQueue.main.async {
+                if case .failure(let error) = result {
+                    completion(error)
+                } else {
+                    completion(nil)
+                }
+            }
+        }
     }
 
     /// PR association for the current branch — the signed-out titlebar

@@ -276,17 +276,69 @@ final class FeedbackParseTests: XCTestCase {
         XCTAssertEqual(comments[1].kind, .conversation)
     }
 
-    func testParseReviewThreadResolution() throws {
+    func testParseReviewThreadMeta() throws {
         let json = Data(
             """
             {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
-              {"isResolved": true, "comments": {"nodes": [{"databaseId": 11}]}},
-              {"isResolved": false, "comments": {"nodes": [{"databaseId": 22}]}},
-              {"isResolved": true, "comments": {"nodes": [{"databaseId": 33}]}}
+              {"id": "RT_1", "isResolved": true,
+               "comments": {"nodes": [{"databaseId": 11}]}},
+              {"id": "RT_2", "isResolved": false,
+               "comments": {"nodes": [{"databaseId": 22}]}},
+              {"id": "RT_3", "isResolved": true,
+               "comments": {"nodes": [{"databaseId": 33}]}}
             ]}}}}}
             """.utf8)
-        XCTAssertEqual(try parseReviewThreadResolution(json), [11, 33])
-        XCTAssertEqual(try parseReviewThreadResolution(Data("{}".utf8)), [])
+        let meta = try parseReviewThreadMeta(json)
+        XCTAssertEqual(meta[11], ReviewThreadMeta(nodeId: "RT_1", isResolved: true))
+        XCTAssertEqual(meta[22], ReviewThreadMeta(nodeId: "RT_2", isResolved: false))
+        XCTAssertEqual(meta[33]?.isResolved, true)
+        XCTAssertEqual(try parseReviewThreadMeta(Data("{}".utf8)), [:])
+
+        let feedback = PrFeedback(
+            number: 1, title: "t", url: "u", comments: [], threadMeta: meta)
+        XCTAssertEqual(feedback.resolvedRootIds, [11, 33])
+    }
+
+    func testFeedbackFilter() throws {
+        let reviewComments = Data(
+            """
+            [
+              {"id": 1, "user": {"login": "codex[bot]", "type": "Bot"}, "body": "b",
+               "path": "a.ts", "line": 1, "side": "RIGHT", "diff_hunk": "@@\\n+x",
+               "created_at": "2026-07-07T00:00:00Z", "html_url": "u1"},
+              {"id": 2, "user": {"login": "jokull"}, "body": "h",
+               "path": "b.ts", "line": 2, "side": "RIGHT", "diff_hunk": "@@\\n+y",
+               "created_at": "2026-07-07T01:00:00Z", "html_url": "u2"}
+            ]
+            """.utf8)
+        let threads = FeedbackThread.group(
+            try parseFeedback(reviewComments: reviewComments, reviews: empty, conversation: empty))
+        let bot = threads[0]
+        let human = threads[1]
+
+        XCTAssertTrue(FeedbackFilter().includes(bot, resolved: false))
+        XCTAssertFalse(FeedbackFilter().includes(bot, resolved: true))
+        XCTAssertTrue(
+            FeedbackFilter(showResolved: true).includes(bot, resolved: true))
+        XCTAssertFalse(FeedbackFilter(authors: .humans).includes(bot, resolved: false))
+        XCTAssertTrue(FeedbackFilter(authors: .humans).includes(human, resolved: false))
+        XCTAssertTrue(FeedbackFilter(authors: .bots).includes(bot, resolved: false))
+        XCTAssertFalse(FeedbackFilter(authors: .bots).includes(human, resolved: false))
+    }
+
+    func testParseAvatarUrls() throws {
+        let reviewComments = Data(
+            """
+            [{"user": {"login": "codex[bot]", "type": "Bot",
+               "avatar_url": "https://avatars.githubusercontent.com/in/1?v=4"},
+              "body": "b", "path": "a.ts", "line": 1, "side": "RIGHT",
+              "diff_hunk": "@@\\n+x", "created_at": "2026-07-07T00:00:00Z",
+              "html_url": "u"}]
+            """.utf8)
+        let comments = try parseFeedback(
+            reviewComments: reviewComments, reviews: empty, conversation: empty)
+        XCTAssertEqual(
+            comments[0].avatarUrl, "https://avatars.githubusercontent.com/in/1?v=4")
     }
 
     func testLastHunkLineTrailingNewline() {

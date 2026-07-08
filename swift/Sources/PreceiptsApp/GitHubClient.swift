@@ -92,26 +92,66 @@ final class GitHubClient {
         async let reviewComments = paginated("\(base)/pulls/\(status.number)/comments")
         async let reviews = paginated("\(base)/pulls/\(status.number)/reviews")
         async let conversation = paginated("\(base)/issues/\(status.number)/comments")
-        async let resolution = reviewThreadResolution(repo: repo, number: status.number)
+        async let meta = reviewThreadMeta(repo: repo, number: status.number)
         let comments = try await parseFeedback(
             reviewComments: reviewComments,
             reviews: reviews,
             conversation: conversation)
         return PrFeedback(
             number: status.number, title: status.title, url: status.url, comments: comments,
-            resolvedRootIds: (try? await resolution) ?? [])
+            threadMeta: (try? await meta) ?? [:])
     }
 
-    private func reviewThreadResolution(repo: GitHubRepo, number: Int) async throws -> Set<Int> {
+    private func reviewThreadMeta(
+        repo: GitHubRepo, number: Int
+    ) async throws -> [Int: ReviewThreadMeta] {
+        let data = try await graphql(
+            query: reviewThreadMetaQuery,
+            variables: ["owner": repo.owner, "name": repo.name, "number": number])
+        return try parseReviewThreadMeta(data)
+    }
+
+    /// Toggle a review thread's resolution — the one thing REST can't do.
+    func setThreadResolved(nodeId: String, resolved: Bool) async throws {
+        let mutation = resolved ? "resolveReviewThread" : "unresolveReviewThread"
+        let query = """
+            mutation($threadId: ID!) {
+              \(mutation)(input: {threadId: $threadId}) { thread { isResolved } }
+            }
+            """
+        let data = try await graphql(query: query, variables: ["threadId": nodeId])
+        if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let errors = root["errors"] as? [[String: Any]], !errors.isEmpty
+        {
+            let message = errors.first?["message"] as? String ?? "mutation failed"
+            throw GitHubError.http(status: 200, body: message)
+        }
+    }
+
+    /// Edit the viewer's own comment. Review comments and conversation
+    /// comments live under different REST namespaces.
+    func editComment(repo: GitHubRepo, kind: FeedbackKind, id: Int, body: String) async throws {
+        let namespace = kind == .conversation ? "issues" : "pulls"
+        let url = URL(
+            string:
+                "https://api.github.com/repos/\(repo.owner)/\(repo.name)/\(namespace)/comments/\(id)"
+        )!
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["body": body])
+        let (data, response) = try await session.data(for: request)
+        try Self.checkStatus(response, data: data)
+    }
+
+    private func graphql(query: String, variables: [String: Any]) async throws -> Data {
         var request = URLRequest(url: URL(string: "https://api.github.com/graphql")!)
         request.httpMethod = "POST"
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "query": reviewThreadResolutionQuery,
-            "variables": ["owner": repo.owner, "name": repo.name, "number": number],
+            "query": query, "variables": variables,
         ])
         let (data, response) = try await session.data(for: request)
         try Self.checkStatus(response, data: data)
-        return try parseReviewThreadResolution(data)
+        return data
     }
 
     /// Follow Link rel="next" and splice the page arrays — the same
@@ -160,12 +200,12 @@ final class GitHubClient {
 }
 
 /// Shared by the signed-in client and the gh fallback (`gh api graphql`).
-let reviewThreadResolutionQuery = """
+let reviewThreadMetaQuery = """
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
           reviewThreads(first: 100) {
-            nodes { isResolved comments(first: 1) { nodes { databaseId } } }
+            nodes { id isResolved comments(first: 1) { nodes { databaseId } } }
           }
         }
       }

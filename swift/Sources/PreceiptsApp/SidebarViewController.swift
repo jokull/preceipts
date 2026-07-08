@@ -12,16 +12,33 @@ protocol SidebarDelegate: AnyObject {
     func sidebar(_ sidebar: SidebarViewController, openThreadsForPath path: String)
 }
 
+/// Fetch lifecycle shown in the filter bar.
+enum FeedbackLoadState {
+    case hidden
+    case loading
+    case loaded(open: Int, resolved: Int)
+}
+
 final class SidebarViewController: NSViewController {
     weak var delegate: SidebarDelegate?
+    /// Filter edits land here — the cockpit re-scopes everything.
+    var onFilterChange: ((FeedbackFilter) -> Void)?
 
     private let outline = NSOutlineView()
     private var roots: [FileTreeNode] = []
     /// Leaf nodes by file index, for selection-follows-scroll.
     private var leaves: [Int: FileTreeNode] = [:]
     private var suppressSelectionCallback = false
-    /// path → unresolved threads + drafts anchored in that file.
+    /// path → threads-in-scope + drafts anchored in that file.
     private var commentCounts: [String: Int] = [:]
+
+    private let filterBar = NSStackView()
+    private let countLabel = NSTextField(labelWithString: "")
+    private let spinner = NSProgressIndicator()
+    private let authorsControl = NSSegmentedControl(
+        labels: ["All", "People", "Bots"], trackingMode: .selectOne, target: nil, action: nil)
+    private let resolvedCheckbox = NSButton(
+        checkboxWithTitle: "Show resolved", target: nil, action: nil)
 
     override func loadView() {
         let column = NSTableColumn(identifier: .init("file"))
@@ -44,7 +61,112 @@ final class SidebarViewController: NSViewController {
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         outline.backgroundColor = .clear
-        self.view = scroll
+
+        buildFilterBar()
+
+        let stack = NSStackView(views: [filterBar, scroll])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = Metrics.unit
+        NSLayoutConstraint.activate([
+            filterBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        scroll.setContentHuggingPriority(.init(1), for: .vertical)
+        self.view = stack
+    }
+
+    // ------------------------------------------------------------------
+    // Filter bar: the thread scope control. Sits above the tree because
+    // what it admits is what the tree's bubbles (and the diff's) show.
+
+    private func buildFilterBar() {
+        let title = NSTextField(labelWithString: "Threads")
+        title.font = .systemFont(ofSize: 11, weight: .semibold)
+        title.textColor = .secondaryLabelColor
+
+        countLabel.font = .systemFont(ofSize: 11)
+        countLabel.textColor = .secondaryLabelColor
+        countLabel.lineBreakMode = .byTruncatingTail
+
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isIndeterminate = true
+        spinner.isDisplayedWhenStopped = false
+
+        let titleRow = NSStackView(views: [title, NSView(), countLabel, spinner])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = Metrics.unit + 2
+
+        authorsControl.controlSize = .small
+        authorsControl.segmentDistribution = .fillEqually
+        authorsControl.selectedSegment = 0
+        authorsControl.target = self
+        authorsControl.action = #selector(filterControlChanged(_:))
+
+        resolvedCheckbox.controlSize = .regular
+        resolvedCheckbox.font = .systemFont(ofSize: 13)
+        resolvedCheckbox.target = self
+        resolvedCheckbox.action = #selector(filterControlChanged(_:))
+
+        filterBar.orientation = .vertical
+        filterBar.alignment = .leading
+        filterBar.spacing = Metrics.padding
+        filterBar.edgeInsets = NSEdgeInsets(
+            top: Metrics.padding, left: Metrics.paddingWide,
+            bottom: Metrics.unit, right: Metrics.paddingWide)
+        filterBar.addArrangedSubview(titleRow)
+        filterBar.addArrangedSubview(authorsControl)
+        filterBar.addArrangedSubview(resolvedCheckbox)
+        let inset = 2 * Metrics.paddingWide
+        NSLayoutConstraint.activate([
+            titleRow.widthAnchor.constraint(equalTo: filterBar.widthAnchor, constant: -inset),
+            authorsControl.widthAnchor.constraint(
+                equalTo: filterBar.widthAnchor, constant: -inset),
+        ])
+        filterBar.isHidden = true
+    }
+
+    /// Reflect cockpit-owned filter state without firing the callback.
+    func setFilter(_ filter: FeedbackFilter) {
+        switch filter.authors {
+        case .all: authorsControl.selectedSegment = 0
+        case .humans: authorsControl.selectedSegment = 1
+        case .bots: authorsControl.selectedSegment = 2
+        }
+        resolvedCheckbox.state = filter.showResolved ? .on : .off
+    }
+
+    func setFeedbackState(_ state: FeedbackLoadState) {
+        switch state {
+        case .hidden:
+            filterBar.isHidden = true
+            spinner.stopAnimation(nil)
+        case .loading:
+            filterBar.isHidden = false
+            countLabel.stringValue = ""
+            spinner.startAnimation(nil)
+        case .loaded(let open, let resolved):
+            filterBar.isHidden = false
+            spinner.stopAnimation(nil)
+            var parts = ["\(open) open"]
+            if resolved > 0 {
+                parts.append("\(resolved) resolved")
+            }
+            countLabel.stringValue = parts.joined(separator: " \u{00b7} ")
+        }
+    }
+
+    @objc private func filterControlChanged(_ sender: Any?) {
+        let authors: FeedbackFilter.Authors
+        switch authorsControl.selectedSegment {
+        case 1: authors = .humans
+        case 2: authors = .bots
+        default: authors = .all
+        }
+        onFilterChange?(
+            FeedbackFilter(authors: authors, showResolved: resolvedCheckbox.state == .on))
     }
 
     func show(tree: [FileTreeNode]) {

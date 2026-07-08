@@ -97,6 +97,43 @@ default branch `preceipts`). Everything committed and pushed.
    a Developer ID + App Store Connect key — not run). Finder launches
    get an NSOpenPanel repo chooser. `swift/version.env` holds versions.
 
+### Thread area v2 (2026-07-08) — the feedback surface grew up
+
+- **Mental model** is in `docs/desktop-app-design.md` ("PR feedback: the
+  thread area"): diff carries bubbles + claw only; the trailing pane is
+  a breadcrumb stack (Conversation → Thread → Compose). Write ops are
+  triage acts only: **resolve/unresolve** (GraphQL mutations via thread
+  node ids in `PrFeedback.threadMeta`) and **edit your own comments**
+  (REST PATCH; `viewerLogin` gates the pencil). Posting stays out.
+- Cards: `AvatarStore`/`AvatarView` (async, cached, initial-letter
+  placeholder), bot/verdict `ChipView`s, hover copy/edit/open,
+  `MarkdownBody` (sanitizes bot HTML — comments, `<details>`→summary,
+  badges, entities, tables→dot-rows — and styles headings/bold/code/
+  links), "Show more" collapse past 18 rendered lines.
+- **Sidebar filter bar** above the tree: All/People/Bots segmented +
+  Show resolved checkbox (persisted in UserDefaults), spinner while
+  fetching, "N open · M resolved" counts. `FeedbackFilter` (Kit,
+  tested) scopes bubbles, row badges, and navigation.
+- Sizing follows HIG (13pt bodies, 26pt icon-button hit targets, 16pt
+  pane insets) — deliberately away from VS Code-tiny; resolved a
+  clipped refresh icon under the pane's rounded corner. Sidebar split
+  item holds at priority 260 so inspector reveals squeeze the diff,
+  not the tree.
+- Live-verified against trip PR #2548: resolve → unresolve round-trip,
+  avatars, markdown cleanup. 65 XCTests green.
+
+### Vision loop (2026-07-08) — how to SEE the UI from the harness
+
+`DebugBridge` (PreceiptsApp) listens on distributed notification
+`is.solberg.preceipts.debug`. Compile the poker once per session:
+`swiftc -O swift/Scripts/poke.swift -o <scratch>/poke`. Commands:
+`shot <path>` (PNG of the window — CGWindowList own-window capture,
+**no screen-recording permission needed**; `cacheDisplay` renders
+garbage for material/layer panes, don't regress to it), `feedback`,
+`conversation`, `thread <n>`, `resolve <0|1>`, `sidebar <width>`.
+Launch the debug binary directly (`.build/arm64-apple-macosx/debug/
+PreceiptsApp <repo> &`), poke, then Read the PNG. Iterate.
+
 ## Gotchas / environment
 
 - SourceKit diagnostics show false "No such module" errors for SPM

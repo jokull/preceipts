@@ -24,11 +24,17 @@ final class CockpitViewController: NSSplitViewController {
     private var commentStore: CommentStore?
     private var commentStoreBranch: String?
     private var prFeedback: PrFeedback?
+    /// The sidebar's thread scope — decides which threads exist
+    /// downstream (bubbles, badges, navigation).
+    private var feedbackFilter = FeedbackFilter.fromDefaults()
     private let threadArea = ThreadAreaViewController()
     private var feedbackItem: NSSplitViewItem?
 
     /// Signed-in transport; nil falls back to the gh CLI.
     private var github: GitHubClient?
+    /// Signed-in login — gates the edit-own-comments affordance.
+    private var viewerLogin: String?
+    private var viewerFetchAttempted = false
     private let prChipModel = PrChipModel()
     private var prTimer: Timer?
     private var prStatusInFlight = false
@@ -66,6 +72,8 @@ final class CockpitViewController: NSSplitViewController {
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
         sidebarItem.minimumThickness = Metrics.sidebarMinWidth
         sidebarItem.preferredThicknessFraction = 0.2
+        // Inspector reveals must squeeze the diff surface, not the tree.
+        sidebarItem.holdingPriority = .init(260)
         addSplitViewItem(sidebarItem)
 
         let contentItem = NSSplitViewItem(viewController: content)
@@ -83,6 +91,13 @@ final class CockpitViewController: NSSplitViewController {
 
         sidebar.delegate = self
         content.delegate = self
+        sidebar.setFilter(feedbackFilter)
+        sidebar.onFilterChange = { [weak self] filter in
+            guard let self else { return }
+            self.feedbackFilter = filter
+            filter.saveToDefaults()
+            self.refreshFeedbackViews()
+        }
         threadArea.onRefresh = { [weak self] in
             self?.refreshFeedback()
         }
@@ -119,6 +134,9 @@ final class CockpitViewController: NSSplitViewController {
     @objc private func authChanged() {
         github = Keychain.loadToken().map(GitHubClient.init(token:))
         prFeedback = nil
+        viewerLogin = nil
+        viewerFetchAttempted = false
+        refreshViewer()
         refreshPrStatus()
         if feedbackItem?.isCollapsed == false {
             refreshFeedback()
@@ -285,10 +303,21 @@ final class CockpitViewController: NSSplitViewController {
         if gh == nil {
             gh = GhClient(workdir: changeset.workdir)
         }
+        refreshViewer()
         let branch = changeset.branch ?? "(detached)"
         if commentStore == nil || commentStoreBranch != branch {
             commentStore = try? CommentStore(gitDir: changeset.gitDir, branch: branch)
             commentStoreBranch = branch
+        }
+    }
+
+    /// Threads admitted by the sidebar's scope control — the only
+    /// threads that exist downstream (bubbles, badges, navigation).
+    private func threadsInScope() -> [FeedbackThread] {
+        FeedbackThread.group(prFeedback?.comments ?? []).filter { thread in
+            feedbackFilter.includes(
+                thread,
+                resolved: prFeedback?.resolvedRootIds.contains(thread.root.id) == true)
         }
     }
 
@@ -298,16 +327,14 @@ final class CockpitViewController: NSSplitViewController {
     private func refreshFeedbackViews() {
         let drafts = commentStore?.comments ?? []
 
-        // File-tree bubbles: unresolved threads + drafts per path.
+        // File-tree bubbles: threads-in-scope + drafts per path.
         var counts: [String: Int] = [:]
         for draft in drafts {
             counts[draft.path, default: 0] += 1
         }
-        let threads = FeedbackThread.group(prFeedback?.comments ?? [])
+        let threads = threadsInScope()
         for thread in threads {
-            guard let path = thread.root.path,
-                prFeedback?.resolvedRootIds.contains(thread.root.id) != true
-            else { continue }
+            guard let path = thread.root.path else { continue }
             counts[path, default: 0] += 1
         }
         sidebar.updateCommentCounts(counts)
@@ -338,6 +365,7 @@ final class CockpitViewController: NSSplitViewController {
 
     private func refreshFeedback() {
         threadArea.showStatus("Fetching PR feedback\u{2026}")
+        sidebar.setFeedbackState(.loading)
         // Signed in → URLSession; signed out → gh CLI; neither → explain.
         if let github, let repo = changeset?.githubRepo, let branch = changeset?.branch {
             Task { @MainActor [weak self] in
@@ -346,12 +374,13 @@ final class CockpitViewController: NSSplitViewController {
                         repo: repo, branch: branch)
                     else {
                         self?.threadArea.showStatus(GhError.noPr.localizedDescription)
+                        self?.sidebar.setFeedbackState(.hidden)
                         return
                     }
-                    self?.prFeedback = feedback
-                    self?.refreshFeedbackViews()
+                    self?.applyFeedback(feedback)
                 } catch {
                     self?.threadArea.showStatus(error.localizedDescription)
+                    self?.reportFeedbackCounts()
                 }
             }
             return
@@ -365,11 +394,141 @@ final class CockpitViewController: NSSplitViewController {
             guard let self else { return }
             switch result {
             case .success(let feedback):
-                self.prFeedback = feedback
-                self.refreshFeedbackViews()
+                self.applyFeedback(feedback)
             case .failure(let error):
                 self.threadArea.showStatus(error.localizedDescription)
+                self.reportFeedbackCounts()
             }
+        }
+    }
+
+    private func applyFeedback(_ feedback: PrFeedback) {
+        prFeedback = feedback
+        refreshFeedbackViews()
+        rerenderTear()
+        reportFeedbackCounts()
+    }
+
+    /// Filter-bar counts: unfiltered truth about the PR's line threads.
+    private func reportFeedbackCounts() {
+        guard let feedback = prFeedback else {
+            sidebar.setFeedbackState(.hidden)
+            return
+        }
+        let threads = FeedbackThread.group(feedback.comments).filter { $0.root.path != nil }
+        let resolved = threads.filter {
+            feedback.resolvedRootIds.contains($0.root.id)
+        }.count
+        sidebar.setFeedbackState(.loaded(open: threads.count - resolved, resolved: resolved))
+    }
+
+    /// Once per transport: the signed-in login, for edit affordances.
+    private func refreshViewer() {
+        guard viewerLogin == nil, !viewerFetchAttempted else { return }
+        if let github {
+            viewerFetchAttempted = true
+            Task { @MainActor [weak self] in
+                self?.viewerLogin = try? await github.viewer()
+            }
+        } else if let gh, gh.available {
+            viewerFetchAttempted = true
+            gh.fetchViewer { [weak self] login in
+                self?.viewerLogin = login
+            }
+        }
+    }
+
+    /// Re-render the current tear from fresh model state (post fetch,
+    /// resolve, or edit) — falling back to the conversation when the
+    /// item vanished.
+    private func rerenderTear() {
+        switch tearState {
+        case .thread(.thread(let stale)):
+            let threads = FeedbackThread.group(prFeedback?.comments ?? [])
+            if let fresh = threads.first(where: { $0.root.id == stale.root.id }) {
+                setTear(.thread(.thread(fresh)))
+            } else {
+                setTear(.conversation)
+            }
+        case .thread(.draft(let stale)):
+            if let fresh = commentStore?.comments.first(where: { $0.id == stale.id }) {
+                setTear(.thread(.draft(fresh)))
+            } else {
+                setTear(.conversation)
+            }
+        case .conversation:
+            setTear(.conversation)
+        case .closed, .compose:
+            break
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // GitHub write ops (triage acts: resolution + own-comment edits)
+
+    private var canWriteToGitHub: Bool {
+        github != nil || (gh?.available ?? false)
+    }
+
+    private func setThreadResolved(rootId: Int, nodeId: String, resolved: Bool) {
+        threadArea.showStatus(resolved ? "Resolving\u{2026}" : "Unresolving\u{2026}")
+        let apply: (Error?) -> Void = { [weak self] error in
+            guard let self else { return }
+            if let error {
+                self.rerenderTear()
+                self.threadArea.showStatus(error.localizedDescription)
+                return
+            }
+            self.mutateThreadMeta(rootId: rootId, resolved: resolved)
+            self.refreshFeedbackViews()
+            self.rerenderTear()
+        }
+        if let github {
+            Task { @MainActor in
+                do {
+                    try await github.setThreadResolved(nodeId: nodeId, resolved: resolved)
+                    apply(nil)
+                } catch {
+                    apply(error)
+                }
+            }
+        } else if let gh, gh.available {
+            gh.setThreadResolved(nodeId: nodeId, resolved: resolved, completion: apply)
+        }
+    }
+
+    /// Flip resolution locally — the mutation response already confirmed.
+    private func mutateThreadMeta(rootId: Int, resolved: Bool) {
+        guard let old = prFeedback, let meta = old.threadMeta[rootId] else { return }
+        var map = old.threadMeta
+        map[rootId] = ReviewThreadMeta(nodeId: meta.nodeId, isResolved: resolved)
+        prFeedback = PrFeedback(
+            number: old.number, title: old.title, url: old.url,
+            comments: old.comments, threadMeta: map)
+    }
+
+    private func performEditComment(_ entry: TearContent.Entry, body: String) {
+        threadArea.showStatus("Saving edit\u{2026}")
+        let done: (Error?) -> Void = { [weak self] error in
+            if let error {
+                self?.threadArea.showStatus(error.localizedDescription)
+            } else {
+                // Refetch: the card already shows the new text optimistically.
+                self?.refreshFeedback()
+            }
+        }
+        if let github, let repo = changeset?.githubRepo {
+            Task { @MainActor in
+                do {
+                    try await github.editComment(
+                        repo: repo, kind: entry.kind, id: entry.commentId, body: body)
+                    done(nil)
+                } catch {
+                    done(error)
+                }
+            }
+        } else if let gh, gh.available {
+            gh.editComment(kind: entry.kind, id: entry.commentId, body: body, completion: done)
         }
     }
 
@@ -477,17 +636,15 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
         func matches(_ candidate: String) -> Bool {
             candidate == path || candidate.hasPrefix(prefix)
         }
-        let unresolved = FeedbackThread.group(prFeedback?.comments ?? [])
+        let inScope = threadsInScope()
             .filter { thread in
-                guard let threadPath = thread.root.path, matches(threadPath) else {
-                    return false
-                }
-                return prFeedback?.resolvedRootIds.contains(thread.root.id) != true
+                guard let threadPath = thread.root.path else { return false }
+                return matches(threadPath)
             }
             .sorted {
                 ($0.root.path ?? "", $0.root.line ?? 0) < ($1.root.path ?? "", $1.root.line ?? 0)
             }
-        if let first = unresolved.first {
+        if let first = inScope.first {
             setTear(.thread(.thread(first)))
         } else if let draft = (commentStore?.comments ?? []).first(where: { matches($0.path) }) {
             setTear(.thread(.draft(draft)))
@@ -515,7 +672,7 @@ extension CockpitViewController: SidebarDelegate, SurfaceDelegate {
                 return item
             }
         }
-        for thread in FeedbackThread.group(prFeedback?.comments ?? []) {
+        for thread in threadsInScope() {
             let item = FeedbackNavItem.thread(thread)
             if let rows = resolveAnchorRows(item), rows.contains(row) {
                 return item
@@ -633,6 +790,9 @@ extension CockpitViewController {
 
     private func conversationHandlers() -> TearHandlers {
         var handlers = TearHandlers()
+        handlers.editComment = { [weak self] entry, body in
+            self?.performEditComment(entry, body: body)
+        }
         handlers.saveNote = { [weak self] body in
             guard let self else { return }
             try? self.commentStore?.add(
@@ -667,6 +827,9 @@ extension CockpitViewController {
             return TearContent(
                 breadcrumb: breadcrumb,
                 showBack: true,
+                quote: thread.root.lineText,
+                isResolved: prFeedback?.threadMeta[thread.root.id]?.isResolved,
+                isOutdated: thread.root.outdated,
                 entries: thread.comments.map(entry(_:)),
                 notes: notesMatching(item),
                 url: thread.root.url,
@@ -678,6 +841,7 @@ extension CockpitViewController {
             return TearContent(
                 breadcrumb: breadcrumb,
                 showBack: true,
+                quote: draft.quote ?? draft.lineText,
                 entries: [],
                 notes: [draft],
                 url: nil,
@@ -715,6 +879,18 @@ extension CockpitViewController {
         var handlers = TearHandlers()
         handlers.back = { [weak self] in
             self?.setTear(.conversation)
+        }
+        if case .thread(let thread) = item,
+            let meta = prFeedback?.threadMeta[thread.root.id],
+            canWriteToGitHub
+        {
+            handlers.setResolved = { [weak self] resolved in
+                self?.setThreadResolved(
+                    rootId: thread.root.id, nodeId: meta.nodeId, resolved: resolved)
+            }
+        }
+        handlers.editComment = { [weak self] entry, body in
+            self?.performEditComment(entry, body: body)
         }
         handlers.updateNote = { [weak self] id, body in
             try? self?.commentStore?.updateBody(id: id, body: body)
@@ -771,14 +947,56 @@ extension CockpitViewController {
     }
 
     private func entry(_ comment: FeedbackComment) -> TearContent.Entry {
-        var author = comment.author
-        if let state = comment.state, !state.isEmpty {
-            author += " \u{00b7} " + state.lowercased().replacingOccurrences(of: "_", with: " ")
+        TearContent.Entry(
+            commentId: comment.id,
+            kind: comment.kind,
+            author: comment.author,
+            isBot: comment.isBot,
+            avatarUrl: comment.avatarUrl,
+            timeText: Self.relativeTime(comment.createdAt),
+            verdict: comment.state.flatMap { state in
+                state.isEmpty
+                    ? nil
+                    : state.lowercased().replacingOccurrences(of: "_", with: " ")
+            },
+            body: comment.body,
+            url: comment.url.isEmpty ? nil : comment.url,
+            canEdit: comment.kind != .review && comment.id != 0
+                && viewerLogin != nil && comment.author == viewerLogin
+                && canWriteToGitHub,
+            copyText: formatComment(comment.context))
+    }
+
+    /// DebugBridge commands — dev-only puppeting for visual iteration.
+    func handleDebugCommand(_ command: String) {
+        let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
+        switch parts.first {
+        case "shot":
+            guard parts.count > 1, let window = view.window else { return }
+            DebugBridge.screenshot(window: window, to: parts[1])
+        case "feedback":
+            toggleFeedbackPanel(nil)
+        case "conversation":
+            setTear(.conversation)
+        case "thread":
+            let index = parts.count > 1 ? Int(parts[1]) ?? 0 : 0
+            let threads = FeedbackThread.group(prFeedback?.comments ?? [])
+                .filter { $0.root.path != nil }
+            guard !threads.isEmpty else { return }
+            setTear(.thread(.thread(threads[min(max(index, 0), threads.count - 1)])))
+        case "resolve":
+            guard case .thread(.thread(let thread)) = tearState,
+                let meta = prFeedback?.threadMeta[thread.root.id]
+            else { return }
+            let resolved = parts.count > 1 ? parts[1] != "0" : true
+            setThreadResolved(
+                rootId: thread.root.id, nodeId: meta.nodeId, resolved: resolved)
+        case "sidebar":
+            guard parts.count > 1, let width = Double(parts[1]) else { return }
+            splitView.setPosition(CGFloat(width), ofDividerAt: 0)
+        default:
+            break
         }
-        return TearContent.Entry(
-            author: author,
-            meta: Self.relativeTime(comment.createdAt),
-            body: comment.body)
     }
 
     private static func relativeTime(_ iso: String) -> String {
@@ -786,6 +1004,28 @@ extension CockpitViewController {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
+// ------------------------------------------------------------------
+// Filter persistence — scope survives relaunches.
+
+extension FeedbackFilter {
+    private static let authorsKey = "feedback.filter.authors"
+    private static let resolvedKey = "feedback.filter.showResolved"
+
+    static func fromDefaults() -> FeedbackFilter {
+        let defaults = UserDefaults.standard
+        return FeedbackFilter(
+            authors: defaults.string(forKey: authorsKey).flatMap(Authors.init(rawValue:))
+                ?? .all,
+            showResolved: defaults.bool(forKey: resolvedKey))
+    }
+
+    func saveToDefaults() {
+        let defaults = UserDefaults.standard
+        defaults.set(authors.rawValue, forKey: Self.authorsKey)
+        defaults.set(showResolved, forKey: Self.resolvedKey)
     }
 }
 

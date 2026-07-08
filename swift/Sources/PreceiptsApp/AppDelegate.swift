@@ -4,6 +4,7 @@ import PreceiptsKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var cockpit: CockpitViewController!
+    private var debugBridge: DebugBridge?
     private lazy var settings = SettingsWindowController()
 
     @objc private func openSettings(_ sender: Any?) {
@@ -34,6 +35,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
 
         buildMenu()
+        debugBridge = DebugBridge { [weak self] command in
+            self?.cockpit.handleDebugCommand(command)
+        }
         NSApp.activate(ignoringOtherApps: true)
     }
 

@@ -26,6 +26,8 @@ public struct FeedbackComment: Sendable, Equatable {
     public let inReplyTo: Int?
     public let author: String
     public let isBot: Bool
+    /// GitHub `user.avatar_url`; nil for payloads without a user object.
+    public let avatarUrl: String?
     public let body: String
     /// Anchor, when the comment is line-anchored.
     public let path: String?
@@ -54,24 +56,42 @@ public struct FeedbackComment: Sendable, Equatable {
     }
 }
 
+/// GraphQL-side identity + lifecycle of a review thread, keyed off its
+/// root comment's REST id. The node id is what the resolve/unresolve
+/// mutations take; REST exposes neither.
+public struct ReviewThreadMeta: Sendable, Equatable {
+    public let nodeId: String
+    public let isResolved: Bool
+
+    public init(nodeId: String, isResolved: Bool) {
+        self.nodeId = nodeId
+        self.isResolved = isResolved
+    }
+}
+
 public struct PrFeedback: Sendable {
     public let number: Int
     public let title: String
     public let url: String
     public let comments: [FeedbackComment]
-    /// Root comment ids of resolved review threads (GraphQL-only data;
-    /// empty when the transport couldn't fetch it).
-    public let resolvedRootIds: Set<Int>
+    /// Root comment id → thread meta (GraphQL-only data; empty when the
+    /// transport couldn't fetch it).
+    public let threadMeta: [Int: ReviewThreadMeta]
+
+    /// Root comment ids of resolved review threads.
+    public var resolvedRootIds: Set<Int> {
+        Set(threadMeta.filter { $0.value.isResolved }.keys)
+    }
 
     public init(
         number: Int, title: String, url: String, comments: [FeedbackComment],
-        resolvedRootIds: Set<Int> = []
+        threadMeta: [Int: ReviewThreadMeta] = [:]
     ) {
         self.number = number
         self.title = title
         self.url = url
         self.comments = comments
-        self.resolvedRootIds = resolvedRootIds
+        self.threadMeta = threadMeta
     }
 
     /// "Copy all" for whatever subset the UI filtered down to.
@@ -99,6 +119,7 @@ public func parseFeedback(
                 inReplyTo: item["in_reply_to_id"] as? Int,
                 author: authorLogin(item),
                 isBot: isBot(item),
+                avatarUrl: avatarUrl(item),
                 body: string(item, "body"),
                 path: item["path"] as? String,
                 line: line ?? originalLine,
@@ -128,6 +149,7 @@ public func parseFeedback(
                 inReplyTo: nil,
                 author: authorLogin(item),
                 isBot: isBot(item),
+                avatarUrl: avatarUrl(item),
                 body: body,
                 path: nil,
                 line: nil,
@@ -148,6 +170,7 @@ public func parseFeedback(
                 inReplyTo: nil,
                 author: authorLogin(item),
                 isBot: isBot(item),
+                avatarUrl: avatarUrl(item),
                 body: string(item, "body"),
                 path: nil,
                 line: nil,
@@ -163,29 +186,61 @@ public func parseFeedback(
     return out.sorted { $0.createdAt < $1.createdAt }
 }
 
-/// Root comment ids of resolved review threads, from the GraphQL
-/// `reviewThreads { isResolved comments(first: 1) { databaseId } }`
-/// response (REST has no resolution data). Transport-agnostic: both the
-/// signed-in client and `gh api graphql` return this exact shape.
-public func parseReviewThreadResolution(_ data: Data) throws -> Set<Int> {
+/// Review-thread metadata from the GraphQL
+/// `reviewThreads { id isResolved comments(first: 1) { databaseId } }`
+/// response (REST has neither resolution nor thread node ids).
+/// Transport-agnostic: both the signed-in client and `gh api graphql`
+/// return this exact shape.
+public func parseReviewThreadMeta(_ data: Data) throws -> [Int: ReviewThreadMeta] {
     guard
         let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
         let repository = ((root["data"] as? [String: Any])?["repository"]) as? [String: Any],
         let threads = (((repository["pullRequest"] as? [String: Any])?["reviewThreads"])
             as? [String: Any])?["nodes"] as? [[String: Any]]
     else {
-        return []
+        return [:]
     }
-    var resolved: Set<Int> = []
-    for thread in threads where thread["isResolved"] as? Bool == true {
-        if let comments = (thread["comments"] as? [String: Any])?["nodes"]
-            as? [[String: Any]],
-            let id = comments.first?["databaseId"] as? Int
-        {
-            resolved.insert(id)
+    var meta: [Int: ReviewThreadMeta] = [:]
+    for thread in threads {
+        guard let nodeId = thread["id"] as? String,
+            let comments = (thread["comments"] as? [String: Any])?["nodes"]
+                as? [[String: Any]],
+            let rootId = comments.first?["databaseId"] as? Int
+        else { continue }
+        meta[rootId] = ReviewThreadMeta(
+            nodeId: nodeId, isResolved: thread["isResolved"] as? Bool == true)
+    }
+    return meta
+}
+
+// ------------------------------------------------------------------
+// Filtering — the sidebar's thread scope control. What passes here is
+// what exists downstream: bubbles, badges, navigation.
+
+public struct FeedbackFilter: Equatable, Sendable {
+    public enum Authors: String, Sendable {
+        case all, humans, bots
+    }
+
+    public var authors: Authors
+    public var showResolved: Bool
+
+    public init(authors: Authors = .all, showResolved: Bool = false) {
+        self.authors = authors
+        self.showResolved = showResolved
+    }
+
+    public func includes(_ thread: FeedbackThread, resolved: Bool) -> Bool {
+        switch authors {
+        case .all:
+            break
+        case .humans:
+            if thread.root.isBot { return false }
+        case .bots:
+            if !thread.root.isBot { return false }
         }
+        return showResolved || !resolved
     }
-    return resolved
 }
 
 // ------------------------------------------------------------------
@@ -248,6 +303,10 @@ private func string(_ item: [String: Any], _ field: String) -> String {
 private func authorLogin(_ item: [String: Any]) -> String {
     let user = item["user"] as? [String: Any]
     return user?["login"] as? String ?? "(unknown)"
+}
+
+private func avatarUrl(_ item: [String: Any]) -> String? {
+    (item["user"] as? [String: Any])?["avatar_url"] as? String
 }
 
 private func isBot(_ item: [String: Any]) -> Bool {
