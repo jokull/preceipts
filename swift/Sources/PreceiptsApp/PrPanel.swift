@@ -243,6 +243,7 @@ final class PrPanelView: NSView {
 
         checksHeader.stringValue = "Checks (\(overview.checks.count))"
         checksStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        checkLinks.removeAll()
         if overview.checks.isEmpty {
             let empty = NSTextField(labelWithString: "No checks reported")
             empty.font = ThreadStyle.metaFont

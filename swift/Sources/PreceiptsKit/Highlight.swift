@@ -69,6 +69,16 @@ public struct FileHighlight: Sendable {
         guard index >= 0, index < lines.count else { return [] }
         return lines[index]
     }
+
+    /// Keep spans only for the given 1-based line numbers. The surface
+    /// renders hunk lines only, and whole-file span tables dominate a
+    /// changeset's retained size when large files carry small diffs.
+    public func pruned(keeping keep: Set<Int>) -> FileHighlight {
+        FileHighlight(
+            lines: lines.enumerated().map { index, spans in
+                keep.contains(index + 1) ? spans : []
+            })
+    }
 }
 
 public enum Highlighter {

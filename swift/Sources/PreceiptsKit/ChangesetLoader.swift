@@ -94,10 +94,25 @@ public enum ChangesetLoader {
                 DispatchQueue.concurrentPerform(iterations: buffer.count) { index in
                     let item = buffer[index]
                     guard !item.file.hunks.isEmpty else { return }
+                    // Prune to the lines hunks reference — the parse needs
+                    // the whole file, but retaining whole-file span tables
+                    // would dominate the changeset's memory on large files.
+                    var oldLines = Set<Int>()
+                    var newLines = Set<Int>()
+                    for hunk in item.file.hunks {
+                        for row in hunk.rows {
+                            if let old = row.old { oldLines.insert(old.number) }
+                            if let new = row.new { newLines.insert(new.number) }
+                        }
+                    }
                     buffer[index].oldHighlight = item.oldContent.isEmpty
-                        ? nil : Highlighter.highlight(item.oldContent, path: item.oldSource)
+                        ? nil
+                        : Highlighter.highlight(item.oldContent, path: item.oldSource)?
+                            .pruned(keeping: oldLines)
                     buffer[index].newHighlight = item.newContent.isEmpty
-                        ? nil : Highlighter.highlight(item.newContent, path: item.file.path)
+                        ? nil
+                        : Highlighter.highlight(item.newContent, path: item.file.path)?
+                            .pruned(keeping: newLines)
                 }
             }
         }

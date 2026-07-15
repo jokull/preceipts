@@ -22,6 +22,12 @@ final class GitHubClient {
         self.session = URLSession(configuration: configuration)
     }
 
+    deinit {
+        // URLSessions outlive their owner until invalidated — clients are
+        // recreated on every auth change, so finish and release each one.
+        session.finishTasksAndInvalidate()
+    }
+
     /// Signed-in login, for the Settings pane.
     func viewer() async throws -> String {
         let (data, _) = try await get(URL(string: "https://api.github.com/user")!)

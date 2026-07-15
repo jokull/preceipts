@@ -282,8 +282,14 @@ final class ReceiptOutputItem {
         scroll.borderType = .noBorder
     }
 
+    /// Retained output cap — chatty checks stream megabytes; only the
+    /// tail is diagnostically useful, and the full log lives in the run.
+    private static let maxLength = 200_000
+    private static let trimTo = 150_000
+
     func append(_ chunk: String) {
-        textView.textStorage?.append(
+        guard let storage = textView.textStorage else { return }
+        storage.append(
             NSAttributedString(
                 string: chunk,
                 attributes: [
@@ -291,6 +297,10 @@ final class ReceiptOutputItem {
                         ofSize: NSFont.smallSystemFontSize, weight: .regular),
                     .foregroundColor: NSColor.labelColor,
                 ]))
+        if storage.length > Self.maxLength {
+            storage.deleteCharacters(
+                in: NSRange(location: 0, length: storage.length - Self.trimTo))
+        }
         textView.scrollToEndOfDocument(nil)
     }
 

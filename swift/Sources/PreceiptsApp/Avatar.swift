@@ -7,7 +7,15 @@ import AppKit
 final class AvatarStore {
     static let shared = AvatarStore()
 
-    private let cache = NSCache<NSString, NSImage>()
+    /// Shared by tiny avatars and full-size body screenshots/GIFs — the
+    /// cost limit keeps a burst of large images from pinning memory; the
+    /// URLCache below makes evicted entries cheap to reload.
+    private let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 64 << 20
+        return cache
+    }()
     private var inFlight: [String: [(NSImage?) -> Void]] = [:]
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -35,11 +43,22 @@ final class AvatarStore {
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let image {
-                    self.cache.setObject(image, forKey: urlString as NSString)
+                    self.cache.setObject(
+                        image, forKey: urlString as NSString, cost: Self.cost(of: image))
                 }
                 self.inFlight.removeValue(forKey: urlString)?.forEach { $0(image) }
             }
         }.resume()
+    }
+
+    /// Decoded footprint estimate: RGBA bytes per frame, all frames (GIFs
+    /// keep every decoded frame alive while animating).
+    private static func cost(of image: NSImage) -> Int {
+        guard let rep = image.representations.first else { return 1 }
+        let frames =
+            (rep as? NSBitmapImageRep)?
+            .value(forProperty: .frameCount) as? Int ?? 1
+        return rep.pixelsWide * rep.pixelsHigh * 4 * max(frames, 1)
     }
 }
 
