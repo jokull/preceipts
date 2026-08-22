@@ -13,20 +13,31 @@
 //! 3. [`intraline`] — word-level LCS inside each paired row
 //!
 //! [`segments`] then composes a row's syntax spans and changed ranges into
-//! render-ready runs.
+//! render-ready runs, and [`surface`] flattens every file into the single
+//! virtualized scroll list the view draws — with [`filetree`] and [`find`]
+//! reading off the same model.
 //!
 //! All of it is ported forward from `PreceiptsKit` (Swift) at fc3643e, tests
 //! included — those tests are the conformance suite for the rewrite, not new
 //! work. See decision 12 in PRD.md.
 
+pub mod filetree;
+pub mod find;
 pub mod intraline;
 pub mod linediff;
 pub mod model;
 pub mod pairing;
 pub mod segments;
+pub mod surface;
 
+#[cfg(test)]
+mod testing;
+
+pub use filetree::FileTreeNode;
+pub use find::FindIndex;
 pub use intraline::word_diff;
 pub use linediff::{diff_rows, LineDiff};
 pub use model::{Changeset, DiffHunk, DiffRow, DiffScope, FileDiff, FileStatus, LineRef, RowKind};
 pub use pairing::{pair_block, similarity, Pairing};
 pub use segments::{line_segments, HighlightSpan, Segment};
+pub use surface::{Side, Surface, SurfaceRow};

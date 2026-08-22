@@ -8,3 +8,4 @@ description = "Git reads, diff, highlighting, and watching — in-process, off t
 
 [dependencies]
 git2 = "0.19"
+memchr = "2"
