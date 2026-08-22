@@ -1,0 +1,945 @@
+mod buffer;
+mod ca;
+mod cli;
+mod client;
+mod config;
+mod daemon;
+mod graph;
+mod healthcheck;
+mod lock;
+mod pretty_urls;
+mod privileged_proxy;
+mod process;
+mod proto;
+mod proxy;
+mod secrets;
+mod share;
+mod sidecar;
+mod workspace;
+
+use anyhow::{anyhow, Context, Result};
+use clap::Parser;
+use std::io::{IsTerminal, Read};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use crate::cli::{Cli, Cmd, EnvOp, ProcOp, TrustOp};
+use crate::client as cli_client;
+use crate::proto::{Request, Response};
+use crate::sidecar::Sidecar;
+use crate::workspace::Workspace;
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    let args = Cli::parse();
+    let start = args
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    let keychain = args
+        .keychain
+        .clone()
+        .or_else(|| std::env::var("PROCPANE_KEYCHAIN").ok());
+
+    match args.cmd {
+        Cmd::Up {
+            tasks,
+            foreground,
+            no_prebuild,
+        } => run_cmd(start, tasks, foreground, no_prebuild),
+        Cmd::WaitFor { name, timeout } => wait_for_cmd(start, name, timeout),
+        Cmd::Status { json, all } => status_cmd(start, json, all),
+        Cmd::Stop => stop_cmd(start),
+        Cmd::Proc { name, op } => proc_cmd(start, name, op),
+        Cmd::Env { op } => env_cmd(start, op, keychain.as_deref()),
+        Cmd::Trust { op } => trust_cmd(start, op),
+        Cmd::Grep {
+            pattern,
+            after,
+            before,
+            json,
+        } => grep_cmd(start, pattern, before, after, json),
+        Cmd::DaemonInner {
+            tasks,
+            root,
+            no_prebuild,
+        } => daemon_inner(root, tasks, no_prebuild),
+        Cmd::PrettyUrlProxy => privileged_proxy::run(),
+    }
+}
+
+fn resolve_root(start: PathBuf) -> Result<PathBuf> {
+    let mut cur = start.canonicalize().with_context(|| "canonicalize cwd")?;
+    loop {
+        if cur.join("turbo.json").is_file() {
+            return Ok(cur);
+        }
+        let parent = cur.parent().map(|p| p.to_path_buf());
+        match parent {
+            Some(p) if p != cur => cur = p,
+            _ => return Err(anyhow!("no turbo.json found from given cwd")),
+        }
+    }
+}
+
+fn run_cmd(start: PathBuf, tasks: Vec<String>, foreground: bool, no_prebuild: bool) -> Result<()> {
+    let root = resolve_root(start.clone())?;
+    let state_dir = daemon::state_dir(&root);
+    std::fs::create_dir_all(&state_dir)?;
+    let lock_path = state_dir.join("lock");
+    let socket_path = state_dir.join("sock");
+
+    if let Some(pid) = lock::PidLock::read_pid(&lock_path) {
+        if lock::is_alive(pid) {
+            return Err(anyhow!(
+                "procpane already running here (pid {pid}). Use `procpane stop` first."
+            ));
+        }
+        let _ = std::fs::remove_file(&lock_path);
+    }
+
+    // Bare `procpane up` (no args) → service-manifest mode: bring up every
+    // task declared in `procpane.toml`. This is the canonical incantation
+    // for a fully-wired repo and avoids the fan-out of bare-name expansion.
+    let tasks = if tasks.is_empty() {
+        let ws = Workspace::discover(&root)?;
+        let manifest: Vec<String> = ws.sidecar.tasks.keys().cloned().collect();
+        if manifest.is_empty() {
+            return Err(anyhow!(
+                "no tasks given and procpane.toml has no [tasks.*] entries. \
+                 Either pass task names (`procpane up dev`) or declare your \
+                 services in procpane.toml."
+            ));
+        }
+        manifest
+    } else {
+        tasks
+    };
+
+    if foreground {
+        return daemon_inner(root, tasks, no_prebuild);
+    }
+
+    // Fork-style detach via re-exec.
+    let self_exe = std::env::current_exe().context("current_exe")?;
+    let mut cmd = std::process::Command::new(&self_exe);
+    cmd.arg("daemon-inner").arg("--root").arg(&root);
+    if no_prebuild {
+        cmd.arg("--no-prebuild");
+    }
+    cmd.args(&tasks);
+    // Detach: new session, redirect stdio to /dev/null.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            // New session — detaches from controlling terminal.
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().context("spawn daemon")?;
+    let _ = child;
+
+    // Wait for socket, then poll until every task reaches a stable state
+    // (healthy / completed / terminal) or we hit a budget. Show the README
+    // table on the way through.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async {
+        cli_client::wait_for_socket(&socket_path, Duration::from_secs(10)).await
+    })?;
+    rt.block_on(async {
+        wait_and_print_status(&socket_path, Duration::from_secs(30)).await;
+    });
+    Ok(())
+}
+
+async fn wait_and_print_status(socket: &std::path::Path, budget: Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    let mut last_render: Option<String> = None;
+    loop {
+        let resp = match cli_client::call(socket, Request::Status).await {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+        let procs = match resp {
+            Response::Status { procs } => procs,
+            _ => break,
+        };
+        // Up-table is for humans driving `procpane up`. It should answer "are
+        // my services up?", not "what is every workspace package's tsc-watch
+        // doing?" In a real Turborepo, requesting `dev` pulls in 20+ silent
+        // `tsc --watch` builders that the user never wants to read. Surface
+        // only the things they actually care about — services with a
+        // hostname, tasks they explicitly declared in `procpane.toml`,
+        // anything that crashed (so failures aren't hidden), and the
+        // turbo prebuild proc (slow + relevant). The rest get a single
+        // count line so they don't disappear entirely.
+        let is_service = |p: &proto::ProcStatus| -> bool {
+            p.name == "procpane#prebuild"
+                || p.hostname.is_some()
+                || p.in_manifest
+                || matches!(p.state.as_str(), "crashed" | "killed")
+        };
+        let visible: Vec<proto::ProcStatus> =
+            procs.iter().filter(|p| is_service(p)).cloned().collect();
+        let hidden_count = procs
+            .iter()
+            .filter(|p| p.persistent && !is_service(p))
+            .count();
+        let stable = visible.iter().all(|p| {
+            matches!(
+                p.state.as_str(),
+                "healthy" | "completed" | "crashed" | "killed"
+            )
+        });
+        let rendered = render_up_table(&visible, hidden_count);
+        if last_render.as_deref() != Some(rendered.as_str()) {
+            // Erase prior frame.
+            if let Some(prior) = &last_render {
+                let lines = prior.matches('\n').count();
+                for _ in 0..lines {
+                    eprint!("\x1b[1A\x1b[2K");
+                }
+            }
+            eprint!("{rendered}");
+            last_render = Some(rendered);
+        }
+        if stable {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn render_up_table(procs: &[proto::ProcStatus], hidden_count: usize) -> String {
+    let mut out = String::new();
+    let mut healthy = 0usize;
+    let proxy_port = if pretty_urls::is_installed() {
+        ""
+    } else {
+        ":8443"
+    };
+    for p in procs {
+        let mark = match p.state.as_str() {
+            "healthy" | "completed" => {
+                healthy += 1;
+                "✓"
+            }
+            "crashed" | "killed" => "✗",
+            _ => "⏳",
+        };
+        let host = p.hostname.as_deref().unwrap_or("");
+        let host_disp = if host.is_empty() {
+            String::new()
+        } else {
+            format!("  https://{host}{proxy_port}")
+        };
+        out.push_str(&format!(
+            "{mark} {name:<28} {state:<10}{host}\n",
+            name = p.name,
+            state = p.state,
+            host = host_disp
+        ));
+        for note in &p.notes {
+            out.push_str(&format!("    ↳ {note}\n"));
+        }
+    }
+    let alive = procs
+        .iter()
+        .filter(|p| !matches!(p.state.as_str(), "killed" | "crashed"))
+        .count();
+    if hidden_count > 0 {
+        out.push_str(&format!(
+            "  …{hidden_count} background task{plural} (workspace builders) — use `procpane status --all` to see\n",
+            plural = if hidden_count == 1 { "" } else { "s" }
+        ));
+    }
+    out.push_str(&format!("{healthy}/{alive} tasks healthy.\n"));
+    out
+}
+
+fn daemon_inner(root: PathBuf, tasks: Vec<String>, no_prebuild: bool) -> Result<()> {
+    let state_dir = daemon::state_dir(&root);
+    std::fs::create_dir_all(&state_dir)?;
+    let lock_path = state_dir.join("lock");
+    let _lock = lock::PidLock::acquire(&lock_path)?;
+
+    let ws = Workspace::discover(&root)?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(daemon::Daemon::run(ws, tasks, state_dir, no_prebuild))
+}
+
+fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
+    let root = resolve_root(start)?;
+    let socket = daemon::state_dir(&root).join("sock");
+    let rt = tokio::runtime::Runtime::new()?;
+    let resp = rt.block_on(cli_client::call(&socket, Request::Status))?;
+    match resp {
+        Response::Status { procs } => {
+            if json {
+                // JSON consumers (agents, scripts) get the full picture.
+                println!("{}", serde_json::to_string_pretty(&procs)?);
+            } else {
+                let rows: Vec<&proto::ProcStatus> = if all {
+                    procs.iter().collect()
+                } else {
+                    // Mirror the up-table service filter: hostnamed,
+                    // manifest-declared, the prebuild proc, or any task in a
+                    // failure state. Everything else is a workspace builder
+                    // and the user can see them with `--all`.
+                    procs
+                        .iter()
+                        .filter(|p| {
+                            p.name == "procpane#prebuild"
+                                || p.hostname.is_some()
+                                || p.in_manifest
+                                || matches!(p.state.as_str(), "crashed" | "killed")
+                        })
+                        .collect()
+                };
+                println!(
+                    "{:<32} {:<10} {:>8} {:>6} {:>10}  {}",
+                    "NAME", "STATE", "PID", "AGE", "LINES", "HOSTNAME"
+                );
+                for p in rows {
+                    println!(
+                        "{:<32} {:<10} {:>8} {:>5}s {:>10}  {}",
+                        p.name,
+                        p.state,
+                        p.pid.map(|x| x.to_string()).unwrap_or_else(|| "-".into()),
+                        p.age_secs,
+                        p.line_count,
+                        p.hostname.as_deref().unwrap_or(""),
+                    );
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!(message)),
+        _ => return Err(anyhow!("unexpected response")),
+    }
+    Ok(())
+}
+
+fn wait_for_cmd(start: PathBuf, name: String, timeout: String) -> Result<()> {
+    let dur = humantime::parse_duration(&timeout).map_err(|e| anyhow!("invalid --timeout: {e}"))?;
+    let root = resolve_root(start)?;
+    let socket = daemon::state_dir(&root).join("sock");
+    if !socket.exists() {
+        return Err(anyhow!("no procpane daemon running here"));
+    }
+    let rt = tokio::runtime::Runtime::new()?;
+    let deadline = std::time::Instant::now() + dur;
+    let interval = Duration::from_millis(250);
+    let exit_code: i32 = rt.block_on(async {
+        loop {
+            let resp =
+                match cli_client::call(&socket, Request::GetTask { name: name.clone() }).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("wait-for: {e}");
+                        return 1;
+                    }
+                };
+            let task = match resp {
+                Response::Task { task } => task,
+                Response::Error { message } => {
+                    eprintln!("wait-for: {message}");
+                    return 1;
+                }
+                _ => {
+                    eprintln!("wait-for: unexpected response");
+                    return 1;
+                }
+            };
+            match task.state.as_str() {
+                "healthy" | "completed" => {
+                    println!("{name} is {}", task.state);
+                    return 0;
+                }
+                "crashed" | "killed" => {
+                    eprintln!(
+                        "wait-for: {name} reached terminal state {} (exit {:?})",
+                        task.state, task.exit_code
+                    );
+                    return 1;
+                }
+                _ => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "wait-for: timeout after {timeout} (last state: {})",
+                    task.state
+                );
+                return 2;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        std::process::exit(exit_code);
+    }
+}
+
+fn stop_cmd(start: PathBuf) -> Result<()> {
+    let root = resolve_root(start)?;
+    let socket = daemon::state_dir(&root).join("sock");
+    if !socket.exists() {
+        println!("no running daemon");
+        return Ok(());
+    }
+    let rt = tokio::runtime::Runtime::new()?;
+    let resp = rt.block_on(cli_client::call(&socket, Request::Stop))?;
+    match resp {
+        Response::Ok => {
+            println!("stopping…");
+            // Wait briefly for socket to disappear.
+            for _ in 0..50 {
+                if !socket.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(())
+        }
+        Response::Error { message } => Err(anyhow!(message)),
+        _ => Err(anyhow!("unexpected response")),
+    }
+}
+
+fn proc_cmd(start: PathBuf, name: String, op: ProcOp) -> Result<()> {
+    let root = resolve_root(start)?;
+    let socket = daemon::state_dir(&root).join("sock");
+    let rt = tokio::runtime::Runtime::new()?;
+    match op {
+        ProcOp::Tail { n, json } => {
+            let resp = rt.block_on(cli_client::call(&socket, Request::Tail { name, lines: n }))?;
+            print_lines(resp, json)
+        }
+        ProcOp::Since { cursor, json } => {
+            let resp = rt.block_on(cli_client::call(&socket, Request::Since { name, cursor }))?;
+            print_lines(resp, json)
+        }
+        ProcOp::Grep {
+            pattern,
+            before,
+            after,
+            json,
+        } => {
+            let resp = rt.block_on(cli_client::call(
+                &socket,
+                Request::Grep {
+                    name: Some(name),
+                    pattern,
+                    before,
+                    after,
+                },
+            ))?;
+            print_grep(resp, json)
+        }
+        ProcOp::Signal {
+            signal,
+            wait,
+            tail,
+            json,
+        } => proc_signal_cmd(&rt, &socket, name, signal, wait, tail, json),
+    }
+}
+
+fn proc_signal_cmd(
+    rt: &tokio::runtime::Runtime,
+    socket: &std::path::Path,
+    name: String,
+    signal: String,
+    wait: Option<String>,
+    tail: bool,
+    json: bool,
+) -> Result<()> {
+    let resp = rt.block_on(cli_client::call(
+        socket,
+        Request::Signal {
+            name: name.clone(),
+            signal: signal.clone(),
+        },
+    ))?;
+    let initial = match resp {
+        Response::Task { task } => task,
+        Response::Error { message } => return Err(anyhow!(message)),
+        _ => return Err(anyhow!("unexpected response")),
+    };
+
+    let Some(wait) = wait else {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&initial)?);
+        } else {
+            println!(
+                "sent {signal} to {name} (pid {}, state {})",
+                initial
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                initial.state
+            );
+        }
+        return Ok(());
+    };
+
+    let dur = humantime::parse_duration(&wait).map_err(|e| anyhow!("invalid --wait: {e}"))?;
+    let deadline = std::time::Instant::now() + dur;
+    let mut cursor = initial.line_count;
+    let mut final_task = initial.clone();
+
+    if !json {
+        println!(
+            "sent {signal} to {name} (pid {}, state {}); monitoring for {wait}",
+            initial
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".into()),
+            initial.state
+        );
+    }
+
+    rt.block_on(async {
+        loop {
+            if tail {
+                match cli_client::call(
+                    socket,
+                    Request::Since {
+                        name: name.clone(),
+                        cursor,
+                    },
+                )
+                .await
+                {
+                    Ok(Response::Lines { lines, next_cursor }) => {
+                        cursor = next_cursor;
+                        if !json {
+                            for line in lines {
+                                println!("{}", line.text);
+                            }
+                        }
+                    }
+                    Ok(Response::Error { message }) => {
+                        if !json {
+                            eprintln!("tail: {message}");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            match cli_client::call(&socket, Request::GetTask { name: name.clone() }).await {
+                Ok(Response::Task { task }) => {
+                    final_task = task.clone();
+                    if matches!(task.state.as_str(), "completed" | "crashed" | "killed") {
+                        break;
+                    }
+                }
+                Ok(Response::Error { message }) => {
+                    if !json {
+                        eprintln!("status: {message}");
+                    }
+                    break;
+                }
+                _ => {}
+            }
+
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    });
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct Out {
+            initial: proto::ProcStatus,
+            final_status: proto::ProcStatus,
+            next_cursor: u64,
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Out {
+                initial,
+                final_status: final_task,
+                next_cursor: cursor,
+            })?
+        );
+    } else {
+        println!(
+            "{name} is {} (pid {}, exit {:?})",
+            final_task.state,
+            final_task
+                .pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "-".into()),
+            final_task.exit_code
+        );
+    }
+
+    Ok(())
+}
+
+fn trust_cmd(start: PathBuf, op: TrustOp) -> Result<()> {
+    match op {
+        TrustOp::Install { pretty_urls } => {
+            ca::ensure_ca()?;
+            let cert_path = ca::ca_cert_path()?;
+            println!("Installing CA into /Library/Keychains/System.keychain");
+            println!("  cert: {}", cert_path.display());
+            println!("  This will prompt for `sudo` (Touch ID works if pam_tid is enabled).");
+            let status = std::process::Command::new("sudo")
+                .arg("security")
+                .arg("add-trusted-cert")
+                .arg("-d") // user trust → root trust (with -k System.keychain)
+                .arg("-r")
+                .arg("trustRoot")
+                .arg("-k")
+                .arg("/Library/Keychains/System.keychain")
+                .arg(&cert_path)
+                .status()
+                .map_err(|e| anyhow!("failed to invoke `sudo security`: {e}"))?;
+            if !status.success() {
+                return Err(anyhow!("`security add-trusted-cert` failed"));
+            }
+            println!("✓ CA installed. https://*.test:8443 is now trusted.");
+            if pretty_urls {
+                let hostnames = manifest_hostnames(&start);
+                pretty_urls::install(&hostnames)?;
+            }
+            Ok(())
+        }
+        TrustOp::Uninstall => {
+            // Always attempt to tear down pretty-urls — it's an additive install
+            // step and we want `uninstall` to leave the system clean. No-op if
+            // the marker files don't exist.
+            if pretty_urls::is_installed() {
+                pretty_urls::uninstall()?;
+            }
+            let cert_path = ca::ca_cert_path()?;
+            if cert_path.is_file() {
+                let status = std::process::Command::new("sudo")
+                    .arg("security")
+                    .arg("delete-certificate")
+                    .arg("-c")
+                    .arg(ca::CA_COMMON_NAME)
+                    .arg("-t")
+                    .arg("/Library/Keychains/System.keychain")
+                    .status();
+                match status {
+                    Ok(s) if s.success() => println!("✓ removed from System keychain"),
+                    Ok(_) => eprintln!("(no entry in System keychain, or sudo declined)"),
+                    Err(e) => eprintln!("sudo invocation failed: {e}"),
+                }
+            }
+            if let Ok(dir) = ca::ca_dir() {
+                let _ = std::fs::remove_dir_all(&dir);
+                println!("✓ removed {}", dir.display());
+            }
+            Ok(())
+        }
+        TrustOp::Status => {
+            if ca::is_installed() {
+                println!("✓ CA files present: {}", ca::ca_dir()?.display());
+            } else {
+                println!("✗ CA not generated. Run `procpane trust install` first.");
+            }
+            if pretty_urls::is_installed() {
+                println!(
+                    "✓ pretty-urls helper present: {}",
+                    pretty_urls::PROXY_PLIST_PATH
+                );
+                let hostnames = manifest_hostnames(&start);
+                if hostnames.is_empty() {
+                    println!("  No procpane.toml hostnames found from this cwd.");
+                } else {
+                    let missing = pretty_urls::missing_hostnames(&hostnames);
+                    if missing.is_empty() {
+                        println!("✓ hostname entries present: {}", hostnames.join(", "));
+                    } else {
+                        println!("✗ hostname entries missing: {}", missing.join(", "));
+                        println!(
+                            "  Run `procpane trust install --pretty-urls` from this repo to add them."
+                        );
+                    }
+                }
+                println!("  Use portless URLs such as https://web.test once hostnames resolve.");
+            } else {
+                println!(
+                    "✗ pretty-urls not installed. Hostname URLs use :{} unless you run `procpane trust install --pretty-urls`.",
+                    proxy::PROXY_PORT
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn manifest_hostnames(start: &PathBuf) -> Vec<String> {
+    let root = match resolve_root(start.clone()) {
+        Ok(root) => root,
+        Err(_) => return Vec::new(),
+    };
+    let sidecar = match Sidecar::load(&root) {
+        Ok(sidecar) => sidecar,
+        Err(e) => {
+            eprintln!("warning: could not read procpane.toml hostnames: {e}");
+            return Vec::new();
+        }
+    };
+    let mut hostnames: Vec<String> = sidecar
+        .tasks
+        .values()
+        .filter_map(|task| task.hostname.clone())
+        .collect();
+    hostnames.sort();
+    hostnames.dedup();
+    hostnames
+}
+
+fn env_cmd(start: PathBuf, op: EnvOp, keychain: Option<&str>) -> Result<()> {
+    let root = resolve_root(start)?;
+    let service = secrets::service_name(&root);
+    match op {
+        EnvOp::Set { key, value } => {
+            validate_key(&key)?;
+            let v = match value {
+                Some(v) => v,
+                None if !std::io::stdin().is_terminal() => {
+                    // Piped/redirected stdin: read the value as a single line,
+                    // stripping a trailing newline if present. Keeps
+                    // `echo "$VAL" | procpane env set KEY` ergonomic instead of
+                    // erroring with "Device not configured" (no TTY for the
+                    // password prompt).
+                    let mut buf = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buf)
+                        .map_err(|e| anyhow!("reading stdin: {e}"))?;
+                    if buf.ends_with('\n') {
+                        buf.pop();
+                        if buf.ends_with('\r') {
+                            buf.pop();
+                        }
+                    }
+                    buf
+                }
+                None => rpassword::prompt_password(format!("Value for {key}: "))
+                    .map_err(|e| anyhow!("prompt failed: {e} (tip: pass --value or pipe stdin)"))?,
+            };
+            if v.is_empty() {
+                return Err(anyhow!("empty value; not storing"));
+            }
+            secrets::set(&service, &key, &v, keychain)?;
+            println!("✓ stored {key}");
+            Ok(())
+        }
+        EnvOp::Get { key } => {
+            validate_key(&key)?;
+            match secrets::get(&service, &key, keychain)? {
+                Some(v) => {
+                    print!("{v}");
+                    Ok(())
+                }
+                None => Err(anyhow!("{key} not set")),
+            }
+        }
+        EnvOp::List { json } => {
+            let (keys, used_by) = discover_env_keys(&root, &service, keychain)?;
+
+            if json {
+                let rows: Vec<serde_json::Value> = keys
+                    .iter()
+                    .map(|k| {
+                        serde_json::json!({
+                            "key": k,
+                            "used_by": used_by.get(k).cloned().unwrap_or_default(),
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if keys.is_empty() {
+                println!("(no secrets stored for this repo)");
+            } else {
+                let width = keys.iter().map(|k| k.len()).max().unwrap_or(0);
+                for k in &keys {
+                    match used_by.get(k) {
+                        Some(tasks) if !tasks.is_empty() => {
+                            println!("{:width$}  used by: {}", k, tasks.join(", "), width = width);
+                        }
+                        _ => println!("{:width$}  (unused)", k, width = width),
+                    }
+                }
+            }
+            Ok(())
+        }
+        EnvOp::Unset { key } => {
+            validate_key(&key)?;
+            if secrets::delete(&service, &key, keychain)? {
+                println!("✓ removed {key}");
+            } else {
+                println!("(no such key: {key})");
+            }
+            Ok(())
+        }
+        EnvOp::Receive => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(share::receive(&service, keychain))
+        }
+        EnvOp::Send { code, keys } => {
+            let keys = if keys.is_empty() {
+                discover_env_keys(&root, &service, keychain)?.0
+            } else {
+                for k in &keys {
+                    validate_key(k)?;
+                }
+                keys
+            };
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(share::send(&service, code, keys, keychain))
+        }
+    }
+}
+
+fn discover_env_keys(
+    root: &std::path::Path,
+    service: &str,
+    keychain: Option<&str>,
+) -> Result<(Vec<String>, std::collections::BTreeMap<String, Vec<String>>)> {
+    let mut keys: std::collections::BTreeSet<String> =
+        secrets::list_accounts(service, keychain)?.into_iter().collect();
+
+    // Best-effort: load the workspace so we can annotate each key with the
+    // tasks that reference it in env_from. If the Keychain index is stale,
+    // directly-readable env_from keys are still real stored secrets and should
+    // show up in `env list` / implicit `env send`.
+    let used_by: std::collections::BTreeMap<String, Vec<String>> = Workspace::discover(root)
+        .ok()
+        .map(|ws| {
+            let mut m: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            for (task_id, overlay) in &ws.sidecar.tasks {
+                for key in &overlay.env_from {
+                    m.entry(key.clone()).or_default().push(task_id.clone());
+                }
+            }
+            m
+        })
+        .unwrap_or_default();
+
+    for key in used_by.keys() {
+        if !keys.contains(key) && matches!(secrets::get(service, key, keychain), Ok(Some(_))) {
+            keys.insert(key.clone());
+        }
+    }
+
+    Ok((keys.into_iter().collect(), used_by))
+}
+
+fn validate_key(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(anyhow!("empty key"));
+    }
+    // Env-var-shaped: ASCII alnum + underscore, not starting with digit.
+    let ok = key
+        .chars()
+        .enumerate()
+        .all(|(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()));
+    if !ok {
+        return Err(anyhow!(
+            "key must match [A-Za-z_][A-Za-z0-9_]* (got: {key})"
+        ));
+    }
+    Ok(())
+}
+
+fn grep_cmd(
+    start: PathBuf,
+    pattern: String,
+    before: usize,
+    after: usize,
+    json: bool,
+) -> Result<()> {
+    let root = resolve_root(start)?;
+    let socket = daemon::state_dir(&root).join("sock");
+    let rt = tokio::runtime::Runtime::new()?;
+    let resp = rt.block_on(cli_client::call(
+        &socket,
+        Request::Grep {
+            name: None,
+            pattern,
+            before,
+            after,
+        },
+    ))?;
+    print_grep(resp, json)
+}
+
+fn print_lines(resp: Response, json: bool) -> Result<()> {
+    match resp {
+        Response::Lines { lines, next_cursor } => {
+            if json {
+                #[derive(serde::Serialize)]
+                struct Out<'a> {
+                    next_cursor: u64,
+                    lines: &'a [proto::LineRecord],
+                }
+                let o = Out {
+                    next_cursor,
+                    lines: &lines,
+                };
+                println!("{}", serde_json::to_string_pretty(&o)?);
+            } else {
+                for l in lines {
+                    println!("{}", l.text);
+                }
+                eprintln!("--- next_cursor={next_cursor} ---");
+            }
+            Ok(())
+        }
+        Response::Error { message } => Err(anyhow!(message)),
+        _ => Err(anyhow!("unexpected response")),
+    }
+}
+
+fn print_grep(resp: Response, json: bool) -> Result<()> {
+    match resp {
+        Response::GrepMatches { matches } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&matches)?);
+            } else {
+                for m in matches {
+                    for c in &m.context_before {
+                        println!("{}- {}", m.task, c);
+                    }
+                    println!("{}> {}", m.task, m.text);
+                    for c in &m.context_after {
+                        println!("{}- {}", m.task, c);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Response::Error { message } => Err(anyhow!(message)),
+        _ => Err(anyhow!("unexpected response")),
+    }
+}
