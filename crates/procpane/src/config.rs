@@ -40,10 +40,10 @@ pub struct TaskDef {
 
 impl TurboJson {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("read {}", path.display()))?;
-        let mut v: Self = serde_json::from_str(&text)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let mut v: Self =
+            serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
         // Merge legacy pipeline into tasks if needed.
         if v.tasks.is_empty() && !v.pipeline.is_empty() {
             v.tasks = std::mem::take(&mut v.pipeline);

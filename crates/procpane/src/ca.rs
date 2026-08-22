@@ -34,8 +34,7 @@ pub fn ca_key_path() -> Result<PathBuf> {
 }
 
 pub fn is_installed() -> bool {
-    matches!(ca_cert_path(), Ok(p) if p.is_file())
-        && matches!(ca_key_path(), Ok(p) if p.is_file())
+    matches!(ca_cert_path(), Ok(p) if p.is_file()) && matches!(ca_key_path(), Ok(p) if p.is_file())
 }
 
 /// Generate root CA cert + key, write to ca_dir(). Idempotent.
@@ -84,13 +83,14 @@ pub fn sign_leaf(dns_names: &[String]) -> Result<(String, String)> {
     let ca_key_pem = fs::read_to_string(ca_key_path()?).context("read CA key")?;
 
     let ca_key = KeyPair::from_pem(&ca_key_pem).context("parse CA key")?;
-    let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
-        .context("parse CA cert")?;
-    let ca_cert = ca_params.self_signed(&ca_key).context("rebuild CA cert from params")?;
+    let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem).context("parse CA cert")?;
+    let ca_cert = ca_params
+        .self_signed(&ca_key)
+        .context("rebuild CA cert from params")?;
 
     let leaf_key = KeyPair::generate().context("generate leaf keypair")?;
-    let mut leaf_params = CertificateParams::new(dns_names.to_vec())
-        .context("build leaf params")?;
+    let mut leaf_params =
+        CertificateParams::new(dns_names.to_vec()).context("build leaf params")?;
     leaf_params.distinguished_name = {
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "procpane leaf");

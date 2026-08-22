@@ -135,8 +135,8 @@ impl Sidecar {
         if local_path.is_file() {
             let text = std::fs::read_to_string(&local_path)
                 .with_context(|| format!("read {}", local_path.display()))?;
-            let local: Sidecar = toml::from_str(&text)
-                .with_context(|| format!("parse {}", local_path.display()))?;
+            let local: Sidecar =
+                toml::from_str(&text).with_context(|| format!("parse {}", local_path.display()))?;
             sc.merge(local);
         }
 
@@ -191,7 +191,9 @@ impl TaskOverlay {
     }
 
     pub fn stop_signal(&self) -> i32 {
-        self.stop_signal.map(|s| s.as_libc()).unwrap_or(libc::SIGINT)
+        self.stop_signal
+            .map(|s| s.as_libc())
+            .unwrap_or(libc::SIGINT)
     }
 
     pub fn stop_grace(&self) -> Duration {

@@ -10,12 +10,12 @@ mod lock;
 mod pretty_urls;
 mod privileged_proxy;
 mod process;
+mod project;
 mod proto;
 mod proxy;
 mod secrets;
 mod share;
 mod sidecar;
-mod project;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -25,9 +25,9 @@ use std::time::Duration;
 
 use crate::cli::{Cli, Cmd, EnvOp, ProcOp, TrustOp};
 use crate::client as cli_client;
+use crate::project::Project;
 use crate::proto::{Request, Response};
 use crate::sidecar::Sidecar;
-use crate::project::Project;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -825,8 +825,9 @@ fn discover_env_keys(
     service: &str,
     keychain: Option<&str>,
 ) -> Result<(Vec<String>, std::collections::BTreeMap<String, Vec<String>>)> {
-    let mut keys: std::collections::BTreeSet<String> =
-        secrets::list_accounts(service, keychain)?.into_iter().collect();
+    let mut keys: std::collections::BTreeSet<String> = secrets::list_accounts(service, keychain)?
+        .into_iter()
+        .collect();
 
     // Best-effort: load the workspace so we can annotate each key with the
     // tasks that reference it in env_from. If the Keychain index is stale,

@@ -3,8 +3,8 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::BTreeMap;
 
 use crate::config::{parse_dep, DepRef, TaskDef, TurboJson};
-use crate::sidecar::TaskOverlay;
 use crate::project::Project;
+use crate::sidecar::TaskOverlay;
 
 #[derive(Debug, Clone)]
 pub struct TaskNode {

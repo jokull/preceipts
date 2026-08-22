@@ -117,14 +117,8 @@ impl RingBuffer {
             if re.is_match(&line.text) {
                 let b_start = i.saturating_sub(before);
                 let a_end = (i + 1 + after).min(lines.len());
-                let ctx_before = lines[b_start..i]
-                    .iter()
-                    .map(|l| l.text.clone())
-                    .collect();
-                let ctx_after = lines[i + 1..a_end]
-                    .iter()
-                    .map(|l| l.text.clone())
-                    .collect();
+                let ctx_before = lines[b_start..i].iter().map(|l| l.text.clone()).collect();
+                let ctx_after = lines[i + 1..a_end].iter().map(|l| l.text.clone()).collect();
                 out.push(GrepMatch {
                     task: task.to_string(),
                     seq: line.seq,

@@ -9,7 +9,9 @@ use std::path::Path;
 
 /// Compute the per-repo service name used as the Keychain namespace.
 pub fn service_name(repo_root: &Path) -> String {
-    let canon = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+    let canon = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
     format!("procpane:{}", canon.display())
 }
 
@@ -50,12 +52,7 @@ mod mac {
         keychain.map(|k| vec![k]).unwrap_or_default()
     }
 
-    pub fn set(
-        service: &str,
-        account: &str,
-        value: &str,
-        keychain: Option<&str>,
-    ) -> Result<()> {
+    pub fn set(service: &str, account: &str, value: &str, keychain: Option<&str>) -> Result<()> {
         if account == INDEX_ACCOUNT {
             return Err(anyhow!("reserved key name"));
         }
@@ -92,13 +89,7 @@ mod mac {
         // procpane build first wrote it. Drop the item and re-add cleanly.
 
         // Best-effort delete. errSecItemNotFound (-25300) is fine.
-        let mut delete_args = vec![
-            "delete-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-        ];
+        let mut delete_args = vec!["delete-generic-password", "-s", service, "-a", account];
         delete_args.extend(kc_args(keychain));
         let _ = sec_run(&delete_args);
 
@@ -120,9 +111,7 @@ mod mac {
         let output = sec_run(&add_args)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                "security add failed ({stderr}); falling back to default keychain ACL"
-            );
+            tracing::warn!("security add failed ({stderr}); falling back to default keychain ACL");
             return set_generic_password(service, account, value.as_bytes())
                 .map_err(|e| anyhow!("keychain set failed for {account}: {e}"));
         }
@@ -176,14 +165,7 @@ mod mac {
     /// and the user's one-time "Always Allow" grant covers every procpane
     /// build forever.
     fn sec_get(service: &str, account: &str, keychain: Option<&str>) -> Result<Option<String>> {
-        let mut args = vec![
-            "find-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-        ];
+        let mut args = vec!["find-generic-password", "-s", service, "-a", account, "-w"];
         args.extend(kc_args(keychain));
         let output = sec_run(&args)?;
         if output.status.success() {
@@ -204,17 +186,14 @@ mod mac {
         if stderr.contains("could not be found") || stderr.contains("-25300") {
             return Ok(None);
         }
-        Err(anyhow!("security find failed for {account}: {}", stderr.trim()))
+        Err(anyhow!(
+            "security find failed for {account}: {}",
+            stderr.trim()
+        ))
     }
 
     fn sec_delete(service: &str, account: &str, keychain: Option<&str>) -> Result<bool> {
-        let mut args = vec![
-            "delete-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-        ];
+        let mut args = vec!["delete-generic-password", "-s", service, "-a", account];
         args.extend(kc_args(keychain));
         let output = sec_run(&args)?;
         if output.status.success() {
@@ -358,7 +337,12 @@ mod unsupported {
     fn err() -> anyhow::Error {
         anyhow!("procpane env: secret storage requires macOS; Linux libsecret support is not yet implemented")
     }
-    pub fn set(_service: &str, _account: &str, _value: &str, _keychain: Option<&str>) -> Result<()> {
+    pub fn set(
+        _service: &str,
+        _account: &str,
+        _value: &str,
+        _keychain: Option<&str>,
+    ) -> Result<()> {
         Err(err())
     }
     pub fn get(_service: &str, _account: &str, _keychain: Option<&str>) -> Result<Option<String>> {

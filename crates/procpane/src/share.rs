@@ -46,7 +46,9 @@ pub async fn receive(service: &str, keychain: Option<&str>) -> Result<()> {
     println!();
     println!("Waiting for sender... (Ctrl-C to abort)");
 
-    let mut wh = Wormhole::connect(mailbox).await.context("wormhole connect")?;
+    let mut wh = Wormhole::connect(mailbox)
+        .await
+        .context("wormhole connect")?;
     let payload: SecretsPayload = wh
         .receive_json()
         .await
@@ -67,7 +69,12 @@ pub async fn receive(service: &str, keychain: Option<&str>) -> Result<()> {
 }
 
 /// Sender flow: take a code from the receiver, confirm key list, send.
-pub async fn send(service: &str, code: String, keys: Vec<String>, keychain: Option<&str>) -> Result<()> {
+pub async fn send(
+    service: &str,
+    code: String,
+    keys: Vec<String>,
+    keychain: Option<&str>,
+) -> Result<()> {
     if keys.is_empty() {
         return Err(anyhow!(
             "no secrets to send; store some with `procpane env set <KEY>` first"
@@ -87,13 +94,13 @@ pub async fn send(service: &str, code: String, keys: Vec<String>, keychain: Opti
         }
     }
     if !missing.is_empty() {
-        return Err(anyhow!(
-            "no value stored for: {}",
-            missing.join(", ")
-        ));
+        return Err(anyhow!("no value stored for: {}", missing.join(", ")));
     }
 
-    println!("About to send {} keys to the receiver:", payload.secrets.len());
+    println!(
+        "About to send {} keys to the receiver:",
+        payload.secrets.len()
+    );
     for k in payload.secrets.keys() {
         println!("    {k}");
     }
@@ -106,7 +113,9 @@ pub async fn send(service: &str, code: String, keys: Vec<String>, keychain: Opti
     let mailbox = MailboxConnection::connect(app_config(), code, false)
         .await
         .context("join wormhole code")?;
-    let mut wh = Wormhole::connect(mailbox).await.context("wormhole connect")?;
+    let mut wh = Wormhole::connect(mailbox)
+        .await
+        .context("wormhole connect")?;
     wh.send_json(&payload)
         .await
         .map_err(|e| anyhow!("wormhole send: {e}"))?;

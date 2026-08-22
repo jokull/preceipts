@@ -5,19 +5,30 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
     Status,
     Stop,
-    Tail { name: String, lines: usize },
+    Tail {
+        name: String,
+        lines: usize,
+    },
     Grep {
         name: Option<String>,
         pattern: String,
         before: usize,
         after: usize,
     },
-    Since { name: String, cursor: u64 },
-    Signal { name: String, signal: String },
+    Since {
+        name: String,
+        cursor: u64,
+    },
+    Signal {
+        name: String,
+        signal: String,
+    },
     Ping,
     /// Block-style query: returns immediately with current state of the task.
     /// The CLI side polls until state == "healthy" or terminal failure.
-    GetTask { name: String },
+    GetTask {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,11 +36,22 @@ pub enum Request {
 pub enum Response {
     Ok,
     Pong,
-    Status { procs: Vec<ProcStatus> },
-    Lines { lines: Vec<LineRecord>, next_cursor: u64 },
-    GrepMatches { matches: Vec<GrepMatch> },
-    Task { task: ProcStatus },
-    Error { message: String },
+    Status {
+        procs: Vec<ProcStatus>,
+    },
+    Lines {
+        lines: Vec<LineRecord>,
+        next_cursor: u64,
+    },
+    GrepMatches {
+        matches: Vec<GrepMatch>,
+    },
+    Task {
+        task: ProcStatus,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

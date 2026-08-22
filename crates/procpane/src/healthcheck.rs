@@ -39,10 +39,15 @@ impl HealthcheckKind {
     /// HTTP healthcheck onto `http://<hostname>:<port>`. Without it, HTTP falls
     /// back to `127.0.0.1`. (TLS-aware variant comes with the reverse proxy.)
     pub fn from_sidecar(hc: &Healthcheck, hostname: Option<&str>) -> anyhow::Result<Self> {
-        let count = [hc.tcp.is_some(), hc.http.is_some(), hc.log.is_some(), hc.exit.is_some()]
-            .iter()
-            .filter(|x| **x)
-            .count();
+        let count = [
+            hc.tcp.is_some(),
+            hc.http.is_some(),
+            hc.log.is_some(),
+            hc.exit.is_some(),
+        ]
+        .iter()
+        .filter(|x| **x)
+        .count();
         if count == 0 {
             return Ok(HealthcheckKind::None);
         }
@@ -181,10 +186,7 @@ pub async fn run_healthcheck_loop(
 
 async fn probe_tcp(port: u16, t: Duration) -> bool {
     let addr = format!("127.0.0.1:{port}");
-    matches!(
-        timeout(t, TcpStream::connect(&addr)).await,
-        Ok(Ok(_))
-    )
+    matches!(timeout(t, TcpStream::connect(&addr)).await, Ok(Ok(_)))
 }
 
 /// Turn a sidecar `healthcheck.http` spec into a concrete probe target.

@@ -200,8 +200,8 @@ fn discover_workspace_patterns(root: &Path) -> Result<Vec<String>> {
     let pnpm = root.join("pnpm-workspace.yaml");
     if pnpm.is_file() {
         let text = std::fs::read_to_string(&pnpm)?;
-        let ws: PnpmWorkspace = serde_yaml::from_str(&text)
-            .with_context(|| "parse pnpm-workspace.yaml")?;
+        let ws: PnpmWorkspace =
+            serde_yaml::from_str(&text).with_context(|| "parse pnpm-workspace.yaml")?;
         return Ok(ws.packages);
     }
     let pkg_path = root.join("package.json");
@@ -209,8 +209,8 @@ fn discover_workspace_patterns(root: &Path) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let text = std::fs::read_to_string(&pkg_path)?;
-    let root_pkg: RootPackageJson = serde_json::from_str(&text)
-        .with_context(|| "parse root package.json")?;
+    let root_pkg: RootPackageJson =
+        serde_json::from_str(&text).with_context(|| "parse root package.json")?;
     let _ = root_pkg.name;
     let _ = root_pkg.package_manager;
     let patterns = match root_pkg.workspaces {
@@ -223,10 +223,10 @@ fn discover_workspace_patterns(root: &Path) -> Result<Vec<String>> {
 
 fn read_package(dir: &Path) -> Result<Package> {
     let pj_path = dir.join("package.json");
-    let text = std::fs::read_to_string(&pj_path)
-        .with_context(|| format!("read {}", pj_path.display()))?;
-    let pj: PackageJson = serde_json::from_str(&text)
-        .with_context(|| format!("parse {}", pj_path.display()))?;
+    let text =
+        std::fs::read_to_string(&pj_path).with_context(|| format!("read {}", pj_path.display()))?;
+    let pj: PackageJson =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", pj_path.display()))?;
     let dir_name = dir
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
