@@ -3,17 +3,21 @@
 //! Expensive — call it off the UI thread and cache the result.
 //!
 //! Ported forward from `swift/Sources/PreceiptsKit/ChangesetLoader.swift` at
-//! fc3643e, minus the GitHub remote association (cut with the PR conversation
-//! surface) and, for now, the parallel highlight pass: highlighting lands with
-//! the tree-sitter port, and the loader is shaped to take it.
+//! fc3643e, minus the GitHub remote association — cut with the PR conversation
+//! surface that decision 12 drops.
 
 use crate::error::{Error, Result};
 use crate::gitreader::{worktree_content, GitReader};
+use crate::highlight::highlight;
 use crate::linediff::diff_rows;
 use crate::model::{Changeset, DiffScope, FileDiff, FileStatus};
+use rayon::prelude::*;
+use std::collections::HashSet;
 use std::path::Path;
 
-pub fn load(repo_path: &Path, scope: DiffScope) -> Result<Changeset> {
+/// `highlighting` off skips the tree-sitter pass entirely — useful for
+/// headless callers (the CLI, the check runner) that never render.
+pub fn load(repo_path: &Path, scope: DiffScope, highlighting: bool) -> Result<Changeset> {
     let reader = GitReader::open(repo_path)?;
     let workdir = reader.workdir()?;
     let (branch, head_oid) = reader.head_branch()?;
@@ -37,7 +41,17 @@ pub fn load(repo_path: &Path, scope: DiffScope) -> Result<Changeset> {
         }
     };
 
-    let mut files = Vec::new();
+    // Two passes. The git reads are sequential because libgit2 objects are not
+    // thread-safe; the highlight pass that follows is parallel because parsing
+    // every changed file dominates load time on a large changeset.
+    struct Pending {
+        file: FileDiff,
+        old_source: String,
+        old_content: String,
+        new_content: String,
+    }
+
+    let mut pending: Vec<Pending> = Vec::new();
     for entry in reader.changed_files(base_commit)? {
         let old_source = entry.old_path.clone().unwrap_or_else(|| entry.path.clone());
 
@@ -66,16 +80,57 @@ pub fn load(repo_path: &Path, scope: DiffScope) -> Result<Changeset> {
             continue;
         }
 
-        files.push(FileDiff {
-            path: entry.path,
-            old_path: entry.old_path,
-            status: entry.status,
-            is_binary,
-            added,
-            removed,
-            hunks,
+        pending.push(Pending {
+            file: FileDiff {
+                path: entry.path,
+                old_path: entry.old_path,
+                status: entry.status,
+                is_binary,
+                added,
+                removed,
+                hunks,
+                old_highlight: None,
+                new_highlight: None,
+            },
+            old_source,
+            old_content,
+            new_content,
         });
     }
+
+    if highlighting {
+        pending.par_iter_mut().for_each(|item| {
+            if item.file.hunks.is_empty() {
+                return;
+            }
+            // Prune to the lines the hunks actually reference. The parse needs
+            // the whole file, but retaining whole-file span tables is what
+            // dominates a changeset's memory when large files carry small
+            // diffs.
+            let mut old_lines = HashSet::new();
+            let mut new_lines = HashSet::new();
+            for hunk in &item.file.hunks {
+                for row in &hunk.rows {
+                    if let Some(old) = &row.old {
+                        old_lines.insert(old.number);
+                    }
+                    if let Some(new) = &row.new {
+                        new_lines.insert(new.number);
+                    }
+                }
+            }
+            if !item.old_content.is_empty() {
+                item.file.old_highlight =
+                    highlight(&item.old_content, &item.old_source).map(|h| h.pruned(&old_lines));
+            }
+            if !item.new_content.is_empty() {
+                item.file.new_highlight =
+                    highlight(&item.new_content, &item.file.path).map(|h| h.pruned(&new_lines));
+            }
+        });
+    }
+
+    let files = pending.into_iter().map(|item| item.file).collect();
 
     Ok(Changeset {
         scope,
@@ -146,7 +201,7 @@ mod tests {
     #[test]
     fn branch_scope_spans_commits_and_working_tree() {
         let (_temp, dir) = scratch_repo();
-        let changeset = load(&dir, DiffScope::Branch).unwrap();
+        let changeset = load(&dir, DiffScope::Branch, true).unwrap();
 
         assert_eq!(changeset.branch.as_deref(), Some("feature"));
         assert!(changeset.base_name.starts_with("main"));
@@ -167,7 +222,7 @@ mod tests {
     #[test]
     fn uncommitted_scope_sees_only_working_tree_changes() {
         let (_temp, dir) = scratch_repo();
-        let changeset = load(&dir, DiffScope::Uncommitted).unwrap();
+        let changeset = load(&dir, DiffScope::Uncommitted, true).unwrap();
 
         let paths: HashSet<&str> = changeset.files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains("a.txt"));
@@ -184,7 +239,7 @@ mod tests {
     fn binary_files_are_flagged_not_diffed() {
         let (_temp, dir) = scratch_repo();
         std::fs::write(dir.join("blob.bin"), [0u8, 1, 2, 3, 0, 255]).unwrap();
-        let changeset = load(&dir, DiffScope::Uncommitted).unwrap();
+        let changeset = load(&dir, DiffScope::Uncommitted, true).unwrap();
         let files = by_path(&changeset);
         let bin = files["blob.bin"];
         assert!(bin.is_binary);
@@ -194,10 +249,38 @@ mod tests {
     #[test]
     fn totals_sum_across_files() {
         let (_temp, dir) = scratch_repo();
-        let changeset = load(&dir, DiffScope::Branch).unwrap();
+        let changeset = load(&dir, DiffScope::Branch, true).unwrap();
         let added: usize = changeset.files.iter().map(|f| f.added).sum();
         let removed: usize = changeset.files.iter().map(|f| f.removed).sum();
         assert_eq!(changeset.total_added(), added);
         assert_eq!(changeset.total_removed(), removed);
+    }
+
+    #[test]
+    fn highlights_reach_the_changeset_and_are_pruned_to_hunk_lines() {
+        let (_temp, dir) = scratch_repo();
+        let changeset = load(&dir, DiffScope::Branch, true).unwrap();
+        let files = by_path(&changeset);
+
+        // new.rs is `fn new_thing() {}` — rust, so it highlights.
+        let new_rs = files["new.rs"];
+        let highlight = new_rs
+            .new_highlight
+            .as_ref()
+            .expect("rust file carries highlights");
+        assert!(!highlight.line(1).is_empty(), "line 1 has spans");
+
+        // a.txt has no grammar; it must not pretend to.
+        assert!(files["a.txt"].new_highlight.is_none());
+    }
+
+    #[test]
+    fn highlighting_off_skips_the_pass() {
+        let (_temp, dir) = scratch_repo();
+        let changeset = load(&dir, DiffScope::Branch, false).unwrap();
+        assert!(changeset
+            .files
+            .iter()
+            .all(|f| f.old_highlight.is_none() && f.new_highlight.is_none()));
     }
 }

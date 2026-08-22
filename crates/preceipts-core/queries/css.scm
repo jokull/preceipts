@@ -1,0 +1,10 @@
+(comment) @comment
+(string_value) @string
+(integer_value) @number
+(float_value) @number
+(color_value) @constant
+(property_name) @property
+(tag_name) @tag
+(class_name) @type
+(id_name) @constant
+(at_keyword) @keyword

@@ -3,6 +3,7 @@
 //!
 //! Ported forward from `swift/Sources/PreceiptsKit/Model.swift` at fc3643e.
 
+use crate::highlight::FileHighlight;
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -96,6 +97,10 @@ pub struct FileDiff {
     pub added: usize,
     pub removed: usize,
     pub hunks: Vec<DiffHunk>,
+    /// Syntax highlights per file version; `None` means an unsupported
+    /// language, an oversized file, or highlighting turned off.
+    pub old_highlight: Option<FileHighlight>,
+    pub new_highlight: Option<FileHighlight>,
 }
 
 #[derive(Debug, Clone)]

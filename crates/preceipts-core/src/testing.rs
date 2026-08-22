@@ -38,6 +38,8 @@ pub fn file_with(path: &str, status: FileStatus, added: usize, removed: usize) -
                 ),
             ],
         }],
+        old_highlight: None,
+        new_highlight: None,
     }
 }
 
