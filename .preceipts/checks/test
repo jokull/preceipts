@@ -1,0 +1,4 @@
+#!/bin/bash
+# The workspace test suite — the conformance contract for the port.
+set -euo pipefail
+cargo test --workspace

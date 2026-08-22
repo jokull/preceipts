@@ -79,6 +79,10 @@ pub fn line_segments(
 
 #[cfg(test)]
 mod tests {
+    // Single-element range slices are the point here: one changed range over a
+    // line, not a range of indices.
+    #![allow(clippy::single_range_in_vec_init)]
+
     use super::*;
 
     #[test]

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Lint tripwire. Warnings fail so drift never accumulates quietly.
+set -euo pipefail
+cargo clippy --workspace --all-targets -- -D warnings

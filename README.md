@@ -4,31 +4,32 @@
 
 <h1 align="center">preceipts</h1>
 
-<p align="center"><strong>Local CI, proven by trees, merged by humans.</strong></p>
+<p align="center"><strong>The workbench around AI coding. It never does the coding.</strong></p>
 
-preceipts replaces the GitHub PR treadmill for teams that trust each other:
-checks run on dev machines, results ("receipts") are keyed to git **tree
-hashes** and stored in git notes, and landing a branch is a human/agent
-decision informed by receipts — never gated by a server.
+> **Status: mid-rewrite.** Decision 12 pivoted preceipts from a PR companion
+> to an AI-coding workbench, and moved the whole system to Rust. The plan is
+> [`docs/direction-2026-08.md`](docs/direction-2026-08.md); the pitch is
+> [`docs/pitch.md`](docs/pitch.md). What builds today is the diff algorithm
+> and the vendored process runner — not yet an app. The Swift cockpit and
+> the TypeScript engine it replaced are mineable from history at `fc3643e`.
 
-![The preceipts cockpit reviewing a PR](docs/assets/cockpit.png)
+An agent writes; a human decides. Everything here serves one loop:
 
-Two halves, one repo:
+```
+prompt → worktree → live env with real URLs → diff you can read fast
+       → receipts → land
+```
 
-- **`swift/`** — the cockpit, a native macOS app (AppKit + SwiftUI islands,
-  SwiftPM, no Xcode). A side-by-side diff surface with tree-sitter syntax
-  highlighting, a file tree scoped to *branch diff* or *uncommitted*, ⌘F
-  find, and the whole PR conversation pulled inboard: review threads
-  anchored to diff rows, resolve/unresolve, comment editing, avatars,
-  GFM-rendered bodies (images and GIFs included), filters for
-  people/bots/resolved/outdated. Receipts stream into a drawer as checks
-  run; the PR drawer shows the description, commit log, and the checks
-  board — Actions, Vercel, Cloudflare. A quiet HUD keeps branch state,
-  merge cleanliness, and colored diff stats in the footer.
-- **`engine/`** — the receipts engine (TypeScript/Bun, zero runtime deps,
-  git plumbing only). Ships as the `preceipts-engine` binary:
-  `init · run · status · log · hud · land · sync · gc`, everything scriptable
-  via `--json`, check runs streamable via `--events` (NDJSON).
+preceipts is a read surface with a control plane, never a host. It does not
+run your agent, embed a terminal, or own a session. It watches the files the
+agent is writing, owns the environment that code runs in, and holds the
+evidence that says whether it is safe to land. Whatever drives the agent —
+any harness, any model — stays outside and stays yours.
+
+The workspace is a **laboratory**: everything the UI shows (logs, health,
+URLs, HTTP transcript, drains, diff, receipts) is equally available to agents
+through the CLI and an MCP server, and a worktree self-identifies so any
+harness started inside it finds the lab with no configuration.
 
 ## Why trees, not commits?
 
@@ -38,46 +39,44 @@ squash-land via `git commit-tree` produces a commit whose tree **is** the
 proven tree, so "are we landing what we tested?" is a hash comparison, not a
 policy.
 
-Read [`PRD.md`](PRD.md) for the full design and decisions log.
+Read [`PRD.md`](PRD.md) for the full design and the decisions log.
 
-## Quickstart
+## Layout
+
+One cargo workspace:
+
+- **`crates/preceipts-core`** — everything on the frame path, in-process: the
+  three-pass diff display algorithm (libgit2 xdiff → similarity pairing →
+  word-level intraline), the row model, and segment composition. Ported
+  forward from the Swift `PreceiptsKit` with its tests, which are the
+  conformance suite for the rewrite.
+- **`crates/procpane`** — the absorbed process runner: healthcheck-gated
+  orchestration, PTY supervision with queryable ring buffers, a local CA and
+  TLS proxy for `https://*.test`, and Keychain-backed secrets with per-task
+  allowlists.
+
+Still to land, in order: the workspace dimension through the daemon
+(worktrees, port blocks, per-workspace certs and hostnames), the GPUI shell,
+the `preceipts.toml` sandbox schema, the agent-facing CLI and MCP server, and
+receipts firing when the worktree goes quiet.
+
+## Build
 
 ```sh
-# engine (receipts, runs, land)
-cd engine && bun install && bun run build     # → engine/dist/preceipts-engine
-
-# cockpit (macOS 14+)
-brew install libgit2
-cd swift && swift build && swift test
-swift run PreceiptsApp /path/to/repo          # or Scripts/package_app.sh → Preceipts.app
-
-# in your repo
-preceipts-engine init         # scaffold .preceipts/
-preceipts-engine run          # run checks, mint receipts
-preceipts-engine status       # receipt table for the working tree
-preceipts-engine hud          # conflicts/freshness/sync at a glance
-preceipts-engine land my-branch   # squash + trailers + push, receipts willing
+cargo build
+cargo test
 ```
-
-Checks are plain executable files in `.preceipts/checks/` — exit 0 means
-pass. Required checks are listed in `.preceipts/config.toml`.
-
-GitHub features work out of the box through the `gh` CLI if you're logged
-in, or sign in from the app's Settings (⌘,) with a device-flow OAuth app
-for a Keychain-held token.
 
 ## Quality contract
 
-The diff algorithm (patience + indent heuristic + word-level intraline),
-tree-sitter highlighting (14 languages, raw C API, capture precedence
-verified against tree-sitter-highlight), feedback parsing, and filters all
-live in `PreceiptsKit` with XCTest coverage; the engine carries its own bun
-test suite. `swift test` + `bun test` is the whole story.
+`cargo test` is the whole story. The diff algorithm's tests came across from
+Swift unchanged in meaning — they pinned that implementation and now pin this
+one, which is the only reason rewriting tested code is safe to attempt.
 
 ## History
 
 preceipts started as a TUI built on [lumen](https://github.com/jnsahaj/lumen)
-by [@jnsahaj](https://github.com/jnsahaj) (MIT), then grew a Rust core and a
-GPUI prototype before landing on the all-native Swift app (PRD decisions
-10–11). The Rust workspace was removed from the working tree once its
-algorithms and tests were ported — mine it via git history if needed.
+by [@jnsahaj](https://github.com/jnsahaj) (MIT), grew a Rust core and a GPUI
+prototype, spent a stretch as an all-native Swift app (decisions 10–11), and
+returned to Rust when the product became the workbench rather than the PR
+viewer (decision 12). Every era is in the history; nothing was thrown away.

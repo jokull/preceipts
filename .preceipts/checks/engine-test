@@ -1,4 +1,0 @@
-#!/bin/bash
-# Engine test suite (TS/Bun).
-set -euo pipefail
-cd engine && bun test

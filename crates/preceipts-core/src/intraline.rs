@@ -71,6 +71,9 @@ pub fn word_diff(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>)
     let old_tokens = tokenize(old_bytes);
     let new_tokens = tokenize(new_bytes);
     if old_tokens.len() > MAX_TOKENS || new_tokens.len() > MAX_TOKENS {
+        // One range covering the whole line, deliberately — the fallback says
+        // "all of this changed", not "a range of lines changed".
+        #[allow(clippy::single_range_in_vec_init)]
         return (vec![0..old_bytes.len()], vec![0..new_bytes.len()]);
     }
 
