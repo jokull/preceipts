@@ -16,7 +16,7 @@ use crate::proto::{GrepMatch, LineRecord, ProcStatus, Request, Response};
 use crate::proxy::{self, PortRegistry, PROXY_PORT};
 use crate::secrets;
 use crate::sidecar::DependsOnCondition;
-use crate::{ca, pretty_urls, workspace::Workspace};
+use crate::{ca, pretty_urls, project::Project};
 
 pub const PREBUILD_ID: &str = "procpane#prebuild";
 
@@ -46,7 +46,7 @@ pub struct Daemon {
 
 impl Daemon {
     pub async fn run(
-        ws: Workspace,
+        project: Project,
         requested: Vec<String>,
         state_dir: PathBuf,
         no_prebuild: bool,
@@ -56,13 +56,13 @@ impl Daemon {
         // Remove stale socket if present.
         let _ = std::fs::remove_file(&socket_path);
 
-        let graph = TaskGraph::build(&ws, &requested)?;
+        let graph = TaskGraph::build(&project, &requested)?;
         if graph.graph.node_count() == 0 {
             return Err(anyhow!("no tasks resolved"));
         }
 
         // Pre-flight: every secret in env_from must be present in Keychain.
-        let service = secrets::service_name(&ws.root);
+        let service = secrets::service_name(&project.root);
         let mut missing: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for idx in graph.graph.node_indices() {
             let n = &graph.graph[idx];
@@ -168,7 +168,7 @@ impl Daemon {
         }
 
         let manifest_tasks: std::collections::HashSet<String> =
-            ws.sidecar.tasks.keys().cloned().collect();
+            project.sidecar.tasks.keys().cloned().collect();
 
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let daemon = Arc::new(Daemon {
@@ -239,8 +239,8 @@ impl Daemon {
         let sched_daemon = Arc::clone(&daemon);
         let graph_arc = Arc::new(graph);
         let mut sched_stop = stop_rx.clone();
-        let pm = ws.pkg_manager.clone();
-        let root = ws.root.clone();
+        let pm = project.pkg_manager.clone();
+        let root = project.root.clone();
         let persistent_set: HashSet<NodeIndex> = persistent_indices.into_iter().collect();
         let sched_stop_rx = stop_rx.clone();
         let scheduler = tokio::spawn(async move {

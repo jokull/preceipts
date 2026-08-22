@@ -15,7 +15,7 @@ mod proxy;
 mod secrets;
 mod share;
 mod sidecar;
-mod workspace;
+mod project;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -27,7 +27,7 @@ use crate::cli::{Cli, Cmd, EnvOp, ProcOp, TrustOp};
 use crate::client as cli_client;
 use crate::proto::{Request, Response};
 use crate::sidecar::Sidecar;
-use crate::workspace::Workspace;
+use crate::project::Project;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -109,8 +109,8 @@ fn run_cmd(start: PathBuf, tasks: Vec<String>, foreground: bool, no_prebuild: bo
     // task declared in `procpane.toml`. This is the canonical incantation
     // for a fully-wired repo and avoids the fan-out of bare-name expansion.
     let tasks = if tasks.is_empty() {
-        let ws = Workspace::discover(&root)?;
-        let manifest: Vec<String> = ws.sidecar.tasks.keys().cloned().collect();
+        let project = Project::discover(&root)?;
+        let manifest: Vec<String> = project.sidecar.tasks.keys().cloned().collect();
         if manifest.is_empty() {
             return Err(anyhow!(
                 "no tasks given and procpane.toml has no [tasks.*] entries. \
@@ -279,11 +279,11 @@ fn daemon_inner(root: PathBuf, tasks: Vec<String>, no_prebuild: bool) -> Result<
     let lock_path = state_dir.join("lock");
     let _lock = lock::PidLock::acquire(&lock_path)?;
 
-    let ws = Workspace::discover(&root)?;
+    let project = Project::discover(&root)?;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(daemon::Daemon::run(ws, tasks, state_dir, no_prebuild))
+    rt.block_on(daemon::Daemon::run(project, tasks, state_dir, no_prebuild))
 }
 
 fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
@@ -832,12 +832,12 @@ fn discover_env_keys(
     // tasks that reference it in env_from. If the Keychain index is stale,
     // directly-readable env_from keys are still real stored secrets and should
     // show up in `env list` / implicit `env send`.
-    let used_by: std::collections::BTreeMap<String, Vec<String>> = Workspace::discover(root)
+    let used_by: std::collections::BTreeMap<String, Vec<String>> = Project::discover(root)
         .ok()
-        .map(|ws| {
+        .map(|project| {
             let mut m: std::collections::BTreeMap<String, Vec<String>> =
                 std::collections::BTreeMap::new();
-            for (task_id, overlay) in &ws.sidecar.tasks {
+            for (task_id, overlay) in &project.sidecar.tasks {
                 for key in &overlay.env_from {
                     m.entry(key.clone()).or_default().push(task_id.clone());
                 }

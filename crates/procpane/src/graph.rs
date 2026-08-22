@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{parse_dep, DepRef, TaskDef, TurboJson};
 use crate::sidecar::TaskOverlay;
-use crate::workspace::Workspace;
+use crate::project::Project;
 
 #[derive(Debug, Clone)]
 pub struct TaskNode {
@@ -33,7 +33,7 @@ pub struct TaskGraph {
 impl TaskGraph {
     /// Build a graph for the user-requested tasks, expanding bare names across packages.
     /// `requested` is a list of either `task` (every package that has it) or `pkg#task`.
-    pub fn build(ws: &Workspace, requested: &[String]) -> Result<Self> {
+    pub fn build(project: &Project, requested: &[String]) -> Result<Self> {
         let mut graph: DiGraph<TaskNode, ()> = DiGraph::new();
         let mut by_id: BTreeMap<String, NodeIndex> = BTreeMap::new();
         let mut pending: Vec<(String, String)> = Vec::new(); // (pkg, task)
@@ -42,14 +42,14 @@ impl TaskGraph {
         for req in requested {
             if let Some((pkg, task)) = req.split_once('#') {
                 // Resolve short alias to canonical pkg name.
-                let canon = ws
+                let canon = project
                     .package(pkg)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| pkg.to_string());
                 pending.push((canon, task.to_string()));
             } else {
                 let mut matched = false;
-                for p in &ws.packages {
+                for p in &project.packages {
                     // Skip the workspace-root package on bare-name expansion.
                     // Root scripts in a Turborepo are typically aggregators
                     // (`turbo run dev -F @trip/next`) that would nest turbo
@@ -60,7 +60,7 @@ impl TaskGraph {
                     if p.is_root {
                         continue;
                     }
-                    if p.scripts.contains_key(req) || ws.turbo.task(req).is_some() {
+                    if p.scripts.contains_key(req) || project.turbo.task(req).is_some() {
                         if p.scripts.contains_key(req) {
                             pending.push((p.name.clone(), req.to_string()));
                             matched = true;
@@ -78,7 +78,7 @@ impl TaskGraph {
             if by_id.contains_key(&id) {
                 continue;
             }
-            let package = ws
+            let package = project
                 .package(&pkg)
                 .ok_or_else(|| anyhow!("unknown package: {pkg}"))?;
             let short_id = format!("{}#{}", package.short, task);
@@ -97,7 +97,7 @@ impl TaskGraph {
                 .turbo
                 .as_ref()
                 .and_then(lookup)
-                .or_else(|| lookup(&ws.turbo))
+                .or_else(|| lookup(&project.turbo))
                 .unwrap_or_default();
             let script = package.scripts.get(&task).cloned();
 
@@ -106,7 +106,7 @@ impl TaskGraph {
             for w in &def.with {
                 let (wp, wt) = match w.split_once('#') {
                     Some((p, t)) => {
-                        let canon = ws
+                        let canon = project
                             .package(p)
                             .map(|x| x.name.clone())
                             .unwrap_or_else(|| p.to_string());
@@ -128,7 +128,7 @@ impl TaskGraph {
                     DepRef::Topological(t) => {
                         // For every workspace dep of `pkg`, schedule `dep#t` if such pkg exists.
                         for d in &package.deps {
-                            if let Some(p) = ws.package(d) {
+                            if let Some(p) = project.package(d) {
                                 if p.scripts.contains_key(&t) {
                                     new_pending.push((p.name.clone(), t.clone()));
                                 }
@@ -148,7 +148,7 @@ impl TaskGraph {
 
             let canonical_id = format!("{}#{}", package.name, task);
             let short_overlay_id = format!("{}#{}", package.short, task);
-            let overlay = ws
+            let overlay = project
                 .sidecar
                 .overlay(&canonical_id, Some(&short_overlay_id))
                 .cloned()
@@ -184,13 +184,13 @@ impl TaskGraph {
                 let dep_targets: Vec<String> = match dep {
                     DepRef::Same(t) => vec![format!("{}#{}", node.package, t)],
                     DepRef::Explicit { package, task } => vec![format!("{package}#{task}")],
-                    DepRef::Topological(t) => ws
+                    DepRef::Topological(t) => project
                         .package(&node.package)
                         .map(|p| {
                             p.deps
                                 .iter()
                                 .filter_map(|d| {
-                                    ws.package(d).and_then(|wp| {
+                                    project.package(d).and_then(|wp| {
                                         if wp.scripts.contains_key(&t) {
                                             Some(format!("{}#{}", wp.name, t))
                                         } else {

@@ -18,7 +18,7 @@ pub struct Package {
     /// Per-package `turbo.json` (sibling to `package.json`). Overrides root for
     /// task entries that exist here; absent entries fall through to the root.
     pub turbo: Option<TurboJson>,
-    /// True when this is the workspace root package (lives at `workspace.root`).
+    /// True when this is the project's root package (lives at `Project::root`).
     /// Root scripts tend to be aggregators (`turbo run dev -F …`) that would
     /// nest turbo inside procpane, so bare-name task expansion skips them by
     /// convention — mirrors turbo's own rule that root tasks must be
@@ -26,8 +26,16 @@ pub struct Package {
     pub is_root: bool,
 }
 
+/// A registered repository: the thing that gets a tab, and the thing whose
+/// worktrees become workspaces. Named `Workspace` in procpane, where it meant
+/// "the turborepo root"; that name now belongs to a worktree and its
+/// environment, so the repo-level concept is a `Project`.
+///
+/// Note the two senses of "workspace" in this file: ours is a git worktree,
+/// while `pnpm-workspace.yaml` and `package.json#workspaces` are the JS
+/// ecosystem's term for package globs. The latter keep their names.
 #[derive(Debug)]
-pub struct Workspace {
+pub struct Project {
     pub root: PathBuf,
     pub turbo: TurboJson,
     pub sidecar: Sidecar,
@@ -76,7 +84,7 @@ struct PackageJson {
     peer_dependencies: BTreeMap<String, String>,
 }
 
-impl Workspace {
+impl Project {
     pub fn discover(start: &Path) -> Result<Self> {
         let root = find_root(start)?;
         let turbo_path = root.join("turbo.json");
