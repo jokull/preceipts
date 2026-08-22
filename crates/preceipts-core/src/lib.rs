@@ -1,0 +1,32 @@
+//! preceipts-core — everything the app needs per frame, in-process.
+//!
+//! Git reads, the diff display algorithm, syntax highlighting, and filesystem
+//! watching live here rather than behind the daemon socket: they are on the
+//! scroll path, and IPC is not something a fast diff can afford. The daemon
+//! owns what must outlive the window (processes, proxy, checks); this crate
+//! owns what must keep up with it.
+//!
+//! The display algorithm runs in three passes, each its own module:
+//!
+//! 1. [`linediff`] — libgit2 xdiff (patience + indent heuristic) into hunks
+//! 2. [`pairing`] — similarity-gated alignment of a block's removals/additions
+//! 3. [`intraline`] — word-level LCS inside each paired row
+//!
+//! [`segments`] then composes a row's syntax spans and changed ranges into
+//! render-ready runs.
+//!
+//! All of it is ported forward from `PreceiptsKit` (Swift) at fc3643e, tests
+//! included — those tests are the conformance suite for the rewrite, not new
+//! work. See decision 12 in PRD.md.
+
+pub mod intraline;
+pub mod linediff;
+pub mod model;
+pub mod pairing;
+pub mod segments;
+
+pub use intraline::word_diff;
+pub use linediff::{diff_rows, LineDiff};
+pub use model::{Changeset, DiffHunk, DiffRow, DiffScope, FileDiff, FileStatus, LineRef, RowKind};
+pub use pairing::{pair_block, similarity, Pairing};
+pub use segments::{line_segments, HighlightSpan, Segment};

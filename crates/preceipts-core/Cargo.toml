@@ -1,0 +1,10 @@
+[package]
+name = "preceipts-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Git reads, diff, highlighting, and watching — in-process, off the IPC path."
+
+[dependencies]
+git2 = "0.19"
