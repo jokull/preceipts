@@ -965,14 +965,34 @@ same sequence:
    and output streams into shared buffers so a flooding check cannot
    deadlock the parent. *Done — `c61196c`.*
 10. **Dissolve procpane** into `preceiptsd` per step 1, deleting the crate
-    rather than depending on it.
+    rather than depending on it. Every user-facing verb moves onto the
+    `preceipts` CLI; the daemon binary answers only to launchd and to
+    `preceipts up`. *Done — `86d1bd5`, `ddc8a28`.*
 11. **Delete the DNS subsystem.** `*.localhost` replaces `.test`
     everywhere — hostnames, certs, the manifest's `host` composition, and
     procpane's `/etc/hosts` management. Nothing installs, nothing
-    uninstalls. The privileged surface shrinks to the `:443` forwarder,
-    registered through `SMAppService` instead of `sudo`.
+    uninstalls. The privileged surface shrinks to the `:443` forwarder.
+    *Done — `a73a429`.* Registering it through `SMAppService` rather than
+    `sudo` waits on the signed bundle, and is the one part of this step
+    still ahead.
 12. **Classify env twice** — source and hashing — per Rung 3a, and teach
     `doctor` to reconcile the manifest against `turbo.json`.
+    *Done — `2cd6b8f`.*
 13. **Add the optional fidelity field** to the receipt wire format, with
     the byte-identical re-encode test as the guard that old receipts are
-    unaffected.
+    unaffected. *Done — `61294c7`.*
+
+What steps 9–13 leave for the next pass, in the order they block things:
+
+14. **One manifest.** `procpane.toml` and `preceipts.toml` are two schemas
+    for one job — the daemon reads the first, everything else reads the
+    second. Converging them is what makes the sandbox rungs real rather
+    than documented.
+15. **Boot a workspace's environment through the daemon**: per-workspace
+    ports, certs, and the URL registry, which is where the fabric stops
+    being a naming scheme and starts being a thing you can open.
+16. **The run lock and `sync`/`gc`**, the last engine behaviour not yet
+    carried across.
+17. **The signed bundle**: `SMAppService` registration, the shared Keychain
+    access group, notarization — and with them the retirement of the
+    open-ACL secrets workaround.

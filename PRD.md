@@ -525,6 +525,13 @@ user/agent action — `hud` reports staleness, it doesn't network.
     what it always meant; with it, it distinguishes "checks passed" from
     "checks passed with Stripe mocked and Turnstile disabled".
 
+    Implemented on branch `rust`: hostnames, the deleted DNS layer, the
+    dissolution, the env split with turbo reconciliation, and the fidelity
+    field. Still ahead of the decision: converging `procpane.toml` into
+    `preceipts.toml`, booting a workspace's environment through the daemon,
+    and the signed bundle that `SMAppService` registration and the shared
+    Keychain access group both wait on.
+
     Surveyed alongside: **ABox** (libkrun microVM per agent session on
     Hypervisor.framework). Adopted from it — libkrun as the rail that
     needs no installed container runtime, golden images cloned per
