@@ -8,6 +8,7 @@
 //! than bolted on later.
 
 mod branch;
+mod mcp;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -112,6 +113,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Serve the lab's instruments over MCP on stdio.
+    Mcp,
     /// Scaffold .preceipts/ in a repository that has none.
     Init,
     /// Remove a workspace's worktree and its registration.
@@ -169,6 +172,7 @@ fn run() -> Result<()> {
         ),
         Command::Log { json } => log(&path, json),
         Command::Doctor { json } => doctor(&path, json),
+        Command::Mcp => mcp::serve(&path),
         Command::Init => init(&path),
         Command::Remove { id } => remove(&path, id),
     }
