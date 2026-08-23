@@ -820,9 +820,21 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
 fn migrate(path: &Path, dry_run: bool, keychain: Option<&str>) -> Result<()> {
     use preceipts_core::migrate as convert;
 
-    let root = workspace::locate(path)
+    // The directory you are standing in wins when it has the old file.
+    //
+    // Resolving to the project root first is right for secrets, which belong
+    // to the repository — but it means a project nested inside another repo,
+    // or a plain directory that is not a repo at all, reports "no
+    // procpane.toml here" while staring straight at one. Convert what is in
+    // front of you; fall back to the project root when there is nothing.
+    let project_root = workspace::locate(path)
         .map(|ws| ws.project_root)
         .unwrap_or_else(|_| path.to_path_buf());
+    let root = if path.join("procpane.toml").is_file() {
+        path.to_path_buf()
+    } else {
+        project_root
+    };
     let mut did_something = false;
 
     match convert::from_procpane(&root)? {

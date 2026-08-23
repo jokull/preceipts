@@ -1,8 +1,8 @@
 #!/bin/bash
 # Lint tripwire. Warnings fail so drift never accumulates quietly.
 #
-# The whole workspace, since the dissolution: procpane used to arrive with
-# warnings it was not our place to fix, so this was scoped to our own crates
-# and carried a note to widen it later. There is no "our own crates" any more.
+# The whole workspace. This was once scoped to a subset, because a vendored
+# sibling project arrived with warnings it was not our place to fix. There is
+# no sibling and no subset now.
 set -euo pipefail
 cargo clippy --workspace --all-targets -- -D warnings

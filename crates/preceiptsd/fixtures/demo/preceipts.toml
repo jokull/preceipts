@@ -1,0 +1,14 @@
+# Converted from procpane.toml by `preceipts migrate`.
+#
+# Services, not task overlays: each entry below is a thing with an
+# address and a health check, and `preceipts up` boots them in order.
+
+[services."api"]
+task = "@demo/api#dev"
+health.log = "listening on"
+health.start_period = "500ms"
+
+[services."web"]
+task = "@demo/web#dev"
+health.log = "ready in"
+health.start_period = "500ms"

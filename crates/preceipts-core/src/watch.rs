@@ -186,8 +186,34 @@ mod tests {
         assert!(paths[0].ends_with("src/main.rs"));
     }
 
+    /// Wait for `predicate` to hold, or give up.
+    ///
+    /// Every assertion here is about a *thread* observing a filesystem event,
+    /// which is the one thing a test cannot make happen on demand: FSEvents
+    /// arms asynchronously, and on a loaded machine that takes longer than
+    /// any sleep you would be willing to write. Polling with a deadline is
+    /// the only honest shape.
+    fn within(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
     /// The behaviour that matters: an edit makes it busy, and quiet arrives
     /// only after the tree has actually held still.
+    ///
+    /// The watch thread is deliberately never joined. If the watcher somehow
+    /// never fires, joining would hang the whole test binary until something
+    /// outside kills it — which is exactly what happened before this was
+    /// written this way: the suite ran until `preceipts run` timed out at ten
+    /// minutes and reported a red `test` receipt with no failure in it. A
+    /// leaked thread dies with the process; a joined one takes the process
+    /// with it.
     #[test]
     fn an_edit_goes_busy_then_quiet() {
         let temp = tempfile::tempdir().unwrap();
@@ -198,29 +224,35 @@ mod tests {
         let seen = Arc::clone(&events);
         let writer_root = root.clone();
 
-        let handle = std::thread::spawn(move || {
+        std::thread::spawn(move || {
             watch(&root, Duration::from_millis(300), move |event| {
-                let mut seen = seen.lock().unwrap();
-                seen.push(event.clone());
+                seen.lock().unwrap().push(event.clone());
                 // Stop once we have seen a full cycle.
                 event != Event::Quiet
             })
         });
 
-        // Give the watcher a moment to arm, then edit.
-        std::thread::sleep(Duration::from_millis(400));
-        std::fs::write(writer_root.join("a.txt"), "two").unwrap();
+        // Keep touching the file until the watcher notices. One write after a
+        // fixed sleep assumes the watcher armed in time, and when it has not,
+        // the event is simply lost and nothing ever happens.
+        let saw_busy = within(Duration::from_secs(20), || {
+            let _ = std::fs::write(writer_root.join("a.txt"), "two");
+            events.lock().unwrap().contains(&Event::Busy)
+        });
+        assert!(saw_busy, "the watcher never reported the edit");
 
-        handle
-            .join()
-            .expect("watch thread")
-            .expect("watch runs cleanly");
+        // Now stop touching it, and quiet must follow on its own.
+        let saw_quiet = within(Duration::from_secs(20), || {
+            events.lock().unwrap().contains(&Event::Quiet)
+        });
+        assert!(saw_quiet, "the tree went still but never went quiet");
 
         let events = events.lock().unwrap();
+        assert_eq!(events[0], Event::Busy, "busy comes first: {events:?}");
         assert_eq!(
-            *events,
-            vec![Event::Busy, Event::Quiet],
-            "an edit goes busy, then quiet once"
+            events.last(),
+            Some(&Event::Quiet),
+            "and quiet ends the cycle: {events:?}"
         );
     }
 
@@ -232,26 +264,21 @@ mod tests {
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&events);
-        let stop = Arc::new(Mutex::new(false));
-        let stopper = Arc::clone(&stop);
 
-        let handle = std::thread::spawn(move || {
+        // Same reason as above: never joined.
+        std::thread::spawn(move || {
             watch(&root, Duration::from_millis(100), move |event| {
                 seen.lock().unwrap().push(event);
-                !*stopper.lock().unwrap()
+                true
             })
         });
 
-        std::thread::sleep(Duration::from_millis(500));
-        *stop.lock().unwrap() = true;
-        // Nudge the watcher so its callback runs and it notices the stop flag.
-        std::fs::write(temp.path().join("b.txt"), "x").unwrap();
-        let _ = handle.join();
-
-        let events = events.lock().unwrap();
+        // A tree nobody touches, for well past the quiet threshold.
+        std::thread::sleep(Duration::from_millis(600));
         assert!(
-            !events.contains(&Event::Quiet) || events.first() == Some(&Event::Busy),
-            "quiet is never the first thing reported: {events:?}"
+            events.lock().unwrap().is_empty(),
+            "a watch that starts on a still tree has nothing to report: {:?}",
+            events.lock().unwrap()
         );
     }
 }
