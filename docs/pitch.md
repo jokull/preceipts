@@ -19,7 +19,7 @@ whatever you like.
 
 **One tab per project.** Type what you want done. You get a git worktree,
 a branch named from what you typed, a dev environment booted and
-healthchecked, and real URLs — `api.fix-checkout.trip.test`, not a port
+healthchecked, and real URLs — `api.fix-checkout.trip.localhost`, not a port
 you have to look up. The prompt sticks to the workspace, so a list of
 eight worktrees is still readable next Tuesday.
 

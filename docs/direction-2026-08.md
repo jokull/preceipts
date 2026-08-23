@@ -4,6 +4,13 @@
 Stack decided by the user: Rust + GPUI, procpane absorbed. This is the
 architecture and the north star, not a cost debate.*
 
+*Amended 2026-08-23 after four user directives: survey ABox; **dissolve**
+procpane rather than depend on it; solve subdomain routing the way
+OrbStack does; and decide the fidelity question. The DNS design changed
+materially — see macOS alignment — because the mechanism it rested on is
+broken on macOS 26 and the replacement turned out to require no mechanism
+at all.*
+
 ## North star
 
 **preceipts is the workbench around AI coding. It never does the coding.**
@@ -164,6 +171,16 @@ intraline, and the raw-C UTF-8 tree-sitter integration all evolved past
 it. Port forward from Swift with the 27 XCTests as the conformance suite,
 and mine the old Rust only for gix idioms.
 
+**Absorption means dissolution, not vendoring.** `crates/procpane` does
+not survive as a crate or a binary, and `preceipts-core` does not grow a
+process supervisor. Core's charter is the frame path — git, diff,
+highlight, watch, schema — and PTY supervision has no business there. The
+jobs move to `preceiptsd`: process supervision, the healthcheck graph, the
+port allocator, the TLS proxy and CA, Keychain secrets, the URL registry.
+The dependency edge from procpane to core disappears because there is no
+second crate left to have one. Three artifacts remain: the `.app`, the
+`preceipts` CLI, and `preceiptsd`.
+
 **The engine's last polyglot seam.** `preceipts-engine` (TS/Bun, 3.3k LOC)
 splits: receipt *reads* — status, log, hud — are gix reads of notes and
 belong in core, in-process, no subprocess spawn per refresh. Receipt
@@ -195,18 +212,60 @@ logout, restarts on crash, and stays inspectable with the tools the OS
 already ships. It also makes "processes outlive the window" a system
 guarantee instead of an implementation detail.
 
-**`/etc/hosts` cannot survive per-workspace subdomains.** `pretty_urls.rs`
-says it outright: hosts has no wildcards, so it writes explicit entries
-for the hostnames declared in `procpane.toml`. That works when hostnames
-are static and enumerable. It breaks the moment hostnames are
-`api.<workspace>.<project>.test` and workspaces are created on demand —
-you would be rewriting a root-owned file on every worktree add. The
-macOS-native answer is `/etc/resolver/test`: a resolver file pointing at
-a tiny DNS responder inside the daemon on loopback, which answers
-anything under `.test` with 127.0.0.1. One privileged install at setup,
-never touched again, and hostnames become free. Pair it with per-workspace
-leaf certs from the existing CA (`ca.rs::sign_leaf` already takes a
-`dns_names` list, so this is a caller change, not new machinery).
+**Subdomain routing needs no DNS at all — measured, not assumed.** This
+section previously specified `/etc/resolver/test` plus a DNS responder in
+the daemon. Two findings killed that design and replaced it with nothing,
+which is the best outcome a subsystem can have.
+
+*Finding one: the mechanism is broken on the OS we target.* macOS 26 has
+mDNSResponder intercept queries for every TLD absent from the IANA root
+zone — `.test`, `.internal`, `.lan`, `.home.arpa` — and answer them as
+multicast DNS, never consulting the unicast nameserver named in
+`/etc/resolver/`. It returns a cached "No Such Record" with a TTL around
+108,000 seconds. The dnsmasq-plus-resolver-file recipe every local dev
+tool has used for a decade does not work here, and `.test` was exactly
+the TLD we had chosen.
+
+*Finding two: `*.localhost` already resolves, system-wide, unconfigured.*
+Probed on macOS 26.5.2 (Darwin 25F84):
+
+```
+dscacheutil -q host -a name deep.sub.localhost   → 127.0.0.1
+curl http://api.fix-checkout.preceipts.localhost:8731/  → 200, 127.0.0.1
+curl http://a.b.c.d.e.localhost:8731/            → 200
+```
+
+Arbitrary depth, through `getaddrinfo` itself rather than a browser
+special case — so curl, Node, Rust, Safari, and every subprocess an agent
+spawns agree. **So the scheme is `<service>.<workspace>.<project>.localhost`,
+and the DNS layer is deleted**: no responder, no resolver file, no
+`/etc/hosts` block, nothing to install and nothing to leave behind when
+the app is dragged to the trash. It is also strictly better than
+OrbStack's `.orb.local`, which needs a running VM, a resolver hook, and
+breaks when `*.local` is claimed by network DNS.
+
+Two constraints that survive and must stay written down:
+
+- **A wildcard cert matches one label.** `*.localhost` does not cover
+  `api.ws.proj.localhost`. Sign a leaf with concrete SANs at boot —
+  `ca.rs::sign_leaf` already takes a `dns_names` list — and never promise
+  a single wildcard anywhere in the docs.
+- **Inside a container or VM, `*.localhost` is the guest's loopback.**
+  These names are correct from the host browser and host-side agents. A
+  containerised service reaching a sibling needs a different address
+  injected. That is a rule for env injection, not for naming.
+
+**Only the `:443` bind still needs privilege.** Ports below 1024 need
+root, and that is now the entire privileged surface. The shape procpane
+already had is right: an unprivileged daemon owning the TLS/SNI proxy on
+`:8443`, and a root-owned forwarder on `127.0.0.1:443` that knows nothing
+about repos, certs, or hostnames and only copies bytes. What a signed app
+changes is the installation: register it with `SMAppService.daemon`
+instead of `sudo`-writing a plist into `/Library/LaunchDaemons`. The
+helper ships inside the app bundle, the user approves once in System
+Settings → Login Items, and uninstalling is deleting the app. Keeping it a
+pure byte-forwarder with no XPC surface also avoids the SMAppService XPC
+failures currently being reported on macOS 26.
 
 **Everything else is table stakes:** FSEvents via `notify`, `NSWorkspace`
 for opening URLs and revealing in Finder, user notifications when a check
@@ -226,12 +285,13 @@ system integration above, but it should be a decision, not a surprise.
 Trip's sandbox is the heavy reference — Docker, seeds, provider mocks.
 The lightweight version drops the container and keeps the discipline.
 
-- **Hostnames carry the workspace.** `api.fix-checkout.trip.test`.
-  *Design detail with teeth:* a wildcard cert matches one label, so
-  `*.test` does not cover `api.fix-checkout.test`. Issue a per-workspace
-  cert from the local CA at boot (rcgen, milliseconds) rather than
-  chasing a mega-SAN cert. One CA install, one Touch ID, ever — the
-  promise procpane already makes.
+- **Hostnames carry the workspace.** `api.fix-checkout.trip.localhost`,
+  resolved by the system with no configuration at all (see macOS
+  alignment). *Design detail with teeth:* a wildcard cert matches one
+  label, so `*.localhost` does not cover `api.fix-checkout.localhost`.
+  Issue a per-workspace leaf from the local CA at boot (rcgen,
+  milliseconds) rather than chasing a mega-SAN cert. One CA install, one
+  Touch ID, ever — the promise procpane already makes.
 - **The rails exist.** procpane's IDEAS.md already proposes a service URL
   registry (`${tasks.api.url}` injected when a dep goes healthy) and
   profiles. A workspace label is one more dimension on that registry, and
@@ -261,9 +321,9 @@ Conflating them is how a lightweight tool becomes a slow one.
 
 ### The seam that makes the runtime pluggable
 
-We already committed to a URL fabric — a DNS responder answering `.test`
-on loopback, per-workspace leaf certs, a TLS proxy in the daemon. That
-fabric does not care what is listening on the other end. Which gives the
+We already committed to a URL fabric — `*.localhost` names the system
+resolves for free, per-workspace leaf certs, a TLS proxy in the daemon.
+That fabric does not care what is listening on the other end. Which gives the
 whole architecture its cleanest abstraction:
 
 > **A service is a thing with an address and a healthcheck.**
@@ -285,8 +345,28 @@ Rust bindings for Apple's virtualization stack exist — `virtualization-rs`,
 a VMM *plus* OCI image handling, filesystem sharing, networking, DNS, and
 lifecycle management: years of work, and the least differentiated code in
 the product. Everyone shipping agent sandboxes has isolation; nobody has
-`api.fix-checkout.trip.test` with an HTTP transcript and a tree-keyed
+`api.fix-checkout.trip.localhost` with an HTTP transcript and a tree-keyed
 receipt. Build the fabric, delegate the box.
+
+**ABox is the proof of how far the other half has already gone.** It boots
+each agent session as a libkrun microVM on Hypervisor.framework — Alpine
+guest, vsock control channel, model-API egress allowlist — in Go, on
+Apple Silicon, today. Three things are worth taking from it and one is
+worth refusing.
+
+Take: **libkrun as the no-dependency rail**, the answer to "what runs
+`image = "postgres:17"` on a laptop with neither Apple `container` nor
+OrbStack installed"; the **golden image cloned per session with APFS
+copy-on-write**, which is exactly the shape "a cheap environment per
+worktree" wants and makes the clone free; and its **honesty label** — the
+README says outright *"do not describe this build as verified isolation"*
+and notes the egress allowlist is enforced in a userspace dialer rather
+than at the VMM. That is the same instinct as a receipt: a claim is worth
+only its evidence, and our fidelity vocabulary exists to say so in
+schema rather than in a footnote.
+
+Refuse: the harness. ABox owns the agent loop, the model calls, and tool
+dispatch. That is our stated anti-goal, and the line does not move.
 
 **Delegate to, in order of fit:**
 
@@ -328,7 +408,8 @@ for deliberately rather than discovering later.
 
 ### Prior art to stay honest about
 
-`macbox` (agents in a Seatbelt sandbox, worktree per agent), Dagger's
+ABox (libkrun microVM per session, agent loop inside), `macbox` (agents in
+a Seatbelt sandbox, worktree per agent), Dagger's
 `container-use` (containerised sandbox + worktree per agent), Melty Labs'
 `conductor` — which trip already has a `conductor.json` for — and a stack
 of Seatbelt profile projects. This is a populated field. What none of them
@@ -390,7 +471,7 @@ env = ["@shared", "STRIPE_*"]
 
 **Hostnames are labels.** trip writes `hostname = "api.trip.test"` by
 hand. Once workspaces exist that is wrong by construction — the fabric
-composes `api.<workspace>.<project>.test` from `host = "api"`. Authors
+composes `api.<workspace>.<project>.localhost` from `host = "api"`. Authors
 never spell a domain again. trip's Superset mode already proves the
 model with `https://admin.<workspace>.trip.local`; this makes it native
 instead of an OrbStack label plus an in-container Host-header proxy.
@@ -422,6 +503,48 @@ the worktree are masked unless named, values come from the Keychain by
 reference, per-service allowlists stay (a stray `postinstall` must not see
 your Stripe key), and a failed assertion stops the boot rather than
 warning. Groups plus globs turn a hundred lines into a dozen.
+
+### Rung 3a — the same catalog answers the cache question
+
+Every environment value has two independent properties, and monorepo
+tooling has already formalised the second one. Turborepo splits them:
+`env` and `globalEnv` are **hashed into the task key**, so changing one
+misses the cache everywhere; `passThroughEnv` and `globalPassThroughEnv`
+reach the process but **never touch the hash**; `envMode = "strict"`
+filters everything undeclared out of the task's environment entirely.
+
+Map that onto what the manifest already knows:
+
+| Property | Question | Values |
+|---|---|---|
+| Source | where does it come from? | keychain, dotenv, captured, literal |
+| Hashing | does changing it change the answer? | `hashed` / `passthrough` |
+
+The two are not independent in practice, and the dependency runs one way:
+**a secret must never be hashed.** Put `STRIPE_SECRET_KEY` in turbo's
+`env` and every developer misses cache forever, because every developer's
+key differs — and the value becomes part of a key travelling to a shared
+remote cache. Conversely, config that genuinely changes behaviour but is
+declared nowhere produces the silent wrong cache *hit*, which is the
+worse bug because it is green.
+
+```toml
+[env.STRIPE_SECRET_KEY]
+from = "keychain"
+hash = false                   # a secret in the hash busts every machine
+require_prefix = "sk_test_"
+
+[env.NEXT_PUBLIC_API_URL]
+hash = true                    # changes behaviour, must bust the cache
+```
+
+`doctor` gains a class of finding no other tool can produce, because no
+other tool holds both halves: *"`STRIPE_SECRET_KEY` is in your
+`turbo.json` `env` — it is a Keychain secret, so it busts your remote
+cache on every machine; it belongs in `passThroughEnv`."* And the
+declaration is what a receipt records, closing the loop with Rung 4c: the
+manifest classifies every input, and the receipt states which
+classification was in force when the checks passed.
 
 ### Rung 3b — services that mint env for their dependents
 
@@ -506,13 +629,24 @@ adopt it verbatim: `local-real`, `local-simulated`, `mocked`, `disabled`,
 `remote-required`. `status` reports the map so an agent cannot over-claim
 — Stripe.js is shimmed, so a browse is route proof and not payment proof.
 
-**This is where sandbox and receipts finally meet.** A receipt should
-record the fidelity map of the environment it was minted in. "These checks
-passed" and "these checks passed with Stripe mocked and Turnstile
-disabled" are different claims, and only one of them is honest. Tree hash
-plus fidelity map is a materially stronger proof than either half — and
-it is a thing neither a diff viewer nor a process runner could ever
-produce.
+**This is where sandbox and receipts finally meet.** A receipt today says
+*"check `test` passed against tree `abc123`"* and says nothing about what
+the test was talking to. Postgres or a stub, real test keys or a mock that
+says yes to everything: same tree, same green, wildly different amounts of
+proof. "These checks passed" and "these checks passed with Stripe mocked
+and Turnstile disabled" are different claims, and only one of them is
+honest.
+
+**Decision: fidelity goes into the receipt as an optional field.**
+Optional is load-bearing rather than timid — the receipt suite pins real
+receipts this repository minted in July 2026 and asserts they re-encode
+byte-identically, and an additive-optional field is what keeps that
+contract intact while the format grows. A receipt with no fidelity field
+means what it has always meant; a receipt with one means more.
+
+Tree hash plus fidelity map plus the env classification of Rung 3a is a
+materially stronger proof than any of them alone — and it is a thing
+neither a diff viewer nor a process runner could ever produce.
 
 ### Rung 4d — bundles, radii, actions
 
@@ -748,7 +882,14 @@ the word if the Actions/Vercel rollup should survive.
 >     checks. Everything domain-specific is a declared `[actions.*]` verb,
 >     surfaced automatically as a CLI command, an MCP tool, and a panel
 >     button. **Receipts record the fidelity map of the environment they
->     were minted in** — tree hash plus fidelity is the honest proof.
+>     were minted in**, as an *optional* field so the wire format stays
+>     backward-compatible with receipts already minted — tree hash plus
+>     fidelity is the honest proof. Env carries a second, orthogonal
+>     declaration: whether a value is **hashed** into a build-cache key or
+>     merely **passed through**, mirroring Turborepo's `env` versus
+>     `passThroughEnv`, so `doctor` can catch both a secret poisoning a
+>     shared remote cache and behaviour-changing config that silently
+>     hits one.
 >     Benchmark: trip's sandbox must be expressible as one
 >     `preceipts.toml` plus fixtures, with Docker optional.
 >     Scope: tab per project, worktree workspaces carrying a genesis
@@ -761,8 +902,10 @@ the word if the Actions/Vercel rollup should survive.
 >     watch, `preceiptsd` for processes, healthchecks, TLS proxy, secrets,
 >     and check runs, `preceipts` CLI on the same socket. The TS/Bun
 >     engine is retired: receipt reads move into core, writes into the
->     daemon. procpane's `Workspace` is renamed `Project`; every keyed
->     resource gains a workspace dimension. Algorithms port forward from
+>     daemon. **procpane is dissolved rather than vendored**: the crate and
+>     its binary are deleted and its jobs move into `preceiptsd`, so no
+>     dependency edge between them survives; its `Workspace` becomes
+>     `Project` and every keyed resource gains a workspace dimension. Algorithms port forward from
 >     `PreceiptsKit` (27 XCTests as the conformance suite), not backward
 >     from the deleted Rust core. The workspace is a **laboratory**: every
 >     instrument the UI shows (logs, health, URLs, HTTP transcript, diff,
@@ -773,10 +916,8 @@ the word if the Actions/Vercel rollup should survive.
 >     lab with no configuration. macOS integration is first-class:
 >     data-protection Keychain with a shared access group across signed
 >     app and daemon (retiring procpane's open-ACL workaround),
->     `SMAppService` LaunchAgent, `/etc/resolver/test` + an in-daemon DNS
->     responder replacing `/etc/hosts` (which cannot express per-workspace
->     subdomains), per-workspace leaf certs, Touch ID for secret reveal,
->     notarized bundle. Accepted cost: GPUI draws its own widgets, so
+>     `SMAppService` LaunchAgent, per-workspace leaf certs, Touch ID for
+>     secret reveal, notarized bundle. Accepted cost: GPUI draws its own widgets, so
 >     native feel — text selection, IME, VoiceOver, scroll physics — is
 >     built and budgeted rather than inherited from AppKit.
 
@@ -787,7 +928,9 @@ The order that keeps a working app at every step:
 0. Delete `swift/` and `engine/` in one honest commit, the way the Rust
    workspace went at `711c348`. Same repo, continuous PRD, history keeps
    the reference material.
-1. Cargo workspace; procpane moves in under its new `Project` naming.
+1. Cargo workspace; procpane moves in under its new `Project` naming,
+   then dissolves: crate and binary deleted, jobs relocated to
+   `preceiptsd`, no dependency edge left between them.
 2. `preceipts-core`: port PreceiptsKit forward, tests first — diff and
    highlight conformance before any UI exists.
 3. GPUI shell: one project, one workspace, the diff surface. This is the
@@ -804,3 +947,28 @@ The order that keeps a working app at every step:
    last because it needs everything above. Build the observation path
    first and ship it complete; lifecycle adapters come after, as
    precision on top of something that already works alone.
+
+### Amendments — 2026-08-23
+
+Steps that were specified wrongly, or not at all, and are now part of the
+same sequence:
+
+9. **Bound every child process.** The TypeScript engine timed out checks
+   and prepare steps; the port dropped it, so a check that never returned
+   hung `run` and therefore `watch`. Restored with the engine's semantics
+   plus two fixes it did not have: the child runs in its own process group
+   so a killed check cannot leave `cargo test` alive holding the pipes,
+   and output streams into shared buffers so a flooding check cannot
+   deadlock the parent. *Done — `c61196c`.*
+10. **Dissolve procpane** into `preceiptsd` per step 1, deleting the crate
+    rather than depending on it.
+11. **Delete the DNS subsystem.** `*.localhost` replaces `.test`
+    everywhere — hostnames, certs, the manifest's `host` composition, and
+    procpane's `/etc/hosts` management. Nothing installs, nothing
+    uninstalls. The privileged surface shrinks to the `:443` forwarder,
+    registered through `SMAppService` instead of `sudo`.
+12. **Classify env twice** — source and hashing — per Rung 3a, and teach
+    `doctor` to reconcile the manifest against `turbo.json`.
+13. **Add the optional fidelity field** to the receipt wire format, with
+    the byte-identical re-encode test as the guard that old receipts are
+    unaffected.

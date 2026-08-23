@@ -115,9 +115,11 @@ One cargo workspace:
   orchestration, PTY supervision with queryable ring buffers, a local CA and TLS
   proxy, Keychain secrets scoped per project.
 
-Still ahead: per-workspace environments actually booting through the daemon, the
-DNS responder and per-workspace certs, the HTTP transcript, the env panel and
-project tabs, and `sync`/`gc`.
+Still ahead: dissolving `procpane` into `preceiptsd`, per-workspace environments
+actually booting through it, per-workspace certs behind the `:443` forwarder, the
+HTTP transcript, the env panel and project tabs, and `sync`/`gc`. Service URLs are
+`<service>.<workspace>.<project>.localhost` — the system resolves `*.localhost` to
+loopback at any depth, so there is no DNS to install (decision 13).
 
 ## Build
 

@@ -464,11 +464,70 @@ user/agent action — `hud` reports staleness, it doesn't network.
     lab with no configuration. macOS integration is first-class:
     data-protection Keychain with a shared access group across signed
     app and daemon (retiring procpane's open-ACL workaround),
-    `SMAppService` LaunchAgent, `/etc/resolver/test` + an in-daemon DNS
-    responder replacing `/etc/hosts` (which cannot express per-workspace
-    subdomains), per-workspace leaf certs, Touch ID for secret reveal,
-    notarized bundle. Accepted cost: GPUI draws its own widgets, so
+    `SMAppService` LaunchAgent, per-workspace leaf certs, Touch ID for
+    secret reveal, notarized bundle. *(The DNS clause of this decision was
+    superseded by decision 13.)* Accepted cost: GPUI draws its own widgets, so
     native feel — text selection, IME, VoiceOver, scroll physics — is
     built and budgeted rather than inherited from AppKit.
     Full design, and the sequencing it was built to,
     in docs/direction-2026-08.md.
+
+13. **The environment layer, decided by measurement** (2026-08-23, four
+    user directives). Four things settle here, and the first one deletes
+    a subsystem.
+
+    **Subdomain routing needs no DNS.** Decision 12 specified
+    `/etc/resolver/test` plus a DNS responder in the daemon, inheriting
+    procpane's `/etc/hosts` problem. Two findings retired that design.
+    macOS 26 has mDNSResponder intercept every TLD absent from the IANA
+    root zone — `.test`, `.internal`, `.lan`, `.home.arpa` — and answer
+    it as multicast DNS, never consulting the nameserver named in
+    `/etc/resolver/`; the recipe every local dev tool has used for a
+    decade does not work on the OS we target. And `*.localhost` already
+    resolves to loopback at arbitrary depth through `getaddrinfo` itself,
+    verified on macOS 26.5.2 (`deep.sub.localhost`, and a live HTTP
+    request to `api.fix-checkout.preceipts.localhost`) — so curl, Node,
+    Rust, Safari, and every subprocess an agent spawns agree without a
+    line of configuration. **The scheme becomes
+    `<service>.<workspace>.<project>.localhost` and the DNS layer is
+    deleted**: no responder, no resolver file, no `/etc/hosts` block,
+    nothing installed and nothing left behind. Two constraints stay
+    written down: a wildcard cert matches one label, so leaves carry
+    concrete SANs; and inside a container `*.localhost` is the guest's
+    loopback, so cross-service addresses are injected, not resolved. The
+    only privileged surface left is the `:443` bind — a root-owned byte
+    forwarder in front of the unprivileged TLS proxy on `:8443`,
+    registered with `SMAppService.daemon` from inside the signed bundle
+    rather than by `sudo`-writing a plist, and deliberately given no XPC
+    surface.
+
+    **procpane is dissolved, not vendored.** The crate and its binary are
+    deleted; its jobs move into `preceiptsd` (process supervision,
+    healthcheck graph, port allocator, TLS proxy, local CA, Keychain
+    secrets, URL registry). `preceipts-core` does not grow a process
+    supervisor — its charter is the frame path. No dependency edge
+    between them survives because there is no second crate.
+
+    **Env carries two orthogonal declarations**: where a value comes from
+    (keychain, dotenv, captured, literal) and whether it is **hashed**
+    into a build-cache key or merely **passed through** — mirroring
+    Turborepo's `env`/`globalEnv` versus `passThroughEnv`. A secret must
+    never be hashed: it busts a shared remote cache on every machine and
+    puts its value in a key that travels. `doctor` reconciles the
+    manifest against `turbo.json` and can report both failure modes —
+    the secret poisoning the cache, and behaviour-changing config
+    declared nowhere that silently produces a wrong cache *hit*.
+
+    **Fidelity is an optional receipt field.** Optional is the load-
+    bearing word: the receipt suite pins real receipts this repo minted
+    in July 2026 and asserts byte-identical re-encoding, so the format
+    grows additively or not at all. A receipt without the field means
+    what it always meant; with it, it distinguishes "checks passed" from
+    "checks passed with Stripe mocked and Turnstile disabled".
+
+    Surveyed alongside: **ABox** (libkrun microVM per agent session on
+    Hypervisor.framework). Adopted from it — libkrun as the rail that
+    needs no installed container runtime, golden images cloned per
+    workspace with APFS copy-on-write, and its refusal to call unproven
+    isolation verified. Refused — the harness itself, which owns the
+    agent loop and is this project's stated anti-goal.
