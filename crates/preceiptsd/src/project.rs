@@ -498,3 +498,37 @@ mod block_tests {
         assert_eq!(block.port(BLOCK_SIZE), None, "the block has an end");
     }
 }
+
+#[cfg(test)]
+mod offset_tests {
+    use std::collections::BTreeMap;
+
+    /// The promise: a service keeps its port as long as the manifest does.
+    ///
+    /// Offsets are assigned by iterating hostnames in sorted order rather
+    /// than in graph order, because graph order follows a work stack seeded
+    /// by however `up` was invoked. This pins the rule that makes the promise
+    /// true — with one service it is trivially satisfied and proves nothing.
+    #[test]
+    fn service_offsets_do_not_depend_on_the_order_tasks_were_requested() {
+        let assign = |ids: &[&str]| -> Vec<(String, u16)> {
+            // The daemon keys hostnames in a BTreeMap; that is the ordering
+            // under test, so the map is what the test builds.
+            let hostnames: BTreeMap<String, String> = ids
+                .iter()
+                .map(|id| (id.to_string(), format!("{id}.localhost")))
+                .collect();
+            hostnames
+                .keys()
+                .enumerate()
+                .map(|(offset, id)| (id.clone(), 21000 + offset as u16 + 1))
+                .collect()
+        };
+
+        let one = assign(&["preceipts#api", "preceipts#db", "preceipts#web"]);
+        let another = assign(&["preceipts#web", "preceipts#api", "preceipts#db"]);
+        assert_eq!(one, another, "the request order must not move a port");
+        assert_eq!(one[0], ("preceipts#api".to_string(), 21001));
+        assert_eq!(one[2], ("preceipts#web".to_string(), 21003));
+    }
+}

@@ -113,6 +113,15 @@ impl Workspace {
     /// `id` alone is not enough for anything shared across projects: two
     /// repositories both have a workspace called `main`, and a port
     /// reservation keyed on that would hand them the same block.
+    ///
+    /// **The project part is the directory name, not the path**, so
+    /// `~/Code/app` and `~/work/app` do share a key — and therefore a port
+    /// block, which collides exactly when both run at once. That is a real
+    /// cost, accepted for a real benefit: a key derived from the path would
+    /// differ on every machine, and the allocation is deterministic precisely
+    /// so a workspace lands on the same ports for everyone. Two projects with
+    /// the same directory name is a rarer problem than a team whose ports
+    /// disagree, and it is fixable by renaming a directory.
     pub fn key(&self) -> String {
         format!("{}/{}", self.project_name(), self.id)
     }

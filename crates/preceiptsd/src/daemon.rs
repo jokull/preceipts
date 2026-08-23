@@ -168,24 +168,33 @@ impl Daemon {
         let workspace = preceipts_core::workspace::locate(&project.root).ok();
         let block = reserve_block(workspace.as_ref());
         let mut allocated_ports: BTreeMap<String, u16> = BTreeMap::new();
-        let mut next_offset: u16 = 1;
         for idx in &persistent_indices {
             let n = &graph.graph[*idx];
             let id = n.id();
             if let Some(h) = &n.overlay.hostname {
                 hostnames.insert(id.clone(), workspace_host(h, &project.root));
-                let port = match block.and_then(|b| b.port(next_offset)) {
-                    Some(port) => {
-                        next_offset += 1;
-                        port
-                    }
-                    None => proxy::allocate_port()?,
-                };
-                allocated_ports.insert(id.clone(), port);
             }
             stop_signals.insert(id.clone(), n.overlay.stop_signal());
             stop_grace.insert(id.clone(), n.overlay.stop_grace());
             notes.insert(id, Mutex::new(Vec::new()));
+        }
+
+        // Offsets are assigned in *sorted* task order, not graph order.
+        //
+        // `persistent_indices` comes out of graph construction, whose order
+        // follows a work stack seeded by the request — so it depends on how
+        // you invoked `up`, and on the shape of the dependency walk. Assigning
+        // offsets from it would mean `api` and `db` could swap ports between
+        // boots, which breaks the one promise the blocks exist to make. With
+        // one service you would never notice; with three it rots quietly.
+        //
+        // `hostnames` is a BTreeMap, so iterating it is that sorted order.
+        for (offset, id) in hostnames.keys().enumerate() {
+            let port = match block.and_then(|b| b.port(offset as u16 + 1)) {
+                Some(port) => port,
+                None => proxy::allocate_port()?,
+            };
+            allocated_ports.insert(id.clone(), port);
         }
 
         // Offset 0 of the block is the workspace's own TLS proxy, so two

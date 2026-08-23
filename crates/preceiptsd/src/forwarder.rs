@@ -55,8 +55,12 @@ pub fn is_installed() -> bool {
     Path::new(PROXY_PLIST_PATH).is_file()
 }
 
-/// Is procpane's dead helper still registered? Only `uninstall` and `status`
-/// care — it is something to clean up, never something to route through.
+/// Is procpane's helper still registered? Only `uninstall` and `status` care.
+///
+/// It may well still be running — procpane installs to `~/.cargo/bin`, so the
+/// binary its plist names can outlive the decision to stop shipping it. That
+/// changes nothing about routing: it forwards to *its* proxy, not ours, so it
+/// is something to clean up rather than something to route through.
 pub fn legacy_is_installed() -> bool {
     Path::new(LEGACY_PLIST_PATH).is_file()
 }

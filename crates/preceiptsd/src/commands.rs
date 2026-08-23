@@ -671,8 +671,9 @@ pub fn trust_cmd(op: TrustOp) -> Result<()> {
             }
             if forwarder::legacy_is_installed() {
                 println!(
-                    "! a dead :443 helper from procpane is still registered; \
-                     `preceipts trust uninstall` removes it"
+                    "! a :443 helper from procpane is still registered — it may \
+                     still be running, and either way `preceipts trust uninstall` \
+                     removes it"
                 );
             }
             // Hostnames themselves need nothing installed: macOS resolves
