@@ -23,6 +23,7 @@ use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use preceipts_core::checks::{CheckState, Status};
 use preceipts_core::workspace::Workspace;
 use preceipts_core::Changeset;
+use std::collections::HashMap;
 
 /// How the verdict chip is painted. Not green covers two different facts, and
 /// collapsing them is the one thing this HUD must not do: a check that failed
@@ -90,7 +91,7 @@ impl Cockpit {
         )
     }
 
-    fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, cx: &Context<Self>) -> (impl IntoElement, Vec<impl IntoElement>) {
         let count = self.workspaces.len();
         let items = self.workspaces.iter().map(|workspace| {
             let branch = workspace
@@ -117,49 +118,116 @@ impl Cockpit {
 
         // The file list. A 202-file changeset scrolled as one stream is a
         // stream you get lost in: this says which file you are inside, and
-        // jumps to any other. The sidebar was mostly empty space before, which
-        // is a poor trade for 240 pixels.
+        // jumps to any other on click.
+        //
+        // Hand-built rows rather than `SidebarMenuItem`s. That component is
+        // ~36px tall and shows the label as a plain string, which for 202
+        // files means fifteen of them on screen and no way to colour the
+        // status letter. Density is the whole point of a jump list.
         let surface = self.surface.read(cx);
         let current = surface.current_file();
-        let files: Vec<_> = surface
-            .file_entries()
-            .into_iter()
+        let entries = surface.file_entries();
+
+        // A basename alone is ambiguous — this changeset has two `version.env`
+        // and several `SKILL.md`. Only the ambiguous ones pay for the parent
+        // directory; the rest stay short.
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for entry in &entries {
+            *seen.entry(basename(&entry.path)).or_default() += 1;
+        }
+
+        let files: Vec<_> = entries
+            .iter()
             .enumerate()
             .map(|(index, entry)| {
+                // The filename must never be the part that gets clipped, so
+                // it is its own span that cannot shrink; the parent directory
+                // sits beside it, dimmed, and absorbs the truncation. The
+                // parent only appears when the basename is ambiguous.
+                let name = basename(&entry.path);
+                let parent = if seen.get(name).copied().unwrap_or(0) > 1 {
+                    entry
+                        .path
+                        .rsplit_once('/')
+                        .map(|(parent, _)| elide(basename(parent)))
+                } else {
+                    None
+                };
                 let handle = self.surface.clone();
-                // The tail of a path is what identifies it in a narrow column;
-                // the full path rides in the tooltip-free title attribute of
-                // the row's own text instead of wrapping.
-                let name = entry
-                    .path
-                    .rsplit_once('/')
-                    .map(|(_, name)| name.to_string())
-                    .unwrap_or_else(|| entry.path.to_string());
-                SidebarMenuItem::new(SharedString::from(name))
-                    .active(current == Some(index))
-                    .suffix(
+                let active = current == Some(index);
+                let status_color = match entry.status.as_ref() {
+                    "A" => cx.theme().success,
+                    "D" => cx.theme().danger,
+                    _ => cx.theme().muted_foreground,
+                };
+                h_flex()
+                    .id(index)
+                    .h(px(22.0))
+                    .w_full()
+                    .px_2()
+                    .gap_2()
+                    .rounded_sm()
+                    .text_xs()
+                    .when(active, |this| this.bg(cx.theme().sidebar_accent))
+                    .hover(|this| this.bg(cx.theme().sidebar_accent))
+                    .child(
+                        div()
+                            .w(px(10.0))
+                            .flex_none()
+                            .text_color(status_color)
+                            .child(entry.status.clone()),
+                    )
+                    .child(
                         h_flex()
-                            .gap_1()
-                            .text_xs()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            // Without this a long name wraps to a second line
+                            // inside a 22px row and prints over its neighbour.
+                            .whitespace_nowrap()
+                            .when_some(parent, |this, parent| {
+                                this.child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(SharedString::from(parent)),
+                                )
+                            })
                             .child(
                                 div()
-                                    .text_color(cx.theme().success)
-                                    .child(SharedString::from(format!("+{}", entry.added))),
-                            )
-                            .child(
-                                div()
-                                    .text_color(cx.theme().danger)
-                                    .child(SharedString::from(format!("−{}", entry.removed))),
+                                    .flex_none()
+                                    .text_color(cx.theme().sidebar_foreground)
+                                    .child(SharedString::from(name.to_string())),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(cx.theme().success)
+                            .child(SharedString::from(format!("+{}", entry.added))),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(cx.theme().danger)
+                            .child(SharedString::from(format!("−{}", entry.removed))),
                     )
                     .on_click(move |_, _window, cx| {
                         handle.update(cx, |surface, cx| surface.jump_to_file(index, cx));
                     })
             })
             .collect();
-        let file_count = files.len();
 
-        Sidebar::left()
+        // Height pinned to its contents. `Sidebar` renders `h_full`, so left
+        // alone it takes the whole panel and the file list below it has
+        // nowhere to go. Its own style refinement is applied after that, so
+        // this wins.
+        let workspace_height = 96.0 + count as f32 * 40.0;
+        let workspaces = Sidebar::left()
+            .h(px(workspace_height))
+            .flex_none()
             // The panel owns the width now; the sidebar's own fixed width and
             // right border would fight the resize handle for it.
             .w_full()
@@ -173,10 +241,44 @@ impl Cockpit {
                     if count == 1 { "" } else { "s" }
                 )))
                 .child(SidebarMenu::new().children(items)),
+            );
+        (workspaces, files)
+    }
+
+    /// The jump list, below the workspaces.
+    ///
+    /// Outside the `Sidebar` rather than inside it: `Sidebar<E>` takes one
+    /// `Collapsible` child type, so a group of workspace menu items and a
+    /// scrolling list of file rows cannot both live in it.
+    fn render_file_list(
+        &self,
+        files: Vec<impl IntoElement>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let count = files.len();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .bg(cx.theme().sidebar)
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(SharedString::from(format!("{count} files"))),
             )
             .child(
-                SidebarGroup::new(SharedString::from(format!("{file_count} files")))
-                    .child(SidebarMenu::new().children(files)),
+                // Its own scroll region: 202 rows must not push the workspace
+                // list off the top of the sidebar.
+                v_flex()
+                    .id("file-list")
+                    .flex_1()
+                    .min_h_0()
+                    .px_1()
+                    .overflow_y_scroll()
+                    .children(files),
             )
     }
 
@@ -260,11 +362,37 @@ impl Render for Cockpit {
                             resizable_panel()
                                 .size(px(240.0))
                                 .size_range(px(180.0)..px(420.0))
-                                .child(self.render_sidebar(cx)),
+                                .child({
+                                    let (workspaces, files) = self.render_sidebar(cx);
+                                    v_flex()
+                                        .size_full()
+                                        .child(workspaces)
+                                        .child(self.render_file_list(files, cx))
+                                }),
                         )
                         .child(resizable_panel().child(self.surface.clone())),
                 ),
             )
             .child(self.render_hud(cx))
     }
+}
+
+/// Shorten a directory name from the left, keeping the end.
+///
+/// Clipping it with `overflow_hidden` alone leaves the cut edge flush against
+/// the filename — `macos-spm-appLICENSE` — which reads as one word. An
+/// explicit ellipsis says the name was shortened.
+fn elide(name: &str) -> String {
+    const MAX: usize = 14;
+    if name.chars().count() <= MAX {
+        return format!("{name}/");
+    }
+    let tail: String = name.chars().skip(name.chars().count() - MAX + 1).collect();
+    format!("…{tail}/")
+}
+
+/// The last component of a path — what identifies a file in a narrow column,
+/// most of the time.
+fn basename(path: &str) -> &str {
+    path.rsplit_once('/').map(|(_, name)| name).unwrap_or(path)
 }
