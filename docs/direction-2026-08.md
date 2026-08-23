@@ -991,8 +991,13 @@ What steps 9–13 leave for the next pass, in the order they block things:
 15. **Boot a workspace's environment through the daemon**: per-workspace
     ports, certs, and the URL registry, which is where the fabric stops
     being a naming scheme and starts being a thing you can open.
-16. **The run lock and `sync`/`gc`**, the last engine behaviour not yet
-    carried across.
+16. ~~**The run lock and `sync`/`gc`**, the last engine behaviour not yet
+    carried across.~~ *Done.* The lock lives in the worktree's own git dir, so
+    parallel workspaces stay independent, and a lock left by a dead process is
+    taken over rather than requiring cleanup. `sync` shells out for
+    `notes merge --strategy=cat_sort_uniq`, which has no libgit2 equivalent
+    and is the whole reason sharing receipts is safe: two people minting for
+    one tree keep both lines instead of one winning.
 17. **The signed bundle**: `SMAppService` registration, the shared Keychain
     access group, notarization — and with them the retirement of the
     open-ACL secrets workaround.

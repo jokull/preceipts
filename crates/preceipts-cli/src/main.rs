@@ -130,6 +130,23 @@ enum Command {
     Mcp,
     /// Scaffold .preceipts/ in a repository that has none.
     Init,
+    /// Share receipts with origin: fetch, merge losslessly, push.
+    Sync {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prune stored logs whose receipts have aged out. Receipts are permanent.
+    Gc {
+        /// How long a passing check's log is kept.
+        #[arg(long, default_value = "30d")]
+        keep_success: String,
+        /// How long a failing check's log is kept — longer, because those are
+        /// the ones someone comes back to.
+        #[arg(long, default_value = "90d")]
+        keep_failure: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a workspace's worktree and its registration.
     Remove {
         /// Workspace id. Defaults to the one you are standing in.
@@ -275,6 +292,12 @@ fn run() -> Result<()> {
         Command::Watch { quiet, checks } => watch(&path, quiet, checks),
         Command::Mcp => mcp::serve(&path),
         Command::Init => init(&path),
+        Command::Sync { json } => sync(&path, json),
+        Command::Gc {
+            keep_success,
+            keep_failure,
+            json,
+        } => gc(&path, &keep_success, &keep_failure, json),
         Command::Remove { id } => remove(&path, id),
     }
 }
@@ -680,8 +703,9 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
     };
 
     let problems = manifest.problems();
-    // The cache half. Read from wherever turbo.json lives — the project root,
-    // which is not the worktree when you are standing in one.
+    // The cache half. turbo.json is a tracked file, so the copy that matters
+    // is this worktree's — a branch may well be the one changing it, and
+    // reading the primary worktree's copy would report on the wrong tree.
     let project_root = workspace::locate(path)
         .map(|ws| ws.path.clone())
         .unwrap_or_else(|_| path.to_path_buf());
@@ -765,6 +789,73 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
         return Ok(());
     }
     std::process::exit(1);
+}
+
+fn sync(path: &Path, json: bool) -> Result<()> {
+    let report = preceipts_core::sync::sync(path).context("syncing receipts")?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "merged": report.merged,
+                "pushed": report.pushed,
+            }))?
+        );
+        return Ok(());
+    }
+    // Say what changed, not that a command ran. "nothing to do" is a real and
+    // common answer, and deserves to be said plainly.
+    match (report.merged, report.pushed) {
+        (false, false) => println!("already in sync"),
+        (true, false) => println!("merged receipts from origin"),
+        (false, true) => println!("pushed receipts to origin"),
+        (true, true) => println!("merged receipts from origin, and pushed ours back"),
+    }
+    Ok(())
+}
+
+fn gc(path: &Path, keep_success: &str, keep_failure: &str, json: bool) -> Result<()> {
+    let parse = |text: &str, flag: &str| -> Result<u64> {
+        checks::parse_duration(text)
+            .map(|d| d.as_secs())
+            .map_err(|e| anyhow::anyhow!("--{flag}: {e}"))
+    };
+    let keep_success = parse(keep_success, "keep-success")?;
+    let keep_failure = parse(keep_failure, "keep-failure")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let report =
+        preceipts_core::sync::gc(path, keep_success, keep_failure, now).context("pruning logs")?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "deleted": report.deleted,
+                "kept": report.kept,
+                "orphans": report.orphans,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "{} log{} pruned, {} kept",
+        report.deleted.len(),
+        if report.deleted.len() == 1 { "" } else { "s" },
+        report.kept
+    );
+    if report.orphans > 0 {
+        // Reported rather than swept: a log no receipt points at is more
+        // likely a bug here than garbage.
+        println!(
+            "  {} log{} referenced by no receipt, left alone",
+            report.orphans,
+            if report.orphans == 1 { "" } else { "s" }
+        );
+    }
+    Ok(())
 }
 
 fn init(path: &Path) -> Result<()> {

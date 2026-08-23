@@ -622,6 +622,10 @@ pub struct RunReport {
 /// The tree is computed after prepare and verified unchanged after the checks.
 /// If a check moved the worktree, nothing is minted and the error says so.
 pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
+    // Held for the whole run, released on every exit path including the error
+    // ones. Prepare writes to the worktree, so two runs at once corrupt each
+    // other's evidence rather than merely wasting time.
+    let _lock = crate::runlock::acquire(root)?;
     let config = load_config(root)?;
 
     let before_prepare = treehash::compute(root)?.tree;
@@ -791,7 +795,7 @@ fn timestamp() -> String {
 
 /// Days-from-civil, inverted — Howard Hinnant's algorithm. Avoids a date
 /// dependency for the one thing core needs a calendar for.
-fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+pub(crate) fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let z = days + 719_468;
@@ -1121,6 +1125,53 @@ mod tests {
         // Sanity-check the calendar maths against a known instant.
         let (y, m, d, h, min, s) = civil_from_unix(1_700_000_000);
         assert_eq!((y, m, d, h, min, s), (2023, 11, 14, 22, 13, 20));
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::tests::{project, write_check};
+    use super::*;
+
+    /// The lock is a property of `run`, not of a module nobody calls.
+    ///
+    /// Held from the outside rather than raced from two threads: a race would
+    /// test the scheduler, and the claim here is simply that `run` refuses to
+    /// start while someone else holds the lock.
+    #[test]
+    fn a_run_refuses_to_start_while_another_holds_the_lock() {
+        let (_t, dir) = project("[required]\nchecks = [\"green\"]\n");
+        write_check(&dir, "green", "#!/bin/bash\necho fine\n");
+
+        let held = crate::runlock::acquire(&dir).expect("something else is running");
+        let error = run(&dir, None)
+            .expect_err("a second run is refused")
+            .to_string();
+        assert!(error.contains("already in progress"), "{error}");
+        assert!(
+            error.contains("race prepare"),
+            "the message says why it matters: {error}"
+        );
+
+        drop(held);
+        assert!(run(&dir, None).is_ok(), "and it runs once the lock is free");
+    }
+
+    /// Every exit path gives the lock back, including the ones that error —
+    /// a failed run that left the worktree locked would be a worse bug than
+    /// the race the lock exists to prevent.
+    #[test]
+    fn a_run_that_fails_still_releases_the_lock() {
+        let (_t, dir) = project("[required]\nchecks = [\"bad\"]\n");
+        // Not executable: `run` returns an error partway through.
+        let path = dir.join(CHECKS_DIR).join("bad");
+        std::fs::write(&path, "#!/bin/bash\necho hi\n").unwrap();
+
+        assert!(run(&dir, None).is_err(), "the run fails");
+        assert!(
+            crate::runlock::acquire(&dir).is_ok(),
+            "and the lock is free afterwards"
+        );
     }
 }
 

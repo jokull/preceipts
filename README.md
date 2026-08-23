@@ -35,7 +35,14 @@ preceipts run                           # checks run, receipts minted
 preceipts status                        # ✓ green — tree 2a7db2504869
 preceipts land                          # squash, trailers, push — receipts willing
 preceipts watch                         # or: fire checks whenever the tree goes quiet
+preceipts sync                          # share receipts with origin, merged losslessly
+preceipts gc                            # prune old logs; receipts themselves are permanent
 ```
+
+One run per worktree at a time. `[prepare]` writes to the working tree, so a
+quiet-triggered run and a `preceipts run` you typed would corrupt each other's
+evidence — the second one fails fast and says whose pid holds the lock. A lock
+left by a crash is taken over rather than requiring cleanup.
 
 Every read command takes `--json`, because the CLI is the agent-facing surface
 and a verb that only prints for humans would have to be rewritten to serve one.
@@ -147,8 +154,11 @@ and an agent should not have to learn which tool owns which verb. `preceiptsd`
 answers only to launchd and to `preceipts up`.
 
 Still ahead: converging `procpane.toml` into `preceipts.toml` (two schemas, one
-job), per-workspace certs behind the `:443` forwarder, the HTTP transcript, the
-env panel and project tabs, and `sync`/`gc`. Service URLs are
+job), booting a workspace's environment through the daemon, per-workspace certs
+behind the `:443` forwarder, the HTTP transcript, and the env panel and project
+tabs. Registering the forwarder through `SMAppService` — and with it the shared
+Keychain access group that retires the open-ACL workaround — waits on a signed
+bundle. Service URLs are
 `<service>.<workspace>.<project>.localhost` — the system resolves `*.localhost` to
 loopback at any depth, so there is no DNS to install (decision 13).
 
