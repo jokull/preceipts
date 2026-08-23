@@ -999,9 +999,21 @@ The order that keeps a working app at every step:
    behind. And the reader keeps their place across a reload by *file*, not
    by row — a file that grew ten lines moves every row beneath it.
 
-   Verified by doing it: editing a file in a terminal moved the diff and
-   the counts without the window being touched, and `preceipts run` in that
-   same terminal turned the tab green with no interaction at all.
+   The receipts watch forwards **ref writes only**. Watching the git dir at
+   all means seeing `.git/index`, which every `git status` rewrites —
+   measured at one full diff-and-receipts reload per burst of them. Idle on
+   a laptop that is free; on this product's actual workload, which is an
+   agent running git every few seconds, it is a reload every few seconds
+   for nothing. So the callback asks whether the path is under `refs/` or
+   is `packed-refs`, and drops everything else.
+
+   Verified by doing it, and instrumented rather than assumed. Thirty
+   seconds idle: zero reloads, 0.0% CPU. A six-second burst of edits: one
+   reload, at the end, with the diff and counts moving and the window never
+   touched. `preceipts run` in a terminal: the tab turns green with no
+   interaction. Eight rounds of `git status`/`log`/`diff`: nothing. And all
+   of it again in a linked worktree, which is the case `common_git_dir`
+   exists for and the one the north-star story is actually about.
 
 ### Amendments — 2026-08-23
 

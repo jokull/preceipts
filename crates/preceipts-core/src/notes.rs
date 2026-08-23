@@ -134,6 +134,19 @@ pub fn open(path: &Path) -> Result<Repository> {
     Repository::discover(path).map_err(|_| crate::error::Error::NotARepo(path.to_path_buf()))
 }
 
+/// Whether a path under the git dir is a ref being written.
+///
+/// Both forms count, because both are ordinary: a loose ref somewhere under
+/// `refs/`, and the `packed-refs` file a `git gc` folds them into. The `.lock`
+/// files git writes on the way are deliberately included — they carry the
+/// same names, and excluding them would only mean waiting for the rename.
+fn is_ref_write(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        name == "refs" || name.starts_with("packed-refs")
+    })
+}
+
 /// Watch for receipts arriving, calling `on_change` when the notes ref moves.
 ///
 /// This is the second half of the north-star loop, and it exists because of a
@@ -162,6 +175,14 @@ where
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         let Ok(event) = result else { return };
         if matches!(event.kind, notify::EventKind::Access(_)) {
+            return;
+        }
+        // Refs only. Without this the watch fires on `.git/index`, which every
+        // `git status` rewrites — measured: five `git status` calls in a
+        // terminal cost a full diff-and-receipts reload. Harmless on an idle
+        // machine and not harmless at all on this product's actual workload,
+        // which is an agent running git every few seconds.
+        if !event.paths.iter().any(|p| is_ref_write(p)) {
             return;
         }
         let _ = tx.send(());

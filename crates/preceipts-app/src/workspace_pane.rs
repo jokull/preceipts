@@ -235,7 +235,12 @@ impl WorkspacePane {
                     this.surface
                         .update(cx, |surface, cx| surface.replace(changeset, cx));
                 }
-                this.status = status;
+                // Same reasoning as the diff above: `status()` can fail on a
+                // tree mid-write, and letting that read as "no checks" would
+                // blank a verdict that is still perfectly true.
+                if status.is_some() {
+                    this.status = status;
+                }
                 this.reloading = false;
                 cx.notify();
                 if std::mem::take(&mut this.restack) {
