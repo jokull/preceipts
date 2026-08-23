@@ -26,6 +26,7 @@ pub mod proxy;
 pub mod secrets;
 pub mod services;
 pub mod share;
+pub mod transcript;
 
 use std::path::PathBuf;
 

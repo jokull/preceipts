@@ -130,6 +130,19 @@ fn tools(root: &Path) -> Vec<Value> {
             vec![],
         ),
         tool(
+            "requests",
+            "Every HTTP request the local proxy carried into this workspace's services, and \
+             what answered it: method, path, status, duration, and sizes. Nothing is \
+             instrumented in the app — the proxy is already in the path. Bodies are not \
+             recorded. A request with a null status never came back.",
+            json!({
+                "path": {"type": "string"},
+                "host": {"type": "string", "description": "Only this hostname."},
+                "since_secs": {"type": "integer", "description": "Only the last N seconds."}
+            }),
+            vec![],
+        ),
+        tool(
             "environment",
             "The workspace's declared environment: services, runtimes, fidelity, hostnames, drains, and any problems.",
             json!({"path": {"type": "string"}}),
@@ -263,6 +276,11 @@ fn call(root: &Path, params: &Value) -> Result<Value> {
             receipts.sort_by(|a, b| b.started.cmp(&a.started));
             json!(receipts)
         }
+        "requests" => {
+            let host = args.get("host").and_then(Value::as_str).map(str::to_string);
+            let since_secs = args.get("since_secs").and_then(Value::as_i64);
+            requests(&path, host, since_secs)?
+        }
         "environment" => environment(&path)?,
         other => run_action(root, &path, other, &args)?,
     };
@@ -311,6 +329,36 @@ fn running_services(root: &Path) -> Value {
             })).collect::<Vec<_>>(),
         }),
         _ => json!({"up": false}),
+    }
+}
+
+/// The HTTP transcript, for an agent that wants to know what its code served.
+///
+/// A daemon that is not running is not an error — most of the time nothing is
+/// up, and an agent asking should be told that rather than handed an empty
+/// list it might read as "no traffic".
+fn requests(path: &Path, host: Option<String>, since_secs: Option<i64>) -> Result<Value> {
+    use preceiptsd::proto::{Request, Response};
+
+    let socket = preceiptsd::daemon::socket_path(path);
+    if !socket.exists() {
+        return Ok(json!({
+            "up": false,
+            "note": "no environment running here, so nothing has been recorded",
+        }));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    match runtime.block_on(preceiptsd::client::call(
+        &socket,
+        Request::Transcript { host, since_secs },
+    )) {
+        Ok(Response::Transcript { exchanges }) => Ok(json!({
+            "up": true,
+            "exchanges": exchanges,
+        })),
+        _ => Ok(json!({"up": false})),
     }
 }
 
@@ -417,6 +465,7 @@ mod tests {
             "run",
             "receipts",
             "environment",
+            "requests",
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }

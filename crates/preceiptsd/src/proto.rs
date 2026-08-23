@@ -24,6 +24,11 @@ pub enum Request {
         signal: String,
     },
     Ping,
+    /// The HTTP the proxy has carried, newest last.
+    Transcript {
+        host: Option<String>,
+        since_secs: Option<i64>,
+    },
     /// Block-style query: returns immediately with current state of the task.
     /// The CLI side polls until state == "healthy" or terminal failure.
     GetTask {
@@ -45,6 +50,9 @@ pub enum Response {
     },
     GrepMatches {
         matches: Vec<GrepMatch>,
+    },
+    Transcript {
+        exchanges: Vec<crate::transcript::Exchange>,
     },
     Task {
         task: ProcStatus,

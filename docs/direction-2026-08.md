@@ -1014,7 +1014,19 @@ What steps 9–13 leave for the next pass, in the order they block things:
     `notes merge --strategy=cat_sort_uniq`, which has no libgit2 equivalent
     and is the whole reason sharing receipts is safe: two people minting for
     one tree keep both lines instead of one winning.
-17. ~~**Retire the name.**~~ *Done, on user direction.* Absorbing procpane
+17. ~~**The HTTP transcript.**~~ *Done.* The TLS proxy was already in the
+    path of every request, so recording costs the app under test nothing —
+    no middleware, no library to add and remember to remove, and it works on
+    a Rails app, a Go binary and a Vite dev server identically because it
+    never enters any of them. Heads only: a body can be a video or a
+    password, and a ring buffer holding one is a ring buffer holding a
+    secret. Sniffed rather than parsed, because a transcript that reassembled
+    requests would become a proxy that can get HTTP wrong in the path of
+    someone's dev server — much worse than a missing log line. `preceipts
+    requests` and the MCP `requests` tool read it; a request with no status
+    is a hang, and shows as one.
+
+18. ~~**Retire the name.**~~ *Done, on user direction.* Absorbing procpane
     left the word alive in four places for compatibility, which is how a shim
     outlives its reason. `preceipts migrate` converts the manifest, moves the
     Keychain items — the one thing here that is *data* rather than
@@ -1034,12 +1046,12 @@ What steps 9–13 leave for the next pass, in the order they block things:
     readable by accident. `preceipts migrate` is the one piece of scaffolding
     left, and it is marked for deletion rather than kept as a feature.
 
-18. **The run lock is pid-based**, which leaves a window: a lock whose
-    holder died and whose pid was reused reads as live, and only a manual
-    delete clears it. `flock` closes that window — the kernel releases an
-    advisory lock when the holder dies, with no pid to reuse. Noted rather
-    than built, because the engine lived with these semantics and swapping
-    them is a change worth making deliberately rather than mid-verification.
-19. **The signed bundle**: `SMAppService` registration, the shared Keychain
+19. ~~**The run lock's pid-reuse window.**~~ *Done.* It is an advisory
+    `flock` now: the kernel releases it when the holder dies, so there is no
+    pid to interpret and no stale file to clear by hand. The pid is still
+    written, because the error message names who holds the lock. The file is
+    deliberately never unlinked — removing a name another process has already
+    opened is how two holders end up with two inodes and one worktree.
+20. **The signed bundle**: `SMAppService` registration, the shared Keychain
     access group, notarization — and with them the retirement of the
     open-ACL secrets workaround.

@@ -201,6 +201,17 @@ enum Command {
         #[command(subcommand)]
         op: preceiptsd::cli::ProcOp,
     },
+    /// Every HTTP request the proxy carried, and what answered it.
+    Requests {
+        /// Only this hostname.
+        #[arg(long)]
+        host: Option<String>,
+        /// Only the last `2m`, `30s`, `1h`.
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Search every service's output at once.
     Grep {
         pattern: String,
@@ -254,6 +265,9 @@ fn run() -> Result<()> {
             preceiptsd::commands::wait_for_cmd(path, name, timeout)
         }
         Command::Proc { name, op } => preceiptsd::commands::proc_cmd(path, name, op),
+        Command::Requests { host, since, json } => {
+            preceiptsd::commands::requests_cmd(path, host, since, json)
+        }
         Command::Grep {
             pattern,
             after,

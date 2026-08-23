@@ -32,6 +32,12 @@ pub struct Daemon {
     pub hostnames: BTreeMap<String, String>,
     /// Per-task allocated TCP port (when hostname is set; PORT env injected).
     pub allocated_ports: BTreeMap<String, u16>,
+    /// Every HTTP exchange the proxy has carried for this workspace.
+    ///
+    /// Lives on the daemon rather than in the proxy so `Request::Transcript`
+    /// can read it: the instrument is only worth building if something can
+    /// ask it a question.
+    pub transcript: Arc<crate::transcript::Transcript>,
     /// Where this workspace's TLS proxy listens. Not a constant: linked
     /// workspaces take theirs from their own port block.
     pub proxy_port: u16,
@@ -224,6 +230,7 @@ impl Daemon {
             hostnames: hostnames.clone(),
             allocated_ports: allocated_ports.clone(),
             proxy_port,
+            transcript: crate::transcript::Transcript::new(),
             stop_signals,
             stop_grace,
             notes,
@@ -241,6 +248,7 @@ impl Daemon {
                     Ok(tls_cfg) => {
                         let bind: std::net::SocketAddr = ([127, 0, 0, 1], proxy_port).into();
                         let reg = Arc::clone(&port_registry);
+                        let transcript = Some(Arc::clone(&daemon.transcript));
                         let mut prx_stop = stop_rx.clone();
                         // Pre-register hostnames → allocated backend ports so
                         // the proxy can route even before tasks turn healthy
@@ -252,7 +260,8 @@ impl Daemon {
                         }
                         tokio::spawn(async move {
                             if let Err(e) =
-                                proxy::run_proxy(tls_cfg, reg, bind, prx_stop.clone()).await
+                                proxy::run_proxy(tls_cfg, reg, transcript, bind, prx_stop.clone())
+                                    .await
                             {
                                 tracing::error!(?e, "reverse proxy stopped");
                             }
@@ -739,6 +748,9 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
 fn dispatch(daemon: &Daemon, req: Request) -> Response {
     match req {
         Request::Ping => Response::Pong,
+        Request::Transcript { host, since_secs } => Response::Transcript {
+            exchanges: daemon.transcript.recent(host.as_deref(), since_secs),
+        },
         Request::Stop => {
             if let Some(tx) = daemon.stop_tx.lock().as_ref() {
                 let _ = tx.send(true);

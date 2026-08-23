@@ -12,11 +12,16 @@
 //! parallel worktrees of one repo stay independent — running checks in two
 //! workspaces at once is the normal case, not a conflict.
 //!
-//! A lock left behind by a dead process — `kill -9`, a crash, a closed laptop
-//! — is detected by pid and taken over. A stale lock file that could only be
-//! cleared by hand would turn one crash into a permanently broken worktree.
+//! Holding is an advisory `flock`, not a pid written to a file. A pid can be
+//! reused: the holder dies to `kill -9` or a closed laptop, the number comes
+//! back around on some unrelated process, and every later run reads the lock as
+//! live forever with only a manual delete to clear it. The kernel drops an
+//! `flock` when the holding process dies, whatever killed it, and there is no
+//! number left to misread.
 
 use crate::error::{Error, Result};
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
 const LOCK_FILE: &str = "preceipts-run.lock";
@@ -27,31 +32,13 @@ const LOCK_FILE: &str = "preceipts-run.lock";
 /// ones that do not reach the end of the function: a check that fails, a tree
 /// that moved, an error anywhere in between. Every one of those must give the
 /// lock back.
+///
+/// `_file` is the lock. `flock` binds to the open file description, so closing
+/// this handle *is* the release — dropping it early, or holding only the path,
+/// would hand the worktree to a second run mid-prepare.
 #[derive(Debug)]
 pub struct RunLock {
-    path: PathBuf,
-}
-
-impl Drop for RunLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Is a process with this pid running?
-///
-/// Signal 0 performs the permission and existence checks without delivering
-/// anything. `EPERM` means it exists and belongs to someone else, which still
-/// counts as alive — treating it as dead would let two runs proceed.
-fn is_alive(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
-    }
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    _file: File,
 }
 
 /// The worktree's own git directory — `.git/worktrees/<name>` for a linked
@@ -74,53 +61,67 @@ fn git_dir(root: &Path) -> Result<PathBuf> {
 pub fn acquire(root: &Path) -> Result<RunLock> {
     let path = git_dir(root)?.join(LOCK_FILE);
 
-    // Two attempts: the second exists only to take over a lock the first
-    // found stale. A loop would spin against a live run rather than report it.
-    for _ in 0..2 {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                let _ = write!(file, "{}", std::process::id());
-                return Ok(RunLock { path });
-            }
-            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
-                return Err(Error::Git(git2::Error::from_str(&format!(
-                    "taking the run lock at {}: {e}",
-                    path.display()
-                ))));
-            }
-            Err(_) => {}
-        }
+    // No `.truncate(true)`: truncation happens at open, before we know whether
+    // anyone holds the lock, so a refused contender would erase the live
+    // holder's pid and the message below would name nobody.
+    #[allow(clippy::suspicious_open_options)]
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .map_err(|e| {
+            Error::Git(git2::Error::from_str(&format!(
+                "taking the run lock at {}: {e}",
+                path.display()
+            )))
+        })?;
 
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let errno = std::io::Error::last_os_error();
+        if errno.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            return Err(Error::Git(git2::Error::from_str(&format!(
+                "taking the run lock at {}: {errno}",
+                path.display()
+            ))));
+        }
+        // The pid is not what refused us — the kernel did. It is here so the
+        // person reading this has something to wait for or kill.
         let holder = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| text.trim().parse::<i32>().ok())
             .unwrap_or(0);
-
-        if is_alive(holder) {
-            return Err(Error::Git(git2::Error::from_str(&format!(
-                "another preceipts run is already in progress (pid {holder}) — a second \
-                 run would race prepare and duplicate checks on this worktree; wait for \
-                 it or kill it"
-            ))));
-        }
-        // Stale: the holder is gone, or the file never held a readable pid.
-        let _ = std::fs::remove_file(&path);
+        return Err(Error::Git(git2::Error::from_str(&format!(
+            "another preceipts run is already in progress (pid {holder}) — a second \
+             run would race prepare and duplicate checks on this worktree; wait for \
+             it or kill it"
+        ))));
     }
 
-    Err(Error::Git(git2::Error::from_str(
-        "could not acquire the run lock",
-    )))
+    // Truncate now that the lock is ours, so a short pid written over a longer
+    // stale one does not leave the tail behind as digits.
+    use std::io::Write;
+    let _ = file.set_len(0);
+    let _ = write!(&file, "{}", std::process::id());
+
+    Ok(RunLock { _file: file })
 }
+
+// The file is deliberately never unlinked, not even on a clean drop. Unlinking
+// races: a waiting process has already opened this inode and is about to lock
+// it, we remove the name, a third process creates a fresh file at the same path
+// and locks that — two holders, two inodes, one worktree. An empty lock file
+// left in the git dir costs nothing; the lock it carries is the fd, not the
+// name.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
     use std::process::Command;
+
+    /// Env var naming the worktree the helper below should lock.
+    const HELPER_ROOT: &str = "PRECEIPTS_RUNLOCK_HELPER_ROOT";
 
     fn repo() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
@@ -149,6 +150,10 @@ mod tests {
             .to_string();
         assert!(error.contains("already in progress"), "{error}");
         assert!(
+            error.contains(&format!("pid {}", std::process::id())),
+            "the message names someone to wait for or kill: {error}"
+        );
+        assert!(
             error.contains("race prepare"),
             "the message says why it matters, not just that it happened: {error}"
         );
@@ -166,23 +171,74 @@ mod tests {
         );
     }
 
-    /// The failure mode that matters more than the contention it prevents: a
-    /// crash must not leave a worktree permanently unable to run checks.
+    /// Not a test: the child half of the one below, run as its own process so
+    /// that killing it is a real death rather than a simulated one. Inert
+    /// unless the parent asks for it by name.
     #[test]
-    fn a_lock_left_by_a_dead_process_is_taken_over() {
+    #[ignore = "helper process for a_lock_whose_holder_was_killed_is_acquirable"]
+    fn runlock_helper_holds_the_lock_until_killed() {
+        let Ok(root) = std::env::var(HELPER_ROOT) else {
+            return;
+        };
+        let _lock = acquire(Path::new(&root)).expect("the helper takes the lock");
+        println!("HOLDING {}", std::process::id());
+        use std::io::Write;
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+
+    /// The failure mode that matters more than the contention it prevents: a
+    /// crash must not leave a worktree permanently unable to run checks — and
+    /// with no liveness check left, the pid in the file could belong to
+    /// anything by now, including a live process that reused it.
+    #[test]
+    fn a_lock_whose_holder_was_killed_is_acquirable_without_asking_whether_its_pid_lives() {
         let (_t, dir) = repo();
-        let path = git_dir(&dir).unwrap().join(LOCK_FILE);
-        // A pid that is not running. 999999 is above the default pid_max on
-        // macOS and Linux alike, so it cannot collide with a live process.
-        std::fs::write(&path, "999999").unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runlock::tests::runlock_helper_holds_the_lock_until_killed",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(HELPER_ROOT, &dir)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawning the holder");
+
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let held = lines
+            .find_map(|line| {
+                let line = line.ok()?;
+                line.strip_prefix("HOLDING ")?.trim().parse::<i32>().ok()
+            })
+            .expect("the holder announces itself once the lock is its own");
+
         assert!(
-            acquire(&dir).is_ok(),
-            "a stale lock is taken over rather than requiring manual cleanup"
+            acquire(&dir).is_err(),
+            "while the holder lives, the lock is the holder's"
+        );
+
+        // SIGKILL leaves no chance to clean up — no drop, no unlink, nothing
+        // written. Exactly the crash the old pid file could not recover from.
+        assert_eq!(unsafe { libc::kill(held, libc::SIGKILL) }, 0);
+        child
+            .wait()
+            .expect("the holder is gone, not just signalled");
+
+        let lock = acquire(&dir).expect("the kernel released what the dead process held");
+        let path = git_dir(&dir).unwrap().join(LOCK_FILE);
+        drop(lock);
+        assert!(
+            std::fs::read_to_string(&path).unwrap().trim() != held.to_string(),
+            "the file was rewritten by the new holder"
         );
     }
 
     #[test]
-    fn an_unreadable_lock_file_is_treated_as_stale() {
+    fn a_lock_file_left_behind_with_no_readable_pid_is_still_acquirable() {
         let (_t, dir) = repo();
         let path = git_dir(&dir).unwrap().join(LOCK_FILE);
         std::fs::write(&path, "not a pid at all").unwrap();
@@ -214,12 +270,5 @@ mod tests {
             acquire(&workspace.path).is_ok(),
             "a sibling worktree is not blocked by the primary's run"
         );
-    }
-
-    #[test]
-    fn our_own_pid_is_alive_and_a_free_one_is_not() {
-        assert!(is_alive(std::process::id() as i32));
-        assert!(!is_alive(999_999));
-        assert!(!is_alive(0), "pid 0 is not a process we can ask about");
     }
 }

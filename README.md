@@ -59,6 +59,7 @@ harness picks the lab up without a plugin and without us naming a vendor:
 | What changed? | `diff` |
 | Is it sound? | `status`, `run`, `receipts` |
 | What is around me? | `workspaces`, `environment` |
+| What did my code just serve? | `requests` |
 
 A project's own `[actions.*]` become tools automatically, with their declared
 arguments — so `auth <actor>` and `purchase-smoke` reach an agent without a line
@@ -172,9 +173,13 @@ web.trip.localhost:8443                  ← the primary worktree
 web.add-checkout-flow.trip.localhost:27800
 ```
 
+`preceipts requests` reads the HTTP transcript: every request the proxy carried
+and what answered it, with nothing instrumented in your app, because the proxy
+is already in the path. Heads only — a recorded body is a recorded password.
+
 Still ahead: one machine-wide proxy so linked workspaces get portless URLs too,
 the container runtime (`image = …` parses and validates but cannot start yet —
-`doctor` says so), the HTTP transcript, and the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
+`doctor` says so), and the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
 Keychain access group that retires the open-ACL workaround — waits on a signed
 bundle. Service URLs are
 `<service>.<workspace>.<project>.localhost` — the system resolves `*.localhost` to

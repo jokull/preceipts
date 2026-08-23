@@ -848,6 +848,71 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// The HTTP the proxy carried, for a person or an agent.
+///
+/// Read straight off the daemon, because the transcript only exists while the
+/// environment is up — it is a record of what happened, not a file that
+/// accumulates. A workspace with nothing running has nothing to say, and
+/// saying that plainly beats an empty table.
+pub fn requests_cmd(
+    start: PathBuf,
+    host: Option<String>,
+    since: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let root = resolve_root(start)?;
+    let socket = daemon::socket_path(&root);
+    let since_secs = match since {
+        None => None,
+        Some(text) => Some(
+            humantime::parse_duration(&text)
+                .map_err(|e| anyhow!("--since {text:?}: {e}"))?
+                .as_secs() as i64,
+        ),
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let response = rt.block_on(client::call(
+        &socket,
+        Request::Transcript { host, since_secs },
+    ))?;
+    let Response::Transcript { exchanges } = response else {
+        return Err(anyhow!("unexpected response"));
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&exchanges)?);
+        return Ok(());
+    }
+    if exchanges.is_empty() {
+        println!("no requests recorded — is anything running, and has anything hit it?");
+        return Ok(());
+    }
+    println!(
+        "{:<7} {:<28} {:<6} {:>8} {:>9}  PATH",
+        "STATUS", "HOST", "METHOD", "MS", "BYTES"
+    );
+    for exchange in &exchanges {
+        // A request with no status is one that never came back. Showing it as
+        // "—" rather than hiding it is the point: a hang is a finding.
+        let status = exchange
+            .status
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let ms = exchange
+            .duration_ms
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        println!(
+            "{:<7} {:<28} {:<6} {:>8} {:>9}  {}",
+            status, exchange.host, exchange.method, ms, exchange.response_bytes, exchange.path
+        );
+    }
+    Ok(())
+}
+
 pub fn grep_cmd(
     start: PathBuf,
     pattern: String,

@@ -21,6 +21,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
 use crate::ca;
+use crate::transcript::{self, Transcript};
+use parking_lot::Mutex;
+use std::time::Instant;
 
 /// Default HTTPS port for the reverse proxy. Unprivileged.
 pub const PROXY_PORT: u16 = 8443;
@@ -94,6 +97,7 @@ pub fn build_tls_config(hostnames: &[String]) -> Result<Arc<ServerConfig>> {
 pub async fn run_proxy(
     tls_cfg: Arc<ServerConfig>,
     registry: Arc<PortRegistry>,
+    transcript: Option<Arc<Transcript>>,
     bind: SocketAddr,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
@@ -119,8 +123,9 @@ pub async fn run_proxy(
                 tracing::debug!(peer = %_peer, "proxy accepted connection");
                 let acceptor = acceptor.clone();
                 let registry = Arc::clone(&registry);
+                let transcript = transcript.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(acceptor, registry, stream).await {
+                    if let Err(e) = handle_conn(acceptor, registry, transcript, stream).await {
                         tracing::debug!(?e, "proxy conn ended");
                     }
                 });
@@ -132,6 +137,7 @@ pub async fn run_proxy(
 async fn handle_conn(
     acceptor: TlsAcceptor,
     registry: Arc<PortRegistry>,
+    transcript: Option<Arc<Transcript>>,
     stream: TcpStream,
 ) -> Result<()> {
     let tls_stream = acceptor.accept(stream).await.context("tls handshake")?;
@@ -164,19 +170,71 @@ async fn handle_conn(
         .with_context(|| format!("connect backend 127.0.0.1:{port}"))?;
     let (mut tls_r, mut tls_w) = tokio::io::split(tls_stream);
     let (mut bk_r, mut bk_w) = backend.into_split();
-    let a = copy_with_flush(&mut tls_r, &mut bk_w);
-    let b = copy_with_flush(&mut bk_r, &mut tls_w);
+
+    // The two directions share the id of the exchange in flight. A keep-alive
+    // connection carries many, one after another, and the response side needs
+    // to know which request it is answering — which on HTTP/1.1 is simply
+    // "the most recent one", because the protocol forbids overlap.
+    let in_flight = Arc::new(Mutex::new(None::<(u64, Instant)>));
+    let a = copy_recording(
+        &mut tls_r,
+        &mut bk_w,
+        Direction::Request {
+            host: sni.clone(),
+            transcript: transcript.clone(),
+            in_flight: Arc::clone(&in_flight),
+        },
+    );
+    let b = copy_recording(
+        &mut bk_r,
+        &mut tls_w,
+        Direction::Response {
+            transcript,
+            in_flight,
+        },
+    );
     let _ = tokio::join!(a, b);
     Ok(())
 }
 
-async fn copy_with_flush<R, W>(reader: &mut R, writer: &mut W) -> std::io::Result<u64>
+/// Which half of an exchange a copy loop is carrying.
+enum Direction {
+    Request {
+        host: String,
+        transcript: Option<Arc<Transcript>>,
+        in_flight: Arc<Mutex<Option<(u64, Instant)>>>,
+    },
+    Response {
+        transcript: Option<Arc<Transcript>>,
+        in_flight: Arc<Mutex<Option<(u64, Instant)>>>,
+    },
+}
+
+/// Copy bytes, recording message heads as they stream past.
+///
+/// The copy itself must stay exactly what it was before the transcript
+/// existed: every byte through untouched, in the same order, flushed per
+/// chunk so a streaming response is not held back by us. The
+/// recording is strictly a side effect of watching, never a step the data
+/// waits on — a transcript that could corrupt a response would be a far worse
+/// bug than one that misses a line.
+async fn copy_recording<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    direction: Direction,
+) -> std::io::Result<u64>
 where
     R: AsyncRead + Unpin + ?Sized,
     W: AsyncWrite + Unpin + ?Sized,
 {
     let mut buf = [0u8; 16 * 1024];
-    let mut copied = 0;
+    let mut copied = 0u64;
+    // Bytes of the current message we have not yet been able to parse. Reset
+    // after each head, so a long-lived connection does not accumulate.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut watching = true;
+    let mut message_bytes = 0u64;
+
     loop {
         let n = reader.read(&mut buf).await?;
         if n == 0 {
@@ -186,6 +244,62 @@ where
         writer.write_all(&buf[..n]).await?;
         writer.flush().await?;
         copied += n as u64;
+        message_bytes += n as u64;
+
+        if !watching {
+            continue;
+        }
+        pending.extend_from_slice(&buf[..n]);
+        let Some(head) = transcript::parse_head(&pending) else {
+            // Either not enough bytes yet, or not HTTP. Stop trying once the
+            // buffer is large enough that a head would have appeared.
+            if pending.len() > 32 * 1024 {
+                watching = false;
+                pending = Vec::new();
+            }
+            continue;
+        };
+
+        match &direction {
+            Direction::Request {
+                host,
+                transcript,
+                in_flight,
+            } => {
+                let mut parts = head.start_line.split(' ');
+                let method = parts.next().unwrap_or_default().to_string();
+                let path = parts.next().unwrap_or_default().to_string();
+                if let Some(transcript) = transcript {
+                    let id = transcript.begin(host, &method, &path, message_bytes);
+                    *in_flight.lock() = Some((id, Instant::now()));
+                }
+            }
+            Direction::Response {
+                transcript,
+                in_flight,
+            } => {
+                let status = head
+                    .start_line
+                    .split(' ')
+                    .nth(1)
+                    .and_then(|code| code.parse::<u16>().ok());
+                if let (Some(transcript), Some(status)) = (transcript, status) {
+                    if let Some((id, started)) = *in_flight.lock() {
+                        transcript.complete(
+                            id,
+                            status,
+                            message_bytes,
+                            head.header("content-type").map(str::to_string),
+                            started.elapsed(),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Ready for the next message on this connection.
+        pending = Vec::new();
+        message_bytes = 0;
     }
 }
 
@@ -237,8 +351,13 @@ mod tests {
         }
     }
 
+    /// A streaming response — server-sent events, a chunked build log — is
+    /// only streaming if each chunk leaves as it arrives. Buffering until EOF
+    /// would turn a live log into a file that appears when the process ends,
+    /// and the transcript sits in this path now, so the property is worth
+    /// pinning against the loop that actually runs.
     #[tokio::test]
-    async fn copy_with_flush_flushes_before_reader_eof() {
+    async fn the_proxy_flushes_each_chunk_rather_than_waiting_for_eof() {
         let (mut source_w, mut source_r) = tokio::io::duplex(64);
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let (flush_tx, mut flush_rx) = mpsc::unbounded_channel();
@@ -248,7 +367,15 @@ mod tests {
         };
 
         let copy_task = tokio::spawn(async move {
-            let _ = copy_with_flush(&mut source_r, &mut writer).await;
+            let _ = copy_recording(
+                &mut source_r,
+                &mut writer,
+                Direction::Response {
+                    transcript: None,
+                    in_flight: Arc::new(parking_lot::Mutex::new(None)),
+                },
+            )
+            .await;
         });
 
         source_w.write_all(b"HTTP/1.1 200 OK\r\n").await.unwrap();
