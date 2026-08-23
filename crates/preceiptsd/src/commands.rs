@@ -71,7 +71,7 @@ pub fn run_cmd(
     let state_dir = daemon::state_dir(&root);
     std::fs::create_dir_all(&state_dir)?;
     let lock_path = state_dir.join("lock");
-    let socket_path = state_dir.join("sock");
+    let socket_path = daemon::socket_path(&root);
 
     if let Some(pid) = lock::PidLock::read_pid(&lock_path) {
         if lock::is_alive(pid) {
@@ -265,7 +265,7 @@ pub fn daemon_inner(root: PathBuf, tasks: Vec<String>, no_prebuild: bool) -> Res
 
 pub fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
     let root = resolve_root(start)?;
-    let socket = daemon::state_dir(&root).join("sock");
+    let socket = daemon::socket_path(&root);
     let rt = tokio::runtime::Runtime::new()?;
     let resp = rt.block_on(cli_client::call(&socket, Request::Status))?;
     match resp {
@@ -317,7 +317,7 @@ pub fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
 pub fn wait_for_cmd(start: PathBuf, name: String, timeout: String) -> Result<()> {
     let dur = humantime::parse_duration(&timeout).map_err(|e| anyhow!("invalid --timeout: {e}"))?;
     let root = resolve_root(start)?;
-    let socket = daemon::state_dir(&root).join("sock");
+    let socket = daemon::socket_path(&root);
     if !socket.exists() {
         return Err(anyhow!("no preceipts daemon running here"));
     }
@@ -378,7 +378,7 @@ pub fn wait_for_cmd(start: PathBuf, name: String, timeout: String) -> Result<()>
 
 pub fn stop_cmd(start: PathBuf) -> Result<()> {
     let root = resolve_root(start)?;
-    let socket = daemon::state_dir(&root).join("sock");
+    let socket = daemon::socket_path(&root);
     if !socket.exists() {
         println!("no running daemon");
         return Ok(());
@@ -404,7 +404,7 @@ pub fn stop_cmd(start: PathBuf) -> Result<()> {
 
 pub fn proc_cmd(start: PathBuf, name: String, op: ProcOp) -> Result<()> {
     let root = resolve_root(start)?;
-    let socket = daemon::state_dir(&root).join("sock");
+    let socket = daemon::socket_path(&root);
     let rt = tokio::runtime::Runtime::new()?;
     match op {
         ProcOp::Tail { n, json } => {
@@ -607,7 +607,7 @@ pub fn trust_cmd(op: TrustOp) -> Result<()> {
             // Always attempt to tear down the forwarder — it's an additive
             // install step and `uninstall` should leave the system clean. No-op
             // if the marker files don't exist.
-            if forwarder::is_installed() {
+            if forwarder::is_installed() || forwarder::legacy_is_installed() {
                 forwarder::uninstall()?;
             } else if forwarder::has_legacy_hosts_block() {
                 forwarder::remove_legacy_hosts_block();
@@ -660,6 +660,12 @@ pub fn trust_cmd(op: TrustOp) -> Result<()> {
                 println!(
                     "✗ :443 forwarder not installed. Hostname URLs use :{} unless you run `preceipts trust install --forwarder`.",
                     proxy::PROXY_PORT
+                );
+            }
+            if forwarder::legacy_is_installed() {
+                println!(
+                    "! a dead :443 helper from procpane is still registered; \
+                     `preceipts trust uninstall` removes it"
                 );
             }
             // Hostnames themselves need nothing installed: macOS resolves
@@ -842,7 +848,7 @@ pub fn grep_cmd(
     json: bool,
 ) -> Result<()> {
     let root = resolve_root(start)?;
-    let socket = daemon::state_dir(&root).join("sock");
+    let socket = daemon::socket_path(&root);
     let rt = tokio::runtime::Runtime::new()?;
     let resp = rt.block_on(cli_client::call(
         &socket,

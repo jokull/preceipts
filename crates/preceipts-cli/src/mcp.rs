@@ -302,6 +302,8 @@ fn running_services(root: &Path) -> Value {
                 "state": p.state,
                 "pid": p.pid,
                 "hostname": p.hostname,
+                "port": p.port,
+                "url": p.url,
             })).collect::<Vec<_>>(),
         }),
         _ => json!({"up": false}),

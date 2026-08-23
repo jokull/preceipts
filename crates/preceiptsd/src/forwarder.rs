@@ -44,8 +44,21 @@ const HOSTS_BEGIN: &str =
     "# BEGIN procpane hostnames (managed by `procpane trust install --pretty-urls`)";
 const HOSTS_END: &str = "# END procpane hostnames";
 
+/// Is *our* forwarder installed — which is to say, will a portless URL work?
+///
+/// Deliberately not true for procpane's plist. That helper runs a binary this
+/// project no longer ships, so on a machine that has it, `:443` has a
+/// registered LaunchDaemon and nothing listening. Counting it as installed
+/// makes every reported URL drop its port and quietly stop working, which is
+/// exactly the kind of wrong that looks like a DNS problem.
 pub fn is_installed() -> bool {
-    Path::new(PROXY_PLIST_PATH).is_file() || Path::new(LEGACY_PLIST_PATH).is_file()
+    Path::new(PROXY_PLIST_PATH).is_file()
+}
+
+/// Is procpane's dead helper still registered? Only `uninstall` and `status`
+/// care — it is something to clean up, never something to route through.
+pub fn legacy_is_installed() -> bool {
+    Path::new(LEGACY_PLIST_PATH).is_file()
 }
 
 pub fn install() -> Result<()> {
@@ -70,7 +83,7 @@ pub fn uninstall() -> Result<()> {
     // Ignore errors because the helper may not be loaded.
     run_sudo_quiet(&["launchctl", "bootout", "system", PROXY_PLIST_PATH]);
     let _ = run_sudo(&["/bin/rm", "-f", PROXY_PLIST_PATH]);
-    if Path::new(LEGACY_PLIST_PATH).is_file() {
+    if legacy_is_installed() {
         println!("  removing the helper procpane installed under {LEGACY_LABEL}");
         run_sudo_quiet(&["launchctl", "bootout", "system", LEGACY_PLIST_PATH]);
         let _ = run_sudo(&["/bin/rm", "-f", LEGACY_PLIST_PATH]);

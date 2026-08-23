@@ -38,6 +38,14 @@ pub const LEGACY_CA_COMMON_NAME: &str = "procpane Local Development CA";
 /// the user re-trusts it, which is inconvenient but not broken. Refusing to
 /// start because an old directory would not move would be worse.
 fn migrate_legacy_ca() {
+    // Once per process: this is called from a predicate, and a rename that
+    // races itself would be a poor reward for asking a question.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let mut ran = false;
+    ONCE.call_once(|| ran = true);
+    if !ran {
+        return;
+    }
     let Some(home) = dirs::home_dir() else { return };
     let legacy = home.join(LEGACY_CA_DIR_NAME);
     let current = home.join(CA_DIR_NAME);
@@ -48,7 +56,7 @@ fn migrate_legacy_ca() {
         let _ = fs::create_dir_all(parent);
     }
     if fs::rename(&legacy, &current).is_ok() {
-        println!("  migrated the local CA from {} ", legacy.display());
+        println!("  migrated the local CA from {}", legacy.display());
     }
 }
 
@@ -65,14 +73,27 @@ pub fn ca_key_path() -> Result<PathBuf> {
     Ok(ca_dir()?.join(CA_KEY_FILE))
 }
 
+/// True when a usable CA exists, migrating procpane's if that is the one we
+/// have.
+///
+/// The migration runs here rather than only in `ensure_ca` because reads come
+/// first in practice: `trust status` and the proxy both ask "is there a CA"
+/// long before anything asks for one to be made, and a machine with a
+/// perfectly good trusted CA reporting "not generated" would send the user to
+/// install a second one.
 pub fn is_installed() -> bool {
+    migrate_legacy_ca();
+    is_present()
+}
+
+fn is_present() -> bool {
     matches!(ca_cert_path(), Ok(p) if p.is_file()) && matches!(ca_key_path(), Ok(p) if p.is_file())
 }
 
 /// Generate root CA cert + key, write to ca_dir(). Idempotent.
 pub fn ensure_ca() -> Result<()> {
     migrate_legacy_ca();
-    if is_installed() {
+    if is_present() {
         return Ok(());
     }
     let dir = ca_dir()?;

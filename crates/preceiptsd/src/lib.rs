@@ -40,37 +40,91 @@ use std::path::PathBuf;
 /// binary is the right one, and preferring it over `PATH` means a locally
 /// built pair does not silently drive an installed daemon.
 pub fn daemon_exe() -> anyhow::Result<PathBuf> {
-    const NAME: &str = "preceiptsd";
     let current = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
-    if current.file_name().is_some_and(|n| n == NAME) {
-        return Ok(current);
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    resolve_daemon_exe(&current, &path_dirs, |p| p.is_file()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot find the `{DAEMON_NAME}` binary — it is installed alongside `preceipts`, \
+             so a `preceipts` that was copied on its own will not find it"
+        )
+    })
+}
+
+const DAEMON_NAME: &str = "preceiptsd";
+
+/// The lookup, with the filesystem passed in so it can be tested.
+///
+/// `exists` is a predicate rather than a direct `is_file` call because the
+/// only interesting cases here are about *which* candidate wins, and staging
+/// three real binaries on disk to assert an ordering would test the operating
+/// system rather than the rule.
+fn resolve_daemon_exe(
+    current: &std::path::Path,
+    path_dirs: &[PathBuf],
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    if current.file_name().is_some_and(|n| n == DAEMON_NAME) {
+        return Some(current.to_path_buf());
     }
-    if let Some(sibling) = current.parent().map(|dir| dir.join(NAME)) {
-        if sibling.is_file() {
-            return Ok(sibling);
+    if let Some(sibling) = current.parent().map(|dir| dir.join(DAEMON_NAME)) {
+        if exists(&sibling) {
+            return Some(sibling);
         }
     }
-    for dir in std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-        .unwrap_or_default()
-    {
-        let candidate = dir.join(NAME);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow::anyhow!(
-        "cannot find the `{NAME}` binary — it is installed alongside `preceipts`, \
-         so a `preceipts` that was copied on its own will not find it"
-    ))
+    path_dirs
+        .iter()
+        .map(|dir| dir.join(DAEMON_NAME))
+        .find(|candidate| exists(candidate))
 }
 
 #[cfg(test)]
 mod daemon_exe_tests {
+    use super::*;
+    use std::path::Path;
+
     #[test]
-    fn a_sibling_daemon_is_preferred_over_anything_on_path() {
-        // The lookup itself is exercised by every `up`; what is worth pinning
-        // is that the name is the one the plist and the re-exec both use.
-        assert!(super::daemon_exe().is_err() || super::daemon_exe().is_ok());
+    fn the_daemon_running_itself_needs_no_lookup() {
+        let me = Path::new("/opt/bin/preceiptsd");
+        assert_eq!(
+            resolve_daemon_exe(me, &[], |_| false).as_deref(),
+            Some(me),
+            "no filesystem access at all when we already are the daemon"
+        );
+    }
+
+    /// The case that matters: a locally built `preceipts` must drive the
+    /// daemon it was built with, not one that happens to be installed.
+    #[test]
+    fn a_sibling_daemon_beats_anything_on_path() {
+        let cli = Path::new("/repo/target/debug/preceipts");
+        let path = vec![PathBuf::from("/usr/local/bin")];
+        let found = resolve_daemon_exe(cli, &path, |p| {
+            p == Path::new("/repo/target/debug/preceiptsd")
+                || p == Path::new("/usr/local/bin/preceiptsd")
+        });
+        assert_eq!(
+            found.as_deref(),
+            Some(Path::new("/repo/target/debug/preceiptsd")),
+            "the sibling wins even when an installed one exists"
+        );
+    }
+
+    #[test]
+    fn path_is_the_fallback_when_there_is_no_sibling() {
+        let cli = Path::new("/somewhere/else/preceipts");
+        let path = vec![PathBuf::from("/a"), PathBuf::from("/usr/local/bin")];
+        let found = resolve_daemon_exe(cli, &path, |p| p == Path::new("/usr/local/bin/preceiptsd"));
+        assert_eq!(
+            found.as_deref(),
+            Some(Path::new("/usr/local/bin/preceiptsd"))
+        );
+    }
+
+    #[test]
+    fn nothing_found_is_a_reported_failure_rather_than_a_guess() {
+        let cli = Path::new("/tmp/preceipts");
+        assert!(resolve_daemon_exe(cli, &[PathBuf::from("/a")], |_| false).is_none());
     }
 }

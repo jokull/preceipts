@@ -9,15 +9,8 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
-
-    /// Override repo root (defaults to nearest turbo.json ancestor)
-    #[arg(long, global = true)]
-    pub cwd: Option<std::path::PathBuf>,
-
-    /// Keychain database to store/read project secrets in. Defaults to the
-    /// default keychain; can also be set via PRECEIPTS_KEYCHAIN.
-    #[arg(long, short = 'k', global = true)]
-    pub keychain: Option<String>,
+    // No global options: both verbs below take what they need as arguments,
+    // and advertising flags the binary ignores is worse than having none.
 }
 
 /// `preceiptsd` exposes only what launchd and `preceipts up` invoke.

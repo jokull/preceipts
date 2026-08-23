@@ -67,6 +67,17 @@ pub struct ProcStatus {
     /// Hostname mapped via reverse proxy, when configured.
     #[serde(default)]
     pub hostname: Option<String>,
+    /// The port the daemon allocated for this task, when it allocated one.
+    ///
+    /// Reported because an agent that only has a hostname cannot reach a
+    /// service until the `:443` forwarder is installed, and "what is around
+    /// me" is supposed to be answerable without a privileged install first.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The URL to actually open: portless when the forwarder is installed,
+    /// with the proxy port when it is not.
+    #[serde(default)]
+    pub url: Option<String>,
     /// One-line diagnostic hints surfaced by the daemon (e.g. "wrangler
     /// detected → CLOUDFLARE_INCLUDE_PROCESS_ENV=true").
     #[serde(default)]
