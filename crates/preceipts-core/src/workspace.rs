@@ -187,6 +187,12 @@ pub fn create(
 
     main.worktree(&id, &path, Some(&options))?;
 
+    // Our bookkeeping must never show up as the user's change. `info/exclude`
+    // lives in the common dir and is shared by every worktree, which is
+    // exactly right — every workspace has a marker — and it keeps us out of
+    // the user's own .gitignore.
+    exclude_marker(&main);
+
     if let Some(genesis) = genesis {
         write_genesis(&path, genesis)?;
     }
@@ -261,6 +267,25 @@ fn project_root_name(root: &Path) -> String {
     root.file_name()
         .map(|n| slug(&n.to_string_lossy()))
         .unwrap_or_else(|| "project".to_string())
+}
+
+/// Add the marker to the repository's `info/exclude`, once.
+///
+/// Best-effort: a repo we cannot write to still works, the marker just shows
+/// up as an untracked file. Not worth failing a workspace over.
+fn exclude_marker(main: &Repository) -> Option<()> {
+    let exclude = main.path().join("info").join("exclude");
+    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if current.lines().any(|line| line.trim() == MARKER) {
+        return Some(());
+    }
+    std::fs::create_dir_all(exclude.parent()?).ok()?;
+    let mut next = current;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(&format!("{MARKER}\n"));
+    std::fs::write(&exclude, next).ok()
 }
 
 fn read_genesis(worktree: &Path) -> Option<String> {
@@ -485,5 +510,24 @@ mod tests {
             .unwrap();
         // Newlines are escaped into the marker; the first line round-trips.
         assert!(found.genesis.unwrap().contains("fix \\\"checkout\\\""));
+    }
+
+    /// The marker is our bookkeeping. If it shows up as the user's change,
+    /// every workspace starts life with a spurious added file in its diff.
+    #[test]
+    fn the_marker_never_appears_as_a_change() {
+        let (_temp, dir) = project();
+        let ws = create(&dir, "quiet", Some("some intent"), None).unwrap();
+
+        let changeset =
+            crate::loader::load(&ws.path, crate::model::DiffScope::Branch, false).unwrap();
+        assert!(
+            !changeset
+                .files
+                .iter()
+                .any(|f| f.path.contains(".preceipts")),
+            "marker leaked into the diff: {:?}",
+            changeset.files.iter().map(|f| &f.path).collect::<Vec<_>>()
+        );
     }
 }

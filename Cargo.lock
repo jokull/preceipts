@@ -5079,6 +5079,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "preceipts-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "preceipts-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "preceipts-core"
 version = "0.1.0"
 dependencies = [
