@@ -12,7 +12,7 @@
 //! line, field order stable, `v: 1`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runner {
@@ -53,6 +53,20 @@ pub struct Receipt {
     /// from a stale result.
     #[serde(default)]
     pub check_blob: String,
+    /// How real the environment was, service by service.
+    ///
+    /// A receipt without this field says "check `test` passed against tree
+    /// `abc123`" and nothing about what the test was talking to — a real
+    /// Postgres or a stub, real test keys or a mock that says yes to
+    /// everything. Same tree, same green, very different amounts of proof.
+    ///
+    /// **Optional on the wire, and omitted entirely when empty.** Receipts
+    /// this repository minted in July 2026 are in its notes and are pinned by
+    /// a byte-identical re-encode test; a field that serialized as `null` or
+    /// `{}` would break them. A receipt without a fidelity map means exactly
+    /// what it always meant. A receipt with one means more.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fidelity: BTreeMap<String, String>,
 }
 
 fn minus_one() -> i32 {
@@ -146,6 +160,53 @@ mod tests {
         receipt.runner.agent = Some("claude".to_string());
         let again = parse_line(&receipt.encode()).unwrap();
         assert_eq!(again.runner.agent.as_deref(), Some("claude"));
+    }
+
+    /// The whole reason the field is optional: a receipt minted before it
+    /// existed must survive a round trip through code that knows about it.
+    #[test]
+    fn a_receipt_without_fidelity_re_encodes_without_the_field() {
+        let receipt = parse_line(REAL).unwrap();
+        assert!(receipt.fidelity.is_empty());
+        assert!(
+            !receipt.encode().contains("fidelity"),
+            "an empty map must not appear on the wire at all: {}",
+            receipt.encode()
+        );
+    }
+
+    #[test]
+    fn a_fidelity_map_round_trips_and_is_sorted() {
+        let mut receipt = parse_line(REAL).unwrap();
+        receipt
+            .fidelity
+            .insert("stripe".to_string(), "mocked".to_string());
+        receipt
+            .fidelity
+            .insert("db".to_string(), "local-real".to_string());
+        let encoded = receipt.encode();
+        // BTreeMap, so the order is the map's and not the insertion's — two
+        // runs of the same environment produce the same bytes.
+        assert!(
+            encoded.contains(r#""fidelity":{"db":"local-real","stripe":"mocked"}"#),
+            "{encoded}"
+        );
+        let again = parse_line(&encoded).unwrap();
+        assert_eq!(again, receipt);
+    }
+
+    /// "These checks passed" and "these checks passed with Stripe mocked" are
+    /// different claims. The point of the field is that they no longer look
+    /// the same.
+    #[test]
+    fn two_receipts_differing_only_in_fidelity_are_not_equal() {
+        let plain = parse_line(REAL).unwrap();
+        let mut mocked = plain.clone();
+        mocked
+            .fidelity
+            .insert("stripe".to_string(), "mocked".to_string());
+        assert_ne!(plain, mocked);
+        assert_eq!(plain.tree, mocked.tree, "same tree, different proof");
     }
 
     #[test]

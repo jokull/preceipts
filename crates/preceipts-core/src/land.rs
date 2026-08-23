@@ -128,6 +128,24 @@ pub fn build_trailers(receipts: &[Receipt], tree: &str, stale: Option<&StaleInfo
         ));
     }
 
+    // What the environment was, for the services that were not fully real.
+    // A landed commit that says "Receipts: test ✓" and nothing else invites
+    // the reader to assume the test talked to the real thing; naming the
+    // stand-ins is the difference between a proof and an impression. Only
+    // qualified services appear — listing the real ones would bury this.
+    let qualified: std::collections::BTreeSet<String> = receipts
+        .iter()
+        .flat_map(|receipt| receipt.fidelity.iter())
+        .filter(|(_, fidelity)| fidelity.as_str() != "local-real")
+        .map(|(service, fidelity)| format!("{service}={fidelity}"))
+        .collect();
+    if !qualified.is_empty() {
+        trailers.push(format!(
+            "Receipts-Fidelity: {}",
+            qualified.into_iter().collect::<Vec<_>>().join(" ")
+        ));
+    }
+
     if let Some(stale) = stale {
         trailers.push(format!(
             "Receipts-Stale: base moved {}→{}",
@@ -529,6 +547,42 @@ mod tests {
         .to_string();
         assert!(message.contains("not green"), "{message}");
         assert!(message.contains("preceipts run"), "the error says the fix");
+    }
+
+    /// A landed commit should not let a reader assume more than was proved.
+    #[test]
+    fn the_trailer_names_the_stand_ins_and_only_the_stand_ins() {
+        let mut receipt = receipt("test", 1000, "2026-08-23T10:00:00Z");
+        receipt
+            .fidelity
+            .insert("db".to_string(), "local-real".to_string());
+        receipt
+            .fidelity
+            .insert("stripe".to_string(), "mocked".to_string());
+        receipt
+            .fidelity
+            .insert("turnstile".to_string(), "disabled".to_string());
+
+        let trailers = build_trailers(&[receipt], TREE, None);
+        let fidelity = trailers
+            .iter()
+            .find(|t| t.starts_with("Receipts-Fidelity:"))
+            .expect("a qualified environment is stated");
+        assert_eq!(
+            fidelity, "Receipts-Fidelity: stripe=mocked turnstile=disabled",
+            "the real service is not worth a reader's attention; the fakes are"
+        );
+    }
+
+    /// The other half: a fully real environment adds no noise.
+    #[test]
+    fn a_wholly_real_environment_adds_no_trailer() {
+        let mut receipt = receipt("test", 1000, "2026-08-23T10:00:00Z");
+        receipt
+            .fidelity
+            .insert("db".to_string(), "local-real".to_string());
+        let trailers = build_trailers(&[receipt], TREE, None);
+        assert!(!trailers.iter().any(|t| t.starts_with("Receipts-Fidelity:")));
     }
 
     #[test]

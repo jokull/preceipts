@@ -481,6 +481,7 @@ fn show_status(path: &Path, reference: Option<&str>, json: bool) -> Result<()> {
                     "state": row.state.as_str(),
                     "ok": row.receipt.as_ref().map(|r| r.ok),
                     "started": row.receipt.as_ref().map(|r| r.started.clone()),
+                    "fidelity": row.receipt.as_ref().map(|r| r.fidelity.clone()),
                 })
             })
             .collect();
@@ -516,6 +517,25 @@ fn show_status(path: &Path, reference: Option<&str>, json: bool) -> Result<()> {
         &status.tree[..12],
         if status.green { "green" } else { "not green" }
     );
+
+    // Green is a weaker word when half the environment was a stand-in, so the
+    // qualification sits next to the verdict rather than a flag away from it.
+    // Only the services that are not fully real are named: listing every
+    // local-real service would bury the one line that matters.
+    let qualified: std::collections::BTreeSet<String> = status
+        .rows
+        .iter()
+        .filter_map(|row| row.receipt.as_ref())
+        .flat_map(|receipt| receipt.fidelity.iter())
+        .filter(|(_, fidelity)| fidelity.as_str() != "local-real")
+        .map(|(service, fidelity)| format!("{service} {fidelity}"))
+        .collect();
+    if !qualified.is_empty() {
+        println!(
+            "  with {}",
+            qualified.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
     if !status.green {
         std::process::exit(1);
     }

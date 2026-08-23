@@ -714,6 +714,7 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
     let repo = notes::open(root)?;
     let runner = notes::runner_identity(&repo);
     let started = timestamp();
+    let fidelity = declared_fidelity(root);
 
     for (check, outcome) in checks.iter().zip(&outcomes) {
         let log = notes::store_log(&repo, outcome.output.as_bytes())?;
@@ -731,6 +732,7 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
             dirty: settled.dirty,
             log: format!("blob:{log}"),
             check_blob,
+            fidelity: fidelity.clone(),
         };
         notes::append_receipt(&repo, &settled.tree, &receipt.encode())?;
     }
@@ -741,6 +743,25 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
         outcomes,
         prepared,
     })
+}
+
+/// How real each declared service is, for the receipt to record.
+///
+/// Only a `preceipts.toml` that actually exists counts. Detection is
+/// deliberately not consulted: a fidelity map is a *claim about the
+/// environment*, and inferring one from the shape of a repository would put a
+/// guess where a statement belongs. A project with no manifest gets no field
+/// at all, which is both honest and byte-identical to every receipt minted
+/// before this existed.
+fn declared_fidelity(root: &Path) -> BTreeMap<String, String> {
+    let Ok(Some(manifest)) = crate::manifest::load(root) else {
+        return BTreeMap::new();
+    };
+    manifest
+        .services
+        .iter()
+        .map(|service| (service.name.clone(), service.fidelity.as_str().to_string()))
+        .collect()
 }
 
 fn shell(root: &Path, cmd: &str, timeout: Duration) -> Result<Bounded> {
@@ -1093,6 +1114,60 @@ mod tests {
         // Sanity-check the calendar maths against a known instant.
         let (y, m, d, h, min, s) = civil_from_unix(1_700_000_000);
         assert_eq!((y, m, d, h, min, s), (2023, 11, 14, 22, 13, 20));
+    }
+}
+
+#[cfg(test)]
+mod fidelity_tests {
+    use super::tests::{project, write_check};
+    use super::*;
+
+    fn latest(root: &Path, tree: &str, check: &str) -> Receipt {
+        let repo = notes::open(root).unwrap();
+        let text = notes::read_note(&repo, tree).unwrap_or_default();
+        crate::receipt::latest_by_check(&crate::receipt::parse_all(&text))
+            .remove(check)
+            .expect("a receipt for that check")
+    }
+
+    /// The common case, and the one the wire-format contract protects: no
+    /// manifest, no field, nothing changed about what a receipt looks like.
+    #[test]
+    fn a_project_without_a_manifest_mints_receipts_that_claim_nothing() {
+        let (_t, dir) = project("[required]\nchecks = [\"green\"]\n");
+        write_check(&dir, "green", "#!/bin/bash\necho fine\n");
+
+        let report = run(&dir, None).unwrap();
+        let receipt = latest(&dir, &report.tree, "green");
+        assert!(receipt.fidelity.is_empty());
+        assert!(!receipt.encode().contains("fidelity"));
+    }
+
+    /// The claim the field exists to make: this green happened with Stripe
+    /// mocked, and the receipt says so rather than leaving it to be assumed.
+    #[test]
+    fn a_declared_environment_is_recorded_on_every_receipt() {
+        let (_t, dir) = project("[required]\nchecks = [\"green\"]\n");
+        write_check(&dir, "green", "#!/bin/bash\necho fine\n");
+        std::fs::write(
+            dir.join("preceipts.toml"),
+            "[services.db]\nimage = \"postgres:17\"\n\n\
+             [services.stripe]\nrun = \"stripe listen\"\nfidelity = \"mocked\"\n",
+        )
+        .unwrap();
+
+        let report = run(&dir, None).unwrap();
+        let receipt = latest(&dir, &report.tree, "green");
+        assert_eq!(
+            receipt.fidelity.get("stripe").map(String::as_str),
+            Some("mocked"),
+            "a mocked provider is on the record: {:?}",
+            receipt.fidelity
+        );
+        assert_eq!(
+            receipt.fidelity.get("db").map(String::as_str),
+            Some("local-real")
+        );
     }
 }
 

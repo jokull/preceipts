@@ -229,6 +229,10 @@ fn call(root: &Path, params: &Value) -> Result<Value> {
                     "check": row.check,
                     "required": row.required,
                     "state": row.state.as_str(),
+                    // So an agent reading "green" cannot report it as more
+                    // than it is: a pass against a mocked provider is route
+                    // proof, not payment proof.
+                    "fidelity": row.receipt.as_ref().map(|r| r.fidelity.clone()),
                 })).collect::<Vec<_>>(),
             })
         }
