@@ -374,12 +374,19 @@ fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> Drain {
             let mut chunk = [0u8; 8192];
             loop {
                 match pipe.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
                     Ok(n) => {
                         if let Ok(mut buffer) = buffer.lock() {
                             buffer.extend_from_slice(&chunk[..n]);
                         }
                     }
+                    // A signal arriving mid-read is not end of output. Treating
+                    // `Interrupted` as EOF discards everything the check said,
+                    // and does it intermittently — under load, where SIGCHLD
+                    // and thread scheduling make EINTR likely, and never when
+                    // the same check is run on its own.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
                 }
             }
             finished.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1232,6 +1239,13 @@ mod timeout_tests {
 
     /// The regression this all exists for: before timeouts, a check that never
     /// returned hung `run` — and therefore `watch` — forever.
+    ///
+    /// Three seconds rather than one, deliberately. The assertion below is
+    /// that output written *before* the kill survives, which requires the
+    /// child to have started — and on a machine running this whole suite in
+    /// parallel, with dozens of git subprocesses in flight, spawning bash can
+    /// take most of a second. A one-second budget made this test fail on the
+    /// child's startup latency and call it a lost pipe.
     #[test]
     fn a_hanging_check_is_killed_and_recorded_as_failed() {
         let (_t, dir) =
