@@ -240,7 +240,7 @@ mod tests {
 
         let exe = std::env::current_exe().expect("current_exe");
         let service = "is.solberg.preceipts.acl-test";
-        add_generic_password_trusting(service, "TOKEN", "s3cret", Some(&path), &[exe.clone()])
+        add_generic_password_trusting(service, "TOKEN", "s3cret", Some(&path), std::slice::from_ref(&exe))
             .expect("writing an item with an ACL");
 
         let opened = SecKeychain::open(&path).expect("open the test keychain");

@@ -22,15 +22,19 @@ pub struct SurfaceView {
     changeset: Changeset,
     surface: Surface,
     theme: Theme,
+    /// Resolved once, because asking the text system what is installed is not
+    /// a question to answer on every frame.
+    code_font: gpui::SharedString,
 }
 
 impl SurfaceView {
-    pub fn new(changeset: Changeset) -> Self {
+    pub fn new(changeset: Changeset, code_font: gpui::SharedString) -> Self {
         let surface = Surface::build(&changeset);
         Self {
             changeset,
             surface,
             theme: Theme::default(),
+            code_font,
         }
     }
 
@@ -186,7 +190,7 @@ impl Render for SurfaceView {
             .size_full()
             .bg(self.theme.background)
             .text_color(self.theme.text)
-            .font_family("SF Mono")
+            .font_family(self.code_font.clone())
             .text_size(px(12.0))
             .child(
                 uniform_list("diff-surface", count, move |range, _window, cx| {

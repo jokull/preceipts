@@ -19,6 +19,10 @@ pub struct Theme {
     pub added_emphasis: Hsla,
     pub removed_emphasis: Hsla,
     pub header_bg: Hsla,
+    /// For a check that has not run. Deliberately not red: an unrecorded
+    /// check and a failing one are different facts, and this project's whole
+    /// claim is that a receipt means something.
+    pub pending: Hsla,
 }
 
 impl Default for Theme {
@@ -35,6 +39,7 @@ impl Default for Theme {
             added_emphasis: rgb(0x1f5c37).into(),
             removed_emphasis: rgb(0x6e2229).into(),
             header_bg: rgb(0x2a2a2e).into(),
+            pending: rgb(0x3f3f46).into(),
         }
     }
 }
@@ -61,4 +66,33 @@ impl Theme {
             _ => self.text,
         }
     }
+}
+
+/// The monospace family to render code in, chosen from what is installed.
+///
+/// This is not a style preference. `SF Mono` is the obvious name to ask for
+/// and it is the one name that does not work: macOS ships it as the *private*
+/// family `.SF NS Mono`, so `font_family("SF Mono")` matches nothing and the
+/// text system quietly falls back to a proportional face. A diff set in body
+/// text is the single loudest thing wrong with the window, and nothing in the
+/// code says so — the name looks right.
+///
+/// So ask the text system what exists and take the first we like. `Menlo`
+/// ships with every macOS, which is why it anchors the list rather than
+/// sitting in it as one more hopeful guess.
+pub fn code_font(cx: &gpui::App) -> gpui::SharedString {
+    const PREFERRED: [&str; 5] = [
+        "JetBrains Mono",
+        "IBM Plex Mono",
+        "SF Mono",
+        "Menlo",
+        "Monaco",
+    ];
+    let available = cx.text_system().all_font_names();
+    for name in PREFERRED {
+        if available.iter().any(|found| found == name) {
+            return name.into();
+        }
+    }
+    "monospace".into()
 }

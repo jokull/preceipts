@@ -1,7 +1,6 @@
 //! `preceiptsd` — the daemon binary.
 
 use anyhow::Result;
-use clap::Parser;
 
 use preceiptsd::cli::{Cli, Cmd};
 use preceiptsd::commands;

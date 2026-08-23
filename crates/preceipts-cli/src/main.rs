@@ -11,32 +11,41 @@ mod branch;
 mod mcp;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
 use preceipts_core::checks::{self, CheckState};
 use preceipts_core::workspace::{self, Workspace};
 use preceipts_core::LandOptions;
 use preceipts_core::{load, DiffScope};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use usage::{Args, Cli, Subcommands};
 
-#[derive(Parser)]
-#[command(name = "preceipts", about = "The workbench around AI coding.", version)]
+#[derive(Cli)]
+#[usage(
+    bin = "preceipts",
+    about = "The workbench around AI coding.",
+    version,
+    // Left alone, a flag this CLI does not know becomes a positional *value*:
+    // `preceipts new --brnach x` would quietly file the typo as part of the
+    // prompt. Every verb here is meant to be scripted, and a script cannot
+    // notice that. Say so instead.
+    unknown_flags = "error"
+)]
 struct Cli {
     /// Repository or worktree to act on. Defaults to the working directory,
     /// which is what makes every command work from inside a workspace.
-    #[arg(long, short = 'C', global = true)]
+    #[usage(long, short = 'C', global = true)]
     path: Option<PathBuf>,
 
     /// Keychain database to store/read project secrets in. Defaults to the
     /// default keychain; also settable with PRECEIPTS_KEYCHAIN.
-    #[arg(long, short = 'k', global = true)]
+    #[usage(long, short = 'k', global = true)]
     keychain: Option<String>,
 
-    #[command(subcommand)]
+    #[usage(subcommand)]
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommands)]
 enum Command {
     /// Create a workspace: a worktree, a branch named from your intent, and
     /// that intent recorded.
@@ -44,47 +53,47 @@ enum Command {
         /// What this workspace is for. Becomes the branch name and is kept.
         prompt: Vec<String>,
         /// Override the derived branch name.
-        #[arg(long)]
+        #[usage(long)]
         branch: Option<String>,
         /// Where to put the worktree. Defaults to a sibling of the project.
-        #[arg(long)]
+        #[usage(long)]
         parent: Option<PathBuf>,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// List every workspace of this project.
-    #[command(alias = "ls")]
+    #[usage(aliases = ["ls"])]
     List {
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Which workspace does this directory stand in?
     Where {
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Summarize the diff: files, lines, base.
     Diff {
         /// Compare against the working tree instead of the merge base.
-        #[arg(long)]
+        #[usage(long)]
         uncommitted: bool,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Run the checks and mint receipts for the working tree.
     Run {
         /// Only these checks. Defaults to all of them.
         checks: Vec<String>,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Receipt table for a tree.
     Status {
         /// Ref to inspect. Defaults to the working tree — the same tree `run`
         /// mints against.
-        #[arg(long)]
+        #[usage(long)]
         r#ref: Option<String>,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Squash-land a branch onto its base, receipts willing.
@@ -92,36 +101,36 @@ enum Command {
         /// Branch to land. Defaults to the current one.
         branch: Option<String>,
         /// Base branch. Defaults to main.
-        #[arg(long)]
+        #[usage(long)]
         onto: Option<String>,
         /// Subject line. Defaults to "<branch> (squash)".
-        #[arg(long, short = 'm')]
+        #[usage(long, short = 'm')]
         message: Option<String>,
         /// Land even though the base moved, recording a Receipts-Stale trailer.
-        #[arg(long)]
+        #[usage(long)]
         allow_stale: bool,
         /// Make a moved base a hard failure rather than a prompt.
-        #[arg(long)]
+        #[usage(long)]
         require_fresh: bool,
-        #[arg(long)]
+        #[usage(long)]
         no_push: bool,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Every receipt recorded in this repository.
     Log {
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Validate preceipts.toml and explain what is wrong with it.
     Doctor {
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Run the checks whenever the worktree goes quiet.
     Watch {
         /// Seconds the tree must hold still before checks fire.
-        #[arg(long, default_value = "2")]
+        #[usage(long, default = "2")]
         quiet: u64,
         /// Only these checks.
         checks: Vec<String>,
@@ -133,24 +142,24 @@ enum Command {
     /// Retire procpane: convert its manifest, move its secrets, clean up.
     Migrate {
         /// Show what would change without changing anything.
-        #[arg(long)]
+        #[usage(long)]
         dry_run: bool,
     },
     /// Share receipts with origin: fetch, merge losslessly, push.
     Sync {
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Prune stored logs whose receipts have aged out. Receipts are permanent.
     Gc {
         /// How long a passing check's log is kept.
-        #[arg(long, default_value = "30d")]
+        #[usage(long, default = "30d")]
         keep_success: String,
         /// How long a failing check's log is kept — longer, because those are
         /// the ones someone comes back to.
-        #[arg(long, default_value = "90d")]
+        #[usage(long, default = "90d")]
         keep_failure: String,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Remove a workspace's worktree and its registration.
@@ -165,74 +174,89 @@ enum Command {
     // because the lab has one door: anything the app can do, `preceipts` can
     // do, and an agent should not have to learn which tool owns which verb.
     /// Bring the project's services up, healthcheck-gated, in the background.
-    #[command(alias = "start")]
+    #[usage(aliases = ["start"])]
     Up {
         /// Task names (`dev`) or qualified ids (`web#dev`). Omit for every
         /// task the project declares.
         tasks: Vec<String>,
         /// Run in the foreground rather than detaching.
-        #[arg(long)]
+        #[usage(long)]
         foreground: bool,
         /// Skip the prebuild step for non-persistent dependencies.
-        #[arg(long)]
+        #[usage(long)]
         no_prebuild: bool,
     },
     /// Stop the daemon for this project.
-    #[command(alias = "stop")]
+    #[usage(aliases = ["stop"])]
     Down,
     /// What is running, and is it healthy.
     Services {
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
         /// Include background builders, not just declared services.
-        #[arg(long)]
+        #[usage(long)]
         all: bool,
     },
     /// Block until a service is healthy. 0 = healthy, 1 = failed, 2 = timeout.
     WaitFor {
         /// Task id, e.g. `api#dev`.
         name: String,
-        #[arg(long, default_value = "5m")]
+        #[usage(long, default = "5m")]
         timeout: String,
     },
     /// Per-service operations: logs, restart, stop.
-    Proc {
-        name: String,
-        #[command(subcommand)]
-        op: preceiptsd::cli::ProcOp,
-    },
+    Proc(ProcArgs),
     /// Every HTTP request the proxy carried, and what answered it.
     Requests {
         /// Only this hostname.
-        #[arg(long)]
+        #[usage(long)]
         host: Option<String>,
         /// Only the last `2m`, `30s`, `1h`.
-        #[arg(long)]
+        #[usage(long)]
         since: Option<String>,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Search every service's output at once.
     Grep {
         pattern: String,
-        #[arg(short = 'A', long, default_value_t = 0)]
+        #[usage(short = 'A', long, default_value_t = 0, default = "0")]
         after: usize,
-        #[arg(short = 'B', long, default_value_t = 0)]
+        #[usage(short = 'B', long, default_value_t = 0, default = "0")]
         before: usize,
-        #[arg(long)]
+        #[usage(long)]
         json: bool,
     },
     /// Project secrets in the macOS Keychain.
-    #[command(alias = "env")]
+    #[usage(aliases = ["env"])]
     Secrets {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         op: preceiptsd::cli::EnvOp,
     },
     /// The local Certificate Authority, and the :443 forwarder.
     Trust {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         op: preceiptsd::cli::TrustOp,
     },
+}
+
+// `preceipts proc web#dev tail`: the service name, then the operation. Its own
+// struct rather than fields on the variant, because that shape needs
+// `subcommand_precedence_over_arg`, and only a command declaration can say it —
+// a word selects a subcommand only while this command's positionals are still
+// empty, so `name` would take the slot and `tail` would have nowhere to go.
+// A doc comment here would replace the variant's help text, hence `//`.
+//
+// The cost: a service actually named `tail`, `grep`, `since` or `signal`
+// cannot be addressed this way — the first word routes as the operation and
+// the invocation fails with "unexpected argument". It fails loudly rather
+// than acting on the wrong service, which is the trade worth taking.
+#[derive(Args)]
+#[usage(subcommand_precedence_over_arg = true)]
+struct ProcArgs {
+    name: String,
+    #[usage(subcommand)]
+    op: preceiptsd::cli::ProcOp,
 }
 
 fn main() {
@@ -264,7 +288,7 @@ fn run() -> Result<()> {
         Command::WaitFor { name, timeout } => {
             preceiptsd::commands::wait_for_cmd(path, name, timeout)
         }
-        Command::Proc { name, op } => preceiptsd::commands::proc_cmd(path, name, op),
+        Command::Proc(ProcArgs { name, op }) => preceiptsd::commands::proc_cmd(path, name, op),
         Command::Requests { host, since, json } => {
             preceiptsd::commands::requests_cmd(path, host, since, json)
         }

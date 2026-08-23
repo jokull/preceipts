@@ -21,6 +21,7 @@ pub struct Cockpit {
     status: Option<Status>,
     surface: Entity<SurfaceView>,
     theme: Theme,
+    code_font: gpui::SharedString,
 }
 
 impl Cockpit {
@@ -37,7 +38,11 @@ impl Cockpit {
             changeset.total_removed(),
             changeset.base_name.clone(),
         );
-        let surface = cx.new(|_| SurfaceView::new(changeset));
+        let code_font = crate::theme::code_font(cx);
+        let surface = {
+            let code_font = code_font.clone();
+            cx.new(|_| SurfaceView::new(changeset, code_font))
+        };
         Self {
             workspaces,
             current,
@@ -45,6 +50,7 @@ impl Cockpit {
             status,
             surface,
             theme: Theme::default(),
+            code_font,
         }
     }
 
@@ -128,17 +134,36 @@ impl Cockpit {
     fn render_hud(&self) -> gpui::AnyElement {
         let (files, added, removed, base) = &self.changeset_summary;
 
+        // Not green covers two different facts, and collapsing them is the
+        // one thing this HUD must not do. A check that failed is a verdict; a
+        // check that never ran is an absence. Painting both red tells a
+        // person their tree is broken when nobody has looked at it yet.
         let (verdict, verdict_color) = match &self.status {
             None => ("no checks".to_string(), self.theme.text_dim),
             Some(status) if status.green => ("green".to_string(), self.theme.added_emphasis),
             Some(status) => {
-                let failing: Vec<&str> = status
-                    .rows
-                    .iter()
-                    .filter(|row| row.required && row.state != CheckState::Ok)
-                    .map(|row| row.check.as_str())
-                    .collect();
-                (failing.join(", "), self.theme.removed_emphasis)
+                let named = |wanted: &[CheckState]| -> Vec<&str> {
+                    status
+                        .rows
+                        .iter()
+                        .filter(|row| row.required && wanted.contains(&row.state))
+                        .map(|row| row.check.as_str())
+                        .collect()
+                };
+                let failed = named(&[CheckState::Fail, CheckState::StaleDefinition]);
+                if failed.is_empty() {
+                    // Everything outstanding is simply unrecorded.
+                    let missing = named(&[CheckState::Missing]);
+                    (
+                        format!("not run: {}", missing.join(", ")),
+                        self.theme.pending,
+                    )
+                } else {
+                    (
+                        format!("failed: {}", failed.join(", ")),
+                        self.theme.removed_emphasis,
+                    )
+                }
             }
         };
 
@@ -187,7 +212,7 @@ impl Render for Cockpit {
             .flex_col()
             .bg(self.theme.background)
             .text_color(self.theme.text)
-            .font_family("SF Mono")
+            .font_family(self.code_font.clone())
             .text_size(px(12.0))
             .child(
                 div()
