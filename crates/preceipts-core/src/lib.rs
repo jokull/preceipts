@@ -31,8 +31,10 @@ pub mod linediff;
 pub mod loader;
 pub mod model;
 pub mod pairing;
+pub mod ports;
 pub mod segments;
 pub mod surface;
+pub mod workspace;
 
 #[cfg(test)]
 mod testing;
@@ -47,5 +49,7 @@ pub use linediff::{diff_rows, LineDiff};
 pub use loader::load;
 pub use model::{Changeset, DiffHunk, DiffRow, DiffScope, FileDiff, FileStatus, LineRef, RowKind};
 pub use pairing::{pair_block, similarity, Pairing};
+pub use ports::{Block, Reservations};
 pub use segments::{line_segments, HighlightSpan, Segment};
 pub use surface::{Side, Surface, SurfaceRow};
+pub use workspace::Workspace;
