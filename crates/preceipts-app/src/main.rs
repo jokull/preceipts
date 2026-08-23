@@ -4,15 +4,16 @@
 //! docs/direction-2026-08.md, the port worth proving before anything is built
 //! on top of it. Tabs, the workspace list, and the env panel come after.
 
+mod cockpit;
 mod surface_view;
 mod theme;
 
+use cockpit::Cockpit;
 use gpui::{
     px, size, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 };
 use preceipts_core::{load, DiffScope};
 use std::path::PathBuf;
-use surface_view::SurfaceView;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +46,15 @@ fn main() {
             .unwrap_or_else(|| "detached".to_string()),
         surface_view::summary(&changeset),
     );
+    // The rest of the cockpit's state. All of it degrades: a directory that is
+    // not a workspace still shows its diff, and a project without checks still
+    // shows its stats.
+    let workspaces = preceipts_core::workspace::discover(&repo).unwrap_or_default();
+    let current = preceipts_core::workspace::locate(&repo)
+        .map(|w| w.id)
+        .unwrap_or_else(|_| "main".to_string());
+    let status = preceipts_core::checks::status(&repo, None).ok();
+
     let rows = preceipts_core::Surface::build(&changeset).rows.len();
     println!(
         "{title}\n{rows} rows built in {:.0}ms",
@@ -65,7 +75,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|_cx| SurfaceView::new(changeset)),
+            |_window, cx| cx.new(|cx| Cockpit::new(changeset, workspaces, current, status, cx)),
         )
         .expect("open window");
         cx.activate(true);
