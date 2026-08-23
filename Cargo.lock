@@ -5182,6 +5182,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "core-foundation 0.10.0",
+ "core-foundation-sys",
  "ctrlc",
  "dirs 5.0.1",
  "globset",
@@ -5200,6 +5202,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "serde_yaml",

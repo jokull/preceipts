@@ -190,9 +190,11 @@ stop signal. Delegated to whatever is installed — we do not write a VMM.
 `packaging/package.sh` assembles `Preceipts.app`; `sign.sh` signs it with a
 Developer ID identity. Signed, a secret's ACL names our own binaries by their
 designated requirement, so nothing else on the machine can read it and a
-rebuild does not re-prompt — reads go through the Keychain API in-process,
-because shelling out would present `/usr/bin/security` as the reader and any
-ACL written against that protects nothing. Unsigned, there is no stable
+rebuild does not re-prompt. Both halves happen in-process: shelling out to
+read would present `/usr/bin/security` as the reader, and any ACL written
+against that protects nothing — and an item created by `security` is
+partitioned to Apple's own tools, which can shut our binaries out of an item
+their ACL names. Unsigned, there is no stable
 identity to name, so secrets fall back to an open ACL and `preceipts trust
 status` says so out loud: that trade is defensible, hiding it is not.
 

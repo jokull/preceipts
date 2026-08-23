@@ -218,26 +218,32 @@ mod mac {
         delete_args.extend(kc_args(keychain));
         let _ = sec_run(&delete_args);
 
-        // The password value briefly appears on argv during the subprocess —
-        // local-dev secrets, single-user machine, accepted.
-        let mut add_args = vec!["add-generic-password"];
-        // Held outside the vec so the borrowed &str args outlive the call.
-        let trusted: Vec<String> = match crate::signing::KeychainStrategy::detect() {
-            crate::signing::KeychainStrategy::TeamAcl(_) => crate::signing::trusted_binaries()
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect(),
+        // Signed: create the item ourselves, with its ACL, in one call.
+        //
+        // Not because FFI is nicer, but because a login-keychain item's
+        // partition list is taken from whichever application created it. An
+        // item created by `/usr/bin/security` is partitioned to Apple's own
+        // tools, and our binaries can then be refused an item their ACL
+        // names — the ACL and the partition are two separate gates and both
+        // have to open. Setting the partition afterwards would need the
+        // keychain password. Creating the item does not.
+        let trusted = match crate::signing::KeychainStrategy::detect() {
+            crate::signing::KeychainStrategy::TeamAcl(_) => crate::signing::trusted_binaries(),
             crate::signing::KeychainStrategy::OpenAcl => Vec::new(),
         };
-        if trusted.is_empty() {
-            // No stable identity to name, so no ACL worth writing.
-            add_args.push("-A");
-        } else {
-            for path in &trusted {
-                add_args.push("-T");
-                add_args.push(path);
-            }
+        if !trusted.is_empty() {
+            // No fallback to `-A` on failure: a secret that is quietly less
+            // protected than the caller believes is worse than one that
+            // failed to store.
+            return crate::acl::add_generic_password_trusting(
+                service, account, value, keychain, &trusted,
+            );
         }
+
+        // Unsigned: no stable identity to name, so no ACL worth writing. The
+        // password value briefly appears on argv during the subprocess —
+        // local-dev secrets, single-user machine, accepted.
+        let mut add_args = vec!["add-generic-password", "-A"];
         add_args.extend(["-s", service, "-a", account, "-w", value]);
         add_args.extend(kc_args(keychain));
         let output = sec_run(&add_args)?;

@@ -29,6 +29,8 @@ pub mod routes;
 pub mod secrets;
 pub mod services;
 pub mod share;
+#[cfg(target_os = "macos")]
+pub mod acl;
 pub mod signing;
 pub mod transcript;
 

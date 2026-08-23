@@ -48,6 +48,11 @@ preceipts-core = { version = "0.1.0", path = "../preceipts-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+# Building a keychain ACL needs Security.framework directly: the safe wrapper
+# exposes the opaque SecAccess type and nothing that constructs one. See acl.rs.
+security-framework-sys = "2"
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
 
 [dev-dependencies]
 tempfile = "3.27.0"

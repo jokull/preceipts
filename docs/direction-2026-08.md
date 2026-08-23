@@ -1147,11 +1147,28 @@ What steps 9–13 leave for the next pass, in the order they block things:
     to `security find-generic-password` presents `/usr/bin/security` as the
     reader — a binary every process on the machine can exec — so an ACL
     written against it protects nothing. `SecKeychainFindGenericPassword`
-    asks on behalf of the running binary. Writes still shell out, because `-T`
-    is the only ACL-setting interface that needs no raw FFI and who *writes*
-    is not who the ACL is checked against.
+    asks on behalf of the running binary.
 
-    Measured, in a throwaway keychain, rather than asserted:
+    **And writes moved in-process too, for a second reason.** A login-keychain
+    item carries a *partition list* as well as an ACL, taken from whichever
+    application created the item. Created by `/usr/bin/security`, an item is
+    partitioned to Apple's own tools — and our binaries can then be refused an
+    item whose ACL names them, because the ACL and the partition are separate
+    gates and both have to open. Setting the partition afterwards needs the
+    keychain password (`set-generic-password-partition-list` unlocks first,
+    and an empty `-k` fails that unlock and *locks the keychain* — measured,
+    the hard way). Creating the item does not. So `acl.rs` builds the access
+    list with `SecAccessCreate` and creates the item with `SecItemAdd` in one
+    call, which puts us on both lists by construction and removes the question
+    rather than answering it.
+
+    That is raw FFI — four declarations — because `security-framework` wraps
+    none of it: the crate exposes the opaque `SecAccess` type and nothing that
+    builds one. A failure there returns an error instead of falling back to
+    `-A`, since a secret quietly less protected than the caller believes is
+    worse than one that failed to store.
+
+    Measured, in throwaway keychains, rather than asserted:
 
     - The item's decrypt entry names three applications, each with
       `certificate leaf[subject.OU] = RDC8539AWM`.
@@ -1163,6 +1180,11 @@ What steps 9–13 leave for the next pass, in the order they block things:
       authorization dialog and never gets it.
     - An unsigned `cargo build` still takes the `-A` branch and still works,
       so the dev loop is intact. It says so in `trust status`.
+    - The FFI path has its own test against a real keychain it creates and
+      destroys: an item is written with an ACL, the ACL names exactly the one
+      binary asked for, and that binary reads it back. Ad-hoc signed, so it
+      demonstrates the mechanism and not the durability — that part is
+      Developer ID's, and is the bullet three lines up.
 
     Two consequences of having a real ACL, both handled. A daemon must never
     put a dialog on screen: `daemon_inner` holds
@@ -1174,18 +1196,11 @@ What steps 9–13 leave for the next pass, in the order they block things:
     onto `PATH` alone would otherwise write items that the bundled daemon,
     the process that actually reads them, could not open.
 
-    **One measurement is still owed, and it needs the machine's owner.** All
-    of the above was measured in a throwaway keychain. The login keychain
-    additionally enforces a *partition list*, which is set from the creating
-    application — and these items are created by `/usr/bin/security`. If that
-    turns out to shut our own signed binaries out of items whose ACL names
-    them, the write has to move in-process to `SecItemAdd` with an ACL built
-    by `SecAccessCreate`, which is raw FFI: the `security-framework` crate
-    exposes no ACL construction at all. The probe that would have answered it
-    locked the login keychain (`set-generic-password-partition-list` with an
-    empty `-k` fails the unlock), and unlocking needs a password this process
-    does not have. Until it is answered, do not migrate a real project's
-    secrets with a signed build.
+    What has not been exercised end to end is a Developer ID build writing to
+    the *login* keychain, because signing needs an identity in that keychain
+    and the partition probe locked it. The design no longer turns on the
+    answer — the partition is ours because we create the item — but the first
+    real migration is still worth doing one secret at a time.
 
     What is still not done, now stated as what it is rather than as a
     certificate problem: **`SMAppService` registration is not implemented.**
