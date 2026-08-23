@@ -128,7 +128,7 @@ pub struct Service {
     /// Services that must be healthy first.
     pub needs: Vec<String>,
     /// Hostname *label*, not a fully-qualified name: the fabric composes
-    /// `<host>.<workspace>.<project>.test`. Authors never spell a domain.
+    /// `<host>.<workspace>.<project>.localhost`. Authors never spell a domain.
     pub host: Option<String>,
     /// Env keys and `@group` references this service may see. Per-service by
     /// design, so a stray `postinstall` cannot read your Stripe key.

@@ -839,7 +839,11 @@ the word if the Actions/Vercel rollup should survive.
   URLs, health, log tail from the daemon's ring buffers.
 - ⌘K palette; ⌘F find; no vim keys.
 
-## Draft decision 12 (for PRD.md)
+## Decision 12, as drafted
+
+*Landed in PRD.md as decision 12. Its DNS clause is superseded by decision
+13; the text below is amended to match, so the two do not diverge.*
+
 
 > 12. **Product pivot: the AI-coding workbench; Rust + GPUI; procpane
 >     absorbed** (2026-08-22, user decision). preceipts becomes the
