@@ -20,10 +20,10 @@ use core_foundation::data::CFData;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use core_foundation_sys::array::{kCFTypeArrayCallBacks, CFArrayCreate, CFArrayRef};
+use core_foundation_sys::base::OSStatus;
 use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease, CFTypeRef};
 use core_foundation_sys::string::CFStringRef;
 use security_framework::os::macos::keychain::SecKeychain;
-use core_foundation_sys::base::OSStatus;
 use security_framework_sys::base::{errSecSuccess, SecAccessRef};
 use security_framework_sys::item::{
     kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecUseKeychain,
@@ -84,9 +84,9 @@ pub fn add_generic_password_trusting(
     }
     // Opened before the unsafe block so a bad path is a plain error.
     let opened = match keychain {
-        Some(path) => Some(
-            SecKeychain::open(path).map_err(|e| anyhow!("cannot open keychain {path}: {e}"))?,
-        ),
+        Some(path) => {
+            Some(SecKeychain::open(path).map_err(|e| anyhow!("cannot open keychain {path}: {e}"))?)
+        }
         None => None,
     };
 
@@ -240,8 +240,14 @@ mod tests {
 
         let exe = std::env::current_exe().expect("current_exe");
         let service = "is.solberg.preceipts.acl-test";
-        add_generic_password_trusting(service, "TOKEN", "s3cret", Some(&path), std::slice::from_ref(&exe))
-            .expect("writing an item with an ACL");
+        add_generic_password_trusting(
+            service,
+            "TOKEN",
+            "s3cret",
+            Some(&path),
+            std::slice::from_ref(&exe),
+        )
+        .expect("writing an item with an ACL");
 
         let opened = SecKeychain::open(&path).expect("open the test keychain");
         let (password, _item) = find_generic_password(Some(&[opened]), service, "TOKEN")

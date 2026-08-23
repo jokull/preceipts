@@ -7,6 +7,8 @@
 //! two halves of one system. `preceipts-core` stays on the frame path — git,
 //! diff, highlight, watch, schema — and never grows a process supervisor.
 
+#[cfg(target_os = "macos")]
+pub mod acl;
 pub mod bridge;
 pub mod buffer;
 pub mod ca;
@@ -29,8 +31,6 @@ pub mod routes;
 pub mod secrets;
 pub mod services;
 pub mod share;
-#[cfg(target_os = "macos")]
-pub mod acl;
 pub mod signing;
 pub mod transcript;
 

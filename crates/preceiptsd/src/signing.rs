@@ -235,10 +235,7 @@ mod tests {
     #[test]
     fn no_binary_is_offered_to_the_acl_twice() {
         let found = trusted_binaries();
-        let mut names: Vec<_> = found
-            .iter()
-            .filter_map(|path| path.file_name())
-            .collect();
+        let mut names: Vec<_> = found.iter().filter_map(|path| path.file_name()).collect();
         names.sort();
         let count = names.len();
         names.dedup();

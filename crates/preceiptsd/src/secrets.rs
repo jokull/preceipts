@@ -200,12 +200,7 @@ mod mac {
     /// writes an empty trusted-app list instead — "no auth required for any
     /// app" — which is a real compromise for dev convenience: anything running
     /// as this user can read the values. `trust status` says so out loud.
-    fn write_item(
-        service: &str,
-        account: &str,
-        value: &str,
-        keychain: Option<&str>,
-    ) -> Result<()> {
+    fn write_item(service: &str, account: &str, value: &str, keychain: Option<&str>) -> Result<()> {
         // Idempotent open-ACL write via `/usr/bin/security`.
         //
         // We can't just use `add-generic-password -U` (update if exists),
@@ -332,8 +327,7 @@ mod mac {
         // `security` takes a keychain by path; the API takes an opened handle.
         let opened = match keychain {
             Some(path) => Some(
-                SecKeychain::open(path)
-                    .map_err(|e| anyhow!("cannot open keychain {path}: {e}"))?,
+                SecKeychain::open(path).map_err(|e| anyhow!("cannot open keychain {path}: {e}"))?,
             ),
             None => None,
         };
