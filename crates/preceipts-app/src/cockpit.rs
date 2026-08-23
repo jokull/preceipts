@@ -1,398 +1,385 @@
-//! The cockpit layout: title bar, workspace sidebar, diff surface, status HUD.
+//! The window: one project, a tab per workspace.
 //!
-//! The shape docs/direction-2026-08.md asks for, minus the tabs and env panel
-//! that need the daemon. Glanceable is a hard requirement here rather than a
-//! nicety — this window is meant to sit *beside* the agent conversation at half
-//! screen width, not to be looked at full-screen.
+//! One window per project, and the tabs across the top are its worktrees. That
+//! amends the UI-shape section of docs/direction-2026-08.md, which had it the
+//! other way round — tabs for projects, workspaces in a list down the side. A
+//! window is the unit you arrange on a screen beside an agent, and what you
+//! arrange beside an agent is a project; the workspaces are what you flip
+//! between while it works.
 //!
-//! The chrome is gpui-component's: a `Sidebar` of `SidebarMenuItem`s, a real
-//! `h_resizable` split between the list and the diff, `Tag`/`Label`/`Divider`
-//! in the HUD, and a `TitleBar` drawn under the traffic lights. The diff itself
-//! is still hand-drawn — a virtualized, character-selectable diff is not a
-//! component anyone ships.
+//! The `+` is the third door of decision 12 made visible. It does not create
+//! anything: it lists the worktrees that already exist and are not open yet.
+//! `.git/worktrees/` is watched, so a worktree an agent creates in a terminal
+//! appears in that list within a moment of git writing it, newest at the top —
+//! click `+`, ask the agent for a branch, and watch it arrive.
 
-use crate::surface_view::SurfaceView;
+use crate::workspace_pane::WorkspacePane;
+use futures::StreamExt as _;
 use gpui::prelude::*;
-use gpui::{div, px, Context, Entity, SharedString, Window};
-use gpui_component::divider::Divider;
-use gpui_component::label::Label;
-use gpui_component::resizable::{h_resizable, resizable_panel};
-use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
-use gpui_component::tag::Tag;
+use gpui::{div, px, App, Context, Entity, SharedString, Window};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::popover::Popover;
+use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
-use preceipts_core::checks::{CheckState, Status};
-use preceipts_core::workspace::Workspace;
-use preceipts_core::Changeset;
-use std::collections::HashMap;
+use preceipts_core::workspace::{self, Workspace};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::time::SystemTime;
 
-/// How the verdict chip is painted. Not green covers two different facts, and
-/// collapsing them is the one thing this HUD must not do: a check that failed
-/// is a verdict, a check that never ran is an absence, and painting both red
-/// tells a person their tree is broken when nobody has looked at it yet.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Verdict {
-    Green,
-    Failed,
-    /// Outstanding, but only because nobody has run it. Never red.
-    NotRun,
-    /// Nothing to say anything about.
-    Absent,
+/// An open tab. The pane is a `Result` because one unreadable worktree must
+/// not be able to take the window down — before tabs, a failed load was a
+/// process exit, which is a different thing entirely once there are five of
+/// them.
+struct TabState {
+    workspace: Workspace,
+    pane: Result<Entity<WorkspacePane>, String>,
 }
 
 pub struct Cockpit {
-    workspaces: Vec<Workspace>,
-    /// Which workspace this window is showing.
-    current: String,
-    changeset_summary: (usize, usize, usize, String),
-    status: Option<Status>,
-    surface: Entity<SurfaceView>,
-    /// What the system would have drawn in the title bar, drawn by us instead.
-    title: SharedString,
+    project_root: PathBuf,
+    project_name: SharedString,
+    tabs: Vec<TabState>,
+    active: usize,
+    /// Every workspace of this project, newest first.
+    known: Vec<Workspace>,
+    /// Ids that were not there when the window opened. These are the ones an
+    /// agent just made, which is exactly the case the `+` list exists for.
+    fresh: HashSet<String>,
 }
 
 impl Cockpit {
     pub fn new(
-        changeset: Changeset,
-        workspaces: Vec<Workspace>,
-        current: String,
-        status: Option<Status>,
-        title: SharedString,
+        project_root: PathBuf,
+        project_name: String,
+        first: Workspace,
         cx: &mut Context<Self>,
     ) -> Self {
-        let summary = (
-            changeset.files.len(),
-            changeset.total_added(),
-            changeset.total_removed(),
-            changeset.base_name.clone(),
-        );
-        let code_font = crate::theme::code_font(cx);
-        let surface = cx.new(|cx| SurfaceView::new(changeset, code_font, cx));
-        // The file list marks the file you are currently inside, so this view
-        // has to repaint when the surface scrolls. Child entities do not
-        // notify their parent on their own.
-        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
-        Self {
-            workspaces,
-            current,
-            changeset_summary: summary,
-            status,
-            surface,
-            title,
-        }
+        let known = Self::ordered(&project_root);
+        let mut this = Self {
+            project_root: project_root.clone(),
+            project_name: project_name.into(),
+            tabs: Vec::new(),
+            active: 0,
+            known,
+            fresh: HashSet::new(),
+        };
+        this.open_workspace(first, cx);
+        this.watch(cx);
+        this
     }
 
-    fn render_title_bar(&self) -> impl IntoElement {
-        TitleBar::new().child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .text_sm()
-                .child(self.title.clone()),
-        )
-    }
-
-    fn render_sidebar(&self, cx: &Context<Self>) -> (impl IntoElement, Vec<impl IntoElement>) {
-        let count = self.workspaces.len();
-        let items = self.workspaces.iter().map(|workspace| {
-            let branch = workspace
-                .branch
-                .clone()
-                .unwrap_or_else(|| "(detached)".to_string());
-            let mut item = SidebarMenuItem::new(SharedString::from(branch))
-                .active(workspace.id == self.current);
-            // The recorded intent is what makes eight worktrees legible next
-            // week, so it rides along on the row rather than hiding behind a
-            // hover. It truncates before it pushes the branch name off.
-            if let Some(genesis) = &workspace.genesis {
-                item = item.suffix(
-                    div()
-                        .max_w(px(110.0))
-                        .flex_shrink()
-                        .overflow_hidden()
-                        .text_xs()
-                        .child(SharedString::from(genesis.clone())),
-                );
-            }
-            item
+    /// Discovered workspaces, newest first.
+    ///
+    /// Birth time rather than branch name or discovery order: what a person
+    /// wants at the top of the list is the worktree that just appeared, and
+    /// the primary working directory — always the oldest — settles to the
+    /// bottom on its own without a special case.
+    fn ordered(project_root: &PathBuf) -> Vec<Workspace> {
+        let mut all = workspace::discover(project_root).unwrap_or_default();
+        all.sort_by_key(|w| {
+            std::cmp::Reverse(workspace::created_at(w).unwrap_or(SystemTime::UNIX_EPOCH))
         });
+        all
+    }
 
-        // The file list. A 202-file changeset scrolled as one stream is a
-        // stream you get lost in: this says which file you are inside, and
-        // jumps to any other on click.
-        //
-        // Hand-built rows rather than `SidebarMenuItem`s. That component is
-        // ~36px tall and shows the label as a plain string, which for 202
-        // files means fifteen of them on screen and no way to colour the
-        // status letter. Density is the whole point of a jump list.
-        let surface = self.surface.read(cx);
-        let current = surface.current_file();
-        let entries = surface.file_entries();
+    /// Door three: watch `.git/worktrees/` and adopt what shows up.
+    ///
+    /// The watch blocks, so it lives on its own thread and reaches the window
+    /// through a channel. It sends no payload — [`workspace::discover`] is the
+    /// only thing that knows what a workspace is, and it is cheap enough to
+    /// re-run.
+    fn watch(&self, cx: &mut Context<Self>) {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+        let root = self.project_root.clone();
+        std::thread::spawn(move || {
+            let _ = workspace::watch_worktrees(&root, || tx.unbounded_send(()).is_ok());
+        });
+        cx.spawn(async move |this, cx| {
+            while rx.next().await.is_some() {
+                if this.update(cx, |this, cx| this.rediscover(cx)).is_err() {
+                    // The window went away; so does the watch.
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
 
-        // A basename alone is ambiguous — this changeset has two `version.env`
-        // and several `SKILL.md`. Only the ambiguous ones pay for the parent
-        // directory; the rest stay short.
-        let mut seen: HashMap<&str, usize> = HashMap::new();
-        for entry in &entries {
-            *seen.entry(basename(&entry.path)).or_default() += 1;
+    fn rediscover(&mut self, cx: &mut Context<Self>) {
+        let before: HashSet<String> = self.known.iter().map(|w| w.id.clone()).collect();
+        self.known = Self::ordered(&self.project_root);
+        for workspace in &self.known {
+            if !before.contains(&workspace.id) {
+                self.fresh.insert(workspace.id.clone());
+            }
         }
+        cx.notify();
+    }
 
-        let files: Vec<_> = entries
+    /// Open a workspace as a tab, or focus it if it is already open.
+    fn open_workspace(&mut self, workspace: Workspace, cx: &mut App) {
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|t| t.workspace.id == workspace.id)
+        {
+            self.active = index;
+            return;
+        }
+        self.fresh.remove(&workspace.id);
+        let pane = WorkspacePane::open(workspace.clone(), cx);
+        self.tabs.push(TabState { workspace, pane });
+        self.active = self.tabs.len() - 1;
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if self.tabs.len() <= 1 || index >= self.tabs.len() {
+            // The last tab stays: a window with no workspace in it is a window
+            // with nothing to say, and closing the window is what that means.
+            return;
+        }
+        self.tabs.remove(index);
+        self.active = self.active.min(self.tabs.len() - 1);
+    }
+
+    fn label(workspace: &Workspace) -> SharedString {
+        workspace
+            .branch
+            .clone()
+            .unwrap_or_else(|| workspace.id.clone())
+            .into()
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let open: HashSet<String> = self.tabs.iter().map(|t| t.workspace.id.clone()).collect();
+        // Newest first, and already-open workspaces are not offered again —
+        // clicking `+` should never be a no-op that looks like a bug.
+        let candidates: Vec<(Workspace, bool)> = self
+            .known
+            .iter()
+            .filter(|w| !open.contains(&w.id))
+            .map(|w| (w.clone(), self.fresh.contains(&w.id)))
+            .collect();
+
+        let closable = self.tabs.len() > 1;
+        let tabs: Vec<_> = self
+            .tabs
             .iter()
             .enumerate()
-            .map(|(index, entry)| {
-                // The filename must never be the part that gets clipped, so
-                // it is its own span that cannot shrink; the parent directory
-                // sits beside it, dimmed, and absorbs the truncation. The
-                // parent only appears when the basename is ambiguous.
-                let name = basename(&entry.path);
-                let parent = if seen.get(name).copied().unwrap_or(0) > 1 {
-                    entry
-                        .path
-                        .rsplit_once('/')
-                        .map(|(parent, _)| elide(basename(parent)))
-                } else {
-                    None
-                };
-                let handle = self.surface.clone();
-                let active = current == Some(index);
-                let status_color = match entry.status.as_ref() {
-                    "A" => cx.theme().success,
-                    "D" => cx.theme().danger,
-                    _ => cx.theme().muted_foreground,
-                };
-                h_flex()
-                    .id(index)
-                    .h(px(22.0))
-                    .w_full()
-                    .px_2()
-                    .gap_2()
-                    .rounded_sm()
-                    .text_xs()
-                    .when(active, |this| this.bg(cx.theme().sidebar_accent))
-                    .hover(|this| this.bg(cx.theme().sidebar_accent))
-                    .child(
+            .map(|(index, tab)| {
+                let broken = tab.pane.is_err();
+                Tab::new()
+                    .label(Self::label(&tab.workspace))
+                    // A dot rather than an icon: `IconName` needs an
+                    // `AssetSource` this app does not install, and what the
+                    // dot has to say is one of three things anyway.
+                    .prefix(
                         div()
-                            .w(px(10.0))
-                            .flex_none()
-                            .text_color(status_color)
-                            .child(entry.status.clone()),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            // Without this a long name wraps to a second line
-                            // inside a 22px row and prints over its neighbour.
-                            .whitespace_nowrap()
-                            .when_some(parent, |this, parent| {
-                                this.child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(SharedString::from(parent)),
-                                )
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(if broken {
+                                cx.theme().danger
+                            } else if tab.workspace.is_primary {
+                                cx.theme().muted_foreground
+                            } else {
+                                cx.theme().success
                             })
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(cx.theme().sidebar_foreground)
-                                    .child(SharedString::from(name.to_string())),
-                            ),
+                            .flex_none(),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(cx.theme().success)
-                            .child(SharedString::from(format!("+{}", entry.added))),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(cx.theme().danger)
-                            .child(SharedString::from(format!("−{}", entry.removed))),
-                    )
-                    .on_click(move |_, _window, cx| {
-                        handle.update(cx, |surface, cx| surface.jump_to_file(index, cx));
+                    .when(closable, |tab| {
+                        tab.suffix(
+                            Button::new(("close-tab", index))
+                                .ghost()
+                                .xsmall()
+                                .label("×")
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.close_tab(index);
+                                    cx.notify();
+                                })),
+                        )
                     })
             })
             .collect();
 
-        // Height pinned to its contents. `Sidebar` renders `h_full`, so left
-        // alone it takes the whole panel and the file list below it has
-        // nowhere to go. Its own style refinement is applied after that, so
-        // this wins.
-        let workspace_height = 96.0 + count as f32 * 40.0;
-        let workspaces = Sidebar::left()
-            .h(px(workspace_height))
-            .flex_none()
-            // The panel owns the width now; the sidebar's own fixed width and
-            // right border would fight the resize handle for it.
-            .w_full()
-            .flex_shrink()
-            .border_r_0()
-            .collapsible(false)
-            .header(h_flex().text_sm().child("Workspaces"))
-            .child(
-                SidebarGroup::new(SharedString::from(format!(
-                    "{count} workspace{}",
-                    if count == 1 { "" } else { "s" }
-                )))
-                .child(SidebarMenu::new().children(items)),
-            );
-        (workspaces, files)
+        TabBar::new("workspaces")
+            .underline()
+            .small()
+            .selected_index(self.active)
+            .on_click(cx.listener(|this, index: &usize, _window, cx| {
+                this.active = *index;
+                cx.notify();
+            }))
+            .children(tabs)
+            .suffix(self.render_plus(candidates, cx))
     }
 
-    /// The jump list, below the workspaces.
-    ///
-    /// Outside the `Sidebar` rather than inside it: `Sidebar<E>` takes one
-    /// `Collapsible` child type, so a group of workspace menu items and a
-    /// scrolling list of file rows cannot both live in it.
-    fn render_file_list(
+    /// The `+`: everything this project already has that is not on screen.
+    fn render_plus(
         &self,
-        files: Vec<impl IntoElement>,
-        cx: &Context<Self>,
+        candidates: Vec<(Workspace, bool)>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let count = files.len();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .bg(cx.theme().sidebar)
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(SharedString::from(format!("{count} files"))),
-            )
-            .child(
-                // Its own scroll region: 202 rows must not push the workspace
-                // list off the top of the sidebar.
+        let this = cx.entity().downgrade();
+        let waiting = candidates.len();
+        let arrived = candidates.iter().any(|(_, fresh)| *fresh);
+        // The count rides on the button itself. "Click `+` and wait for the
+        // agent to make one" only works if arrival is visible without the menu
+        // open — a worktree that appeared behind a closed popover is a worktree
+        // you never learn about.
+        let trigger = Button::new("plus")
+            .ghost()
+            .xsmall()
+            .label(if waiting == 0 {
+                "+".to_string()
+            } else {
+                format!("+ {waiting}")
+            })
+            // Green means one of them showed up while you were reading
+            // something else. The popover's trigger has to be `Selectable`,
+            // so the signal is the button's own colour rather than a dot
+            // beside it.
+            .when(arrived, |button| button.text_color(cx.theme().success));
+        Popover::new("open-workspace")
+            .trigger(trigger)
+            .content(move |_state, _window, cx| {
+                let this = this.clone();
+                let rows: Vec<_> = candidates
+                    .iter()
+                    .cloned()
+                    .map(|(workspace, fresh)| {
+                        let this = this.clone();
+                        let label = Self::label(&workspace);
+                        let genesis = workspace.genesis.clone();
+                        h_flex()
+                            .id(SharedString::from(workspace.id.clone()))
+                            .w(px(320.0))
+                            .px_2()
+                            .py_1()
+                            .gap_2()
+                            .rounded_sm()
+                            .text_xs()
+                            .hover(|s| s.bg(cx.theme().sidebar_accent))
+                            .child(
+                                div()
+                                    .size(px(6.0))
+                                    .flex_none()
+                                    .rounded_full()
+                                    // A dot only on what arrived while you
+                                    // were looking at something else.
+                                    .bg(if fresh {
+                                        cx.theme().success
+                                    } else {
+                                        cx.theme().border
+                                    }),
+                            )
+                            .child(div().flex_none().child(label))
+                            .when_some(genesis, |row, genesis| {
+                                // The recorded intent, which is the thing that
+                                // makes eight worktrees legible next week.
+                                row.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(SharedString::from(genesis)),
+                                )
+                            })
+                            .on_click({
+                                let workspace = workspace.clone();
+                                move |_, _window, cx| {
+                                    let workspace = workspace.clone();
+                                    let _ = this.update(cx, |cockpit, cx| {
+                                        cockpit.open_workspace(workspace, cx);
+                                        cx.notify();
+                                    });
+                                }
+                            })
+                    })
+                    .collect();
+
                 v_flex()
-                    .id("file-list")
-                    .flex_1()
-                    .min_h_0()
-                    .px_1()
-                    .overflow_y_scroll()
-                    .children(files),
-            )
-    }
-
-    /// The footer: diff stats, and the receipt verdict.
-    fn render_hud(&self, cx: &Context<Self>) -> impl IntoElement {
-        let (files, added, removed, base) = &self.changeset_summary;
-
-        let (verdict, kind) = match &self.status {
-            None => ("no checks".to_string(), Verdict::Absent),
-            Some(status) if status.green => ("green".to_string(), Verdict::Green),
-            Some(status) => {
-                let named = |wanted: &[CheckState]| -> Vec<&str> {
-                    status
-                        .rows
-                        .iter()
-                        .filter(|row| row.required && wanted.contains(&row.state))
-                        .map(|row| row.check.as_str())
-                        .collect()
-                };
-                let failed = named(&[CheckState::Fail, CheckState::StaleDefinition]);
-                if failed.is_empty() {
-                    // Everything outstanding is simply unrecorded.
-                    let missing = named(&[CheckState::Missing]);
-                    (format!("not run: {}", missing.join(", ")), Verdict::NotRun)
-                } else {
-                    (format!("failed: {}", failed.join(", ")), Verdict::Failed)
-                }
-            }
-        };
-
-        let chip = match kind {
-            Verdict::Green => Tag::success(),
-            Verdict::Failed => Tag::danger(),
-            // Grey, and never red: `secondary` is the old `pending` colour.
-            Verdict::NotRun => Tag::secondary(),
-            // Nothing was claimed at all, so the chip barely claims a surface.
-            Verdict::Absent => Tag::secondary().outline(),
-        };
-
-        let rule = || Divider::vertical().w(px(1.0)).h(px(12.0));
-
-        h_flex()
-            .h(px(26.0))
-            .flex_none()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .bg(cx.theme().title_bar)
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .text_size(px(11.0))
-            .child(
-                Label::new(format!("vs {base}"))
-                    .text_size(px(11.0))
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(rule())
-            .child(
-                Label::new(format!("{files} files"))
-                    .text_size(px(11.0))
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(rule())
-            .child(Label::new(format!("+{added} −{removed}")).text_size(px(11.0)))
-            .child(rule())
-            .child(chip.small().child(SharedString::from(verdict)))
+                    .p_1()
+                    .gap_0p5()
+                    .when(rows.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .w(px(320.0))
+                                .p_2()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                // Deliberately not a "New workspace" button. The
+                                // app is a registry that notices, not a factory
+                                // that must be used — so the empty state names the
+                                // two doors that do create, and waits.
+                                .child(
+                                    "Every worktree is open. \
+                                 `preceipts new \"…\"`, or ask your agent for one — \
+                                 it shows up here.",
+                                ),
+                        )
+                    })
+                    .children(rows)
+            })
     }
 }
 
 impl Render for Cockpit {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = match self.tabs.get(self.active) {
+            Some(TabState { pane: Ok(pane), .. }) => pane.clone().into_any_element(),
+            Some(TabState {
+                pane: Err(message),
+                workspace,
+            }) => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_sm()
+                .child(SharedString::from(workspace.path.display().to_string()))
+                .child(
+                    div()
+                        .text_color(cx.theme().danger)
+                        .child(SharedString::from(message.clone())),
+                )
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
+
         v_flex()
             .size_full()
-            .child(self.render_title_bar())
             .child(
-                // `min_h_0` is what keeps the split from growing past the
-                // window and pushing the HUD off the bottom edge.
-                div().flex_1().min_h_0().overflow_hidden().child(
-                    h_resizable("cockpit-split")
+                TitleBar::new().child(
+                    h_flex()
+                        .w_full()
+                        .gap_3()
+                        .items_center()
+                        .text_sm()
+                        .child(self.project_name.clone())
+                        .child(self.render_tab_bar(cx))
+                        // Right edge: what the active tab amounts to, so the
+                        // window says something useful while the diff itself
+                        // is scrolled somewhere in the middle.
                         .child(
-                            resizable_panel()
-                                .size(px(240.0))
-                                .size_range(px(180.0)..px(420.0))
-                                .child({
-                                    let (workspaces, files) = self.render_sidebar(cx);
-                                    v_flex()
-                                        .size_full()
-                                        .child(workspaces)
-                                        .child(self.render_file_list(files, cx))
-                                }),
-                        )
-                        .child(resizable_panel().child(self.surface.clone())),
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(SharedString::from(
+                                    self.tabs
+                                        .get(self.active)
+                                        .and_then(|tab| tab.pane.as_ref().ok())
+                                        .map(|pane| pane.read(cx).summary())
+                                        .unwrap_or_default(),
+                                )),
+                        ),
                 ),
             )
-            .child(self.render_hud(cx))
+            .child(div().flex_1().min_h_0().overflow_hidden().child(body))
     }
-}
-
-/// Shorten a directory name from the left, keeping the end.
-///
-/// Clipping it with `overflow_hidden` alone leaves the cut edge flush against
-/// the filename — `macos-spm-appLICENSE` — which reads as one word. An
-/// explicit ellipsis says the name was shortened.
-fn elide(name: &str) -> String {
-    const MAX: usize = 14;
-    if name.chars().count() <= MAX {
-        return format!("{name}/");
-    }
-    let tail: String = name.chars().skip(name.chars().count() - MAX + 1).collect();
-    format!("…{tail}/")
-}
-
-/// The last component of a path — what identifies a file in a narrow column,
-/// most of the time.
-fn basename(path: &str) -> &str {
-    path.rsplit_once('/').map(|(_, name)| name).unwrap_or(path)
 }

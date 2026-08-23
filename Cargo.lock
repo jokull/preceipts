@@ -5019,6 +5019,7 @@ dependencies = [
 name = "preceipts-app"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gpui",
  "gpui-component",
  "preceipts-core",

@@ -1,19 +1,20 @@
 //! The cockpit.
 //!
-//! Today it opens one repository and renders its diff — step 3 of
-//! docs/direction-2026-08.md, the port worth proving before anything is built
-//! on top of it. Tabs, the workspace list, and the env panel come after.
+//! One window per project; a tab per workspace. Step 3 of
+//! docs/direction-2026-08.md — the diff surface — is what fills a tab, and the
+//! tabs themselves are step 5's workspace list, moved to the top edge.
 
 mod cockpit;
 mod surface_view;
 mod theme;
+mod workspace_pane;
 
 use cockpit::Cockpit;
 use gpui::{
     point, px, size, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 };
 use gpui_component::{Theme as UiTheme, ThemeMode};
-use preceipts_core::{load, DiffScope};
+use preceipts_core::workspace;
 use std::path::PathBuf;
 
 fn main() {
@@ -22,46 +23,48 @@ fn main() {
     // scroll path gets timed honestly, and it is the seed of the CLI that
     // step 7 grows into an agent-facing surface.
     let stats_only = args.iter().any(|a| a == "--stats");
-    let repo = args
+    let path = args
         .iter()
         .find(|a| !a.starts_with("--"))
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().expect("a working directory"));
 
-    // Load before opening a window: an unreadable repo should fail on the
-    // command line, not as an empty window.
-    let started = std::time::Instant::now();
-    let changeset = match load(&repo, DiffScope::Branch, true) {
-        Ok(changeset) => changeset,
+    // Which workspace this window opens on is decided by where it was
+    // launched from — self-location, not configuration. The window is the
+    // project's; the first tab is the worktree you were standing in.
+    let first = match workspace::locate(&path) {
+        Ok(workspace) => workspace,
         Err(error) => {
             eprintln!("preceipts: {error}");
             std::process::exit(1);
         }
     };
+    let project_root = first.project_root.clone();
+    let project_name = project_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
 
-    let title = format!(
-        "{} — {}",
-        changeset
-            .branch
-            .clone()
-            .unwrap_or_else(|| "detached".to_string()),
-        surface_view::summary(&changeset),
-    );
-    // The rest of the cockpit's state. All of it degrades: a directory that is
-    // not a workspace still shows its diff, and a project without checks still
-    // shows its stats.
-    let workspaces = preceipts_core::workspace::discover(&repo).unwrap_or_default();
-    let current = preceipts_core::workspace::locate(&repo)
-        .map(|w| w.id)
-        .unwrap_or_else(|_| "main".to_string());
-    let status = preceipts_core::checks::status(&repo, None).ok();
-
-    let rows = preceipts_core::Surface::build(&changeset).rows.len();
-    println!(
-        "{title}\n{rows} rows built in {:.0}ms",
-        started.elapsed().as_secs_f64() * 1000.0
-    );
     if stats_only {
+        let started = std::time::Instant::now();
+        let changeset =
+            match preceipts_core::load(&first.path, preceipts_core::DiffScope::Branch, true) {
+                Ok(changeset) => changeset,
+                Err(error) => {
+                    eprintln!("preceipts: {error}");
+                    std::process::exit(1);
+                }
+            };
+        let rows = preceipts_core::Surface::build(&changeset).rows.len();
+        println!(
+            "{} — {}\n{rows} rows built in {:.0}ms",
+            changeset
+                .branch
+                .clone()
+                .unwrap_or_else(|| "detached".to_string()),
+            surface_view::summary(&changeset),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         return;
     }
 
@@ -88,7 +91,7 @@ fn main() {
                     // `appears_transparent` does not take that away. What it
                     // takes away is the system *drawing* it, which is why the
                     // cockpit draws its own strip under the traffic lights.
-                    title: Some(title.clone().into()),
+                    title: Some(project_name.clone().into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(9.0), px(9.0))),
                 }),
@@ -96,7 +99,12 @@ fn main() {
             },
             |window, cx| {
                 let cockpit = cx.new(|cx| {
-                    Cockpit::new(changeset, workspaces, current, status, title.into(), cx)
+                    Cockpit::new(
+                        project_root.clone(),
+                        project_name.clone(),
+                        first.clone(),
+                        cx,
+                    )
                 });
                 // Root has to be the window's first layer: it is what renders
                 // the dialog, sheet and notification layers, and the library
