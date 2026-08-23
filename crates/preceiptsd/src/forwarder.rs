@@ -25,7 +25,13 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::proxy::PROXY_PORT;
 
-pub const PROXY_PLIST_PATH: &str = "/Library/LaunchDaemons/com.procpane.pretty-url-proxy.plist";
+pub const PROXY_PLIST_PATH: &str = "/Library/LaunchDaemons/com.preceipts.forwarder.plist";
+
+/// Where procpane installed the same helper. `uninstall` still knows about it
+/// so a machine that ran the old tool ends up clean rather than with a root
+/// LaunchDaemon nobody owns any more.
+const LEGACY_PLIST_PATH: &str = "/Library/LaunchDaemons/com.procpane.pretty-url-proxy.plist";
+const LEGACY_LABEL: &str = "com.procpane.pretty-url-proxy";
 
 const LISTEN_ADDR: &str = "127.0.0.1:443";
 const TARGET_ADDR: &str = "127.0.0.1";
@@ -39,7 +45,7 @@ const HOSTS_BEGIN: &str =
 const HOSTS_END: &str = "# END procpane hostnames";
 
 pub fn is_installed() -> bool {
-    Path::new(PROXY_PLIST_PATH).is_file()
+    Path::new(PROXY_PLIST_PATH).is_file() || Path::new(LEGACY_PLIST_PATH).is_file()
 }
 
 pub fn install() -> Result<()> {
@@ -47,12 +53,8 @@ pub fn install() -> Result<()> {
     println!("  launchd: {PROXY_PLIST_PATH}");
     println!("  Hostnames need no install — macOS resolves *.localhost itself.");
 
-    let procpane_path = std::env::current_exe().map_err(|e| anyhow!("current executable: {e}"))?;
-    sudo_write(
-        PROXY_PLIST_PATH,
-        &proxy_plist_contents(&procpane_path),
-        0o644,
-    )?;
+    let daemon_path = crate::daemon_exe()?;
+    sudo_write(PROXY_PLIST_PATH, &proxy_plist_contents(&daemon_path), 0o644)?;
 
     // Re-register so repeat installs pick up a newly-installed binary path.
     run_sudo_quiet(&["launchctl", "bootout", "system", PROXY_PLIST_PATH]);
@@ -68,6 +70,11 @@ pub fn uninstall() -> Result<()> {
     // Ignore errors because the helper may not be loaded.
     run_sudo_quiet(&["launchctl", "bootout", "system", PROXY_PLIST_PATH]);
     let _ = run_sudo(&["/bin/rm", "-f", PROXY_PLIST_PATH]);
+    if Path::new(LEGACY_PLIST_PATH).is_file() {
+        println!("  removing the helper procpane installed under {LEGACY_LABEL}");
+        run_sudo_quiet(&["launchctl", "bootout", "system", LEGACY_PLIST_PATH]);
+        let _ = run_sudo(&["/bin/rm", "-f", LEGACY_PLIST_PATH]);
+    }
     remove_legacy_hosts_block();
 
     println!("✓ forwarder removed.");
@@ -110,7 +117,7 @@ async fn run_inner() -> Result<()> {
     let listener = TcpListener::bind(LISTEN_ADDR)
         .await
         .with_context(|| format!("bind {LISTEN_ADDR}"))?;
-    eprintln!("procpane :443 forwarder listening on {LISTEN_ADDR}");
+    eprintln!("preceipts :443 forwarder listening on {LISTEN_ADDR}");
 
     loop {
         let (stream, peer) = listener.accept().await.context("accept on :443")?;
@@ -130,23 +137,23 @@ async fn forward(mut inbound: TcpStream) -> Result<()> {
     Ok(())
 }
 
-fn proxy_plist_contents(procpane_path: &Path) -> String {
-    let procpane_path = xml_escape(&procpane_path.display().to_string());
+fn proxy_plist_contents(daemon_path: &Path) -> String {
+    let daemon_path = xml_escape(&daemon_path.display().to_string());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.procpane.pretty-url-proxy</string>
+  <key>Label</key><string>com.preceipts.forwarder</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{procpane_path}</string>
-    <string>pretty-url-proxy</string>
+    <string>{daemon_path}</string>
+    <string>forward</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/var/log/procpane-pretty-url-proxy.log</string>
-  <key>StandardErrorPath</key><string>/var/log/procpane-pretty-url-proxy.log</string>
+  <key>StandardOutPath</key><string>/var/log/preceipts-forwarder.log</string>
+  <key>StandardErrorPath</key><string>/var/log/preceipts-forwarder.log</string>
 </dict>
 </plist>
 "#
@@ -249,10 +256,10 @@ mod tests {
 
     #[test]
     fn proxy_plist_runs_current_binary_helper() {
-        let plist = proxy_plist_contents(Path::new("/tmp/procpane & friends/procpane"));
-        assert!(plist.contains("com.procpane.pretty-url-proxy"));
-        assert!(plist.contains("<string>/tmp/procpane &amp; friends/procpane</string>"));
-        assert!(plist.contains("<string>pretty-url-proxy</string>"));
+        let plist = proxy_plist_contents(Path::new("/tmp/pre & post/preceiptsd"));
+        assert!(plist.contains("com.preceipts.forwarder"));
+        assert!(plist.contains("<string>/tmp/pre &amp; post/preceiptsd</string>"));
+        assert!(plist.contains("<string>forward</string>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
     }
 

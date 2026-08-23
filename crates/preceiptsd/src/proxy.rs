@@ -49,7 +49,7 @@ impl PortRegistry {
 pub fn build_tls_config(hostnames: &[String]) -> Result<Arc<ServerConfig>> {
     if !ca::is_installed() {
         return Err(anyhow!(
-            "local CA not generated; run `procpane trust install` first"
+            "local CA not generated; run `preceipts trust install` first"
         ));
     }
     let (cert_pem, key_pem) = ca::sign_leaf(hostnames).context("sign leaf for proxy")?;
@@ -82,7 +82,7 @@ pub async fn run_proxy(
         .await
         .with_context(|| format!("bind {bind}"))?;
     let acceptor = TlsAcceptor::from(tls_cfg);
-    eprintln!("procpane reverse proxy listening on https://{bind}");
+    eprintln!("preceipts reverse proxy listening on https://{bind}");
     loop {
         tokio::select! {
             changed = stop_rx.changed() => {
@@ -130,7 +130,7 @@ async fn handle_conn(
         None => {
             // 503-style canned response so curl/browser see something useful.
             let mut s = tls_stream;
-            let body = format!("procpane: unknown host {sni}\n");
+            let body = format!("preceipts: unknown host {sni}\n");
             let resp = format!(
                 "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),

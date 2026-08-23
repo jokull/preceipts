@@ -111,13 +111,20 @@ One cargo workspace:
   including `mcp`.
 - **`crates/preceipts-app`** — the GPUI cockpit: workspace list, virtualized
   diff surface, status HUD.
-- **`crates/procpane`** — the absorbed process runner: healthcheck-gated
-  orchestration, PTY supervision with queryable ring buffers, a local CA and TLS
-  proxy, Keychain secrets scoped per project.
+- **`crates/preceiptsd`** — the daemon: healthcheck-gated orchestration, PTY
+  supervision with queryable ring buffers, a local CA and TLS proxy, Keychain
+  secrets scoped per project. This was `procpane`; it is dissolved rather than
+  vendored, so there is no second product and no dependency edge between two
+  halves of one system.
 
-Still ahead: dissolving `procpane` into `preceiptsd`, per-workspace environments
-actually booting through it, per-workspace certs behind the `:443` forwarder, the
-HTTP transcript, the env panel and project tabs, and `sync`/`gc`. Service URLs are
+Every verb lives on `preceipts` — `up`, `down`, `services`, `proc`, `grep`,
+`secrets`, `trust` came across with the daemon — because the lab has one door
+and an agent should not have to learn which tool owns which verb. `preceiptsd`
+answers only to launchd and to `preceipts up`.
+
+Still ahead: converging `procpane.toml` into `preceipts.toml` (two schemas, one
+job), per-workspace certs behind the `:443` forwarder, the HTTP transcript, the
+env panel and project tabs, and `sync`/`gc`. Service URLs are
 `<service>.<workspace>.<project>.localhost` — the system resolves `*.localhost` to
 loopback at any depth, so there is no DNS to install (decision 13).
 

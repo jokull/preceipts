@@ -18,7 +18,7 @@ use crate::secrets;
 use crate::sidecar::DependsOnCondition;
 use crate::{ca, forwarder, project::Project};
 
-pub const PREBUILD_ID: &str = "procpane#prebuild";
+pub const PREBUILD_ID: &str = "preceipts#prebuild";
 
 pub struct Daemon {
     pub state_dir: PathBuf,
@@ -52,7 +52,7 @@ impl Daemon {
         no_prebuild: bool,
     ) -> Result<()> {
         std::fs::create_dir_all(&state_dir)?;
-        let socket_path = state_dir.join("sock");
+        let socket_path = state_dir.join(SOCKET_FILE);
         // Remove stale socket if present.
         let _ = std::fs::remove_file(&socket_path);
 
@@ -89,8 +89,8 @@ impl Daemon {
                 all_keys.len(),
                 all_keys.join(", ")
             );
-            eprintln!("  Set them with:  procpane env set <KEY>");
-            eprintln!("  Or receive from a teammate:  procpane env receive <code>");
+            eprintln!("  Set them with:  preceipts secrets set <KEY>");
+            eprintln!("  Or receive from a teammate:  preceipts secrets receive <code>");
             return Err(anyhow!("missing required secrets"));
         }
 
@@ -221,7 +221,7 @@ impl Daemon {
                 }
             } else {
                 eprintln!("procpane: tasks declare hostnames but the local CA is not installed.");
-                eprintln!("  Run `procpane trust install` to trust local https URLs.");
+                eprintln!("  Run `preceipts trust install` to trust local https URLs.");
             }
         }
         let _ = port_registry; // silence unused if no hostnames
@@ -311,6 +311,9 @@ impl Daemon {
     }
 }
 
+/// The scheduler's arguments are the scheduler's whole world, and bundling
+/// them into a struct would only move the list somewhere less visible.
+#[allow(clippy::too_many_arguments)]
 async fn run_scheduler(
     daemon: Arc<Daemon>,
     graph: Arc<TaskGraph>,
@@ -511,6 +514,11 @@ async fn run_scheduler(
             if let Some(host) = daemon.hostnames.get(&id) {
                 if let Some(port) = daemon.allocated_ports.get(&id) {
                     env.push(("PORT".into(), port.to_string()));
+                    // Both names for one value: a project may already read
+                    // the procpane one, and a rename that silently stops
+                    // injecting an env var is the kind of breakage that shows
+                    // up as a confusing 404 rather than an error.
+                    env.push(("PRECEIPTS_PUBLIC_URL".into(), public_url(host)));
                     env.push(("PROCPANE_PUBLIC_URL".into(), public_url(host)));
                 }
             }
@@ -792,8 +800,19 @@ fn dispatch(daemon: &Daemon, req: Request) -> Response {
     }
 }
 
+/// The daemon's control socket for a project.
+///
+/// Exposed so callers do not each rebuild the path from parts — the CLI, the
+/// MCP server, and the daemon itself all have to agree on it, and a
+/// disagreement reads as "no daemon running" rather than as a bug.
+pub fn socket_path(root: &Path) -> PathBuf {
+    state_dir(root).join(SOCKET_FILE)
+}
+
+const SOCKET_FILE: &str = "sock";
+
 pub fn state_dir(root: &Path) -> PathBuf {
-    root.join(".procpane")
+    root.join(".preceipts").join("daemon")
 }
 
 /// Give a declared hostname its workspace dimension.

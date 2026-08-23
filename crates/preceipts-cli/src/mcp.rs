@@ -271,6 +271,43 @@ fn call(root: &Path, params: &Value) -> Result<Value> {
     }))
 }
 
+/// What is actually running, if a daemon is up for this project.
+///
+/// The declared half of `environment` is a file; this half is the reason the
+/// daemon was absorbed rather than kept as a sibling tool. An agent asking
+/// "is the API up" should not have to read a manifest and hope — trip's
+/// discipline was to probe reality instead of trusting a stale ports file,
+/// and that only works when one thing owns both halves.
+///
+/// A daemon that is not running is not an error: most of the time nothing is
+/// up, and saying so plainly is the honest answer.
+fn running_services(root: &Path) -> Value {
+    use preceiptsd::proto::{Request, Response};
+
+    let socket = preceiptsd::daemon::socket_path(root);
+    if !socket.exists() {
+        return json!({"up": false});
+    }
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return json!({"up": false});
+    };
+    match runtime.block_on(preceiptsd::client::call(&socket, Request::Status)) {
+        Ok(Response::Status { procs }) => json!({
+            "up": true,
+            "services": procs.iter().map(|p| json!({
+                "name": p.name,
+                "state": p.state,
+                "pid": p.pid,
+                "hostname": p.hostname,
+            })).collect::<Vec<_>>(),
+        }),
+        _ => json!({"up": false}),
+    }
+}
+
 fn environment(path: &Path) -> Result<Value> {
     let manifest = match manifest::load(path)? {
         Some(manifest) => Some(manifest),
@@ -282,8 +319,12 @@ fn environment(path: &Path) -> Result<Value> {
             "note": "no preceipts.toml, and nothing obvious to infer",
         }));
     };
+    // The composed hostname, not the declared label: an agent that wants to
+    // curl a service needs the name the fabric actually answers to.
+    let workspace = workspace::locate(path).ok();
     Ok(json!({
         "declared": true,
+        "running": running_services(path),
         "services": manifest.services.iter().map(|s| json!({
             "name": s.name,
             "runtime": s.runtime.as_str(),
@@ -291,6 +332,9 @@ fn environment(path: &Path) -> Result<Value> {
             // provider is route proof, not payment proof.
             "fidelity": s.fidelity.as_str(),
             "host": s.host,
+            "url": s.host.as_ref().and_then(|host| workspace
+                .as_ref()
+                .map(|ws| format!("https://{}", ws.hostname(host)))),
             "needs": s.needs,
         })).collect::<Vec<_>>(),
         "ready": manifest.ready,

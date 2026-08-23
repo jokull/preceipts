@@ -17,6 +17,8 @@ use std::path::Path;
 /// borrow them.
 ///
 /// The prefix stays `procpane:` so existing Keychain entries keep working
+/// across the dissolution — renaming it would silently orphan every secret a
+/// user has already stored, in exchange for tidiness nobody can see
 /// through the rename.
 pub fn service_name(repo_root: &Path) -> String {
     let root = preceipts_core::workspace::locate(repo_root)
@@ -289,7 +291,7 @@ mod mac {
 
     fn decode_hex_index_payload(payload: &str) -> Option<String> {
         let s = payload.trim();
-        if s.is_empty() || s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if s.is_empty() || !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
 
@@ -397,7 +399,7 @@ mod mac {
 mod unsupported {
     use super::*;
     fn err() -> anyhow::Error {
-        anyhow!("procpane env: secret storage requires macOS; Linux libsecret support is not yet implemented")
+        anyhow!("preceipts secrets: storage requires macOS; Linux libsecret support is not yet implemented")
     }
     pub fn set(
         _service: &str,

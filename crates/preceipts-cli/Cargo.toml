@@ -12,9 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 preceipts-core = { path = "../preceipts-core" }
+preceiptsd = { path = "../preceiptsd" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "macros"] }
 
 [dev-dependencies]
 tempfile = "3"

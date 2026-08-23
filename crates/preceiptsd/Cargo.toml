@@ -1,12 +1,17 @@
 [package]
-name = "procpane"
-version = "0.1.0"
-edition = "2021"
-description = "Turborepo sidecar with batteries-included dev DX: healthcheck-gated services, local HTTPS, Keychain secrets."
-license = "MIT"
+name = "preceiptsd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The workbench daemon: process supervision, healthchecks, local HTTPS, Keychain secrets."
+
+[lib]
+name = "preceiptsd"
+path = "src/lib.rs"
 
 [[bin]]
-name = "procpane"
+name = "preceiptsd"
 path = "src/main.rs"
 
 [dependencies]

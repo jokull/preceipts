@@ -60,11 +60,11 @@ impl TaskGraph {
                     if p.is_root {
                         continue;
                     }
-                    if p.scripts.contains_key(req) || project.turbo.task(req).is_some() {
-                        if p.scripts.contains_key(req) {
-                            pending.push((p.name.clone(), req.to_string()));
-                            matched = true;
-                        }
+                    if (p.scripts.contains_key(req) || project.turbo.task(req).is_some())
+                        && p.scripts.contains_key(req)
+                    {
+                        pending.push((p.name.clone(), req.to_string()));
+                        matched = true;
                     }
                 }
                 if !matched {

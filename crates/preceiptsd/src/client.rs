@@ -9,7 +9,7 @@ use crate::proto::{Request, Response};
 pub async fn call(socket: &Path, req: Request) -> Result<Response> {
     if !socket.exists() {
         return Err(anyhow!(
-            "no procpane daemon running here. Start one with `procpane run <task>`."
+            "no preceipts daemon running here. Start one with `preceipts up`."
         ));
     }
     let stream = UnixStream::connect(socket)

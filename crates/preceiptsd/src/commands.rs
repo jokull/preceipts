@@ -1,79 +1,53 @@
-mod buffer;
-mod ca;
-mod cli;
-mod client;
-mod config;
-mod daemon;
-mod forwarder;
-mod graph;
-mod healthcheck;
-mod lock;
-mod process;
-mod project;
-mod proto;
-mod proxy;
-mod secrets;
-mod share;
-mod sidecar;
+//! The verbs that drive an environment, as library functions.
+//!
+//! They live in the library rather than in `main.rs` so the `preceipts` CLI
+//! can call exactly what the daemon's own binary calls, with no second
+//! implementation to drift.
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::cli::{Cli, Cmd, EnvOp, ProcOp, TrustOp};
+#[allow(unused_imports)]
+use crate::buffer;
+#[allow(unused_imports)]
+use crate::ca;
+use crate::cli::{EnvOp, ProcOp, TrustOp};
+#[allow(unused_imports)]
+use crate::client;
+#[allow(unused_imports)]
+use crate::config;
+#[allow(unused_imports)]
+use crate::daemon;
+#[allow(unused_imports)]
+use crate::forwarder;
+#[allow(unused_imports)]
+use crate::graph;
+#[allow(unused_imports)]
+use crate::healthcheck;
+#[allow(unused_imports)]
+use crate::lock;
+#[allow(unused_imports)]
+use crate::process;
+#[allow(unused_imports)]
+use crate::project;
+#[allow(unused_imports)]
+use crate::proto;
+#[allow(unused_imports)]
+use crate::proxy;
+#[allow(unused_imports)]
+use crate::secrets;
+#[allow(unused_imports)]
+use crate::share;
+#[allow(unused_imports)]
+use crate::sidecar;
+
 use crate::client as cli_client;
 use crate::project::Project;
 use crate::proto::{Request, Response};
 
-fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
-    let args = Cli::parse();
-    let start = args
-        .cwd
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
-    let keychain = args
-        .keychain
-        .clone()
-        .or_else(|| std::env::var("PROCPANE_KEYCHAIN").ok());
-
-    match args.cmd {
-        Cmd::Up {
-            tasks,
-            foreground,
-            no_prebuild,
-        } => run_cmd(start, tasks, foreground, no_prebuild),
-        Cmd::WaitFor { name, timeout } => wait_for_cmd(start, name, timeout),
-        Cmd::Status { json, all } => status_cmd(start, json, all),
-        Cmd::Stop => stop_cmd(start),
-        Cmd::Proc { name, op } => proc_cmd(start, name, op),
-        Cmd::Env { op } => env_cmd(start, op, keychain.as_deref()),
-        Cmd::Trust { op } => trust_cmd(op),
-        Cmd::Grep {
-            pattern,
-            after,
-            before,
-            json,
-        } => grep_cmd(start, pattern, before, after, json),
-        Cmd::DaemonInner {
-            tasks,
-            root,
-            no_prebuild,
-        } => daemon_inner(root, tasks, no_prebuild),
-        Cmd::PrettyUrlProxy => forwarder::run(),
-    }
-}
-
-fn resolve_root(start: PathBuf) -> Result<PathBuf> {
+pub fn resolve_root(start: PathBuf) -> Result<PathBuf> {
     let mut cur = start.canonicalize().with_context(|| "canonicalize cwd")?;
     loop {
         if cur.join("turbo.json").is_file() {
@@ -87,7 +61,12 @@ fn resolve_root(start: PathBuf) -> Result<PathBuf> {
     }
 }
 
-fn run_cmd(start: PathBuf, tasks: Vec<String>, foreground: bool, no_prebuild: bool) -> Result<()> {
+pub fn run_cmd(
+    start: PathBuf,
+    tasks: Vec<String>,
+    foreground: bool,
+    no_prebuild: bool,
+) -> Result<()> {
     let root = resolve_root(start.clone())?;
     let state_dir = daemon::state_dir(&root);
     std::fs::create_dir_all(&state_dir)?;
@@ -97,13 +76,13 @@ fn run_cmd(start: PathBuf, tasks: Vec<String>, foreground: bool, no_prebuild: bo
     if let Some(pid) = lock::PidLock::read_pid(&lock_path) {
         if lock::is_alive(pid) {
             return Err(anyhow!(
-                "procpane already running here (pid {pid}). Use `procpane stop` first."
+                "preceipts is already running here (pid {pid}). Use `preceipts stop` first."
             ));
         }
         let _ = std::fs::remove_file(&lock_path);
     }
 
-    // Bare `procpane up` (no args) → service-manifest mode: bring up every
+    // Bare `preceipts up` (no args) → service-manifest mode: bring up every
     // task declared in `procpane.toml`. This is the canonical incantation
     // for a fully-wired repo and avoids the fan-out of bare-name expansion.
     let tasks = if tasks.is_empty() {
@@ -112,7 +91,7 @@ fn run_cmd(start: PathBuf, tasks: Vec<String>, foreground: bool, no_prebuild: bo
         if manifest.is_empty() {
             return Err(anyhow!(
                 "no tasks given and procpane.toml has no [tasks.*] entries. \
-                 Either pass task names (`procpane up dev`) or declare your \
+                 Either pass task names (`preceipts up dev`) or declare your \
                  services in procpane.toml."
             ));
         }
@@ -126,9 +105,9 @@ fn run_cmd(start: PathBuf, tasks: Vec<String>, foreground: bool, no_prebuild: bo
     }
 
     // Fork-style detach via re-exec.
-    let self_exe = std::env::current_exe().context("current_exe")?;
-    let mut cmd = std::process::Command::new(&self_exe);
-    cmd.arg("daemon-inner").arg("--root").arg(&root);
+    let daemon = crate::daemon_exe()?;
+    let mut cmd = std::process::Command::new(&daemon);
+    cmd.arg("serve").arg("--root").arg(&root);
     if no_prebuild {
         cmd.arg("--no-prebuild");
     }
@@ -175,7 +154,7 @@ async fn wait_and_print_status(socket: &std::path::Path, budget: Duration) {
             Response::Status { procs } => procs,
             _ => break,
         };
-        // Up-table is for humans driving `procpane up`. It should answer "are
+        // Up-table is for humans driving `preceipts up`. It should answer "are
         // my services up?", not "what is every workspace package's tsc-watch
         // doing?" In a real Turborepo, requesting `dev` pulls in 20+ silent
         // `tsc --watch` builders that the user never wants to read. Surface
@@ -185,7 +164,7 @@ async fn wait_and_print_status(socket: &std::path::Path, budget: Duration) {
         // turbo prebuild proc (slow + relevant). The rest get a single
         // count line so they don't disappear entirely.
         let is_service = |p: &proto::ProcStatus| -> bool {
-            p.name == "procpane#prebuild"
+            p.name == daemon::PREBUILD_ID
                 || p.hostname.is_some()
                 || p.in_manifest
                 || matches!(p.state.as_str(), "crashed" | "killed")
@@ -263,7 +242,7 @@ fn render_up_table(procs: &[proto::ProcStatus], hidden_count: usize) -> String {
         .count();
     if hidden_count > 0 {
         out.push_str(&format!(
-            "  …{hidden_count} background task{plural} (workspace builders) — use `procpane status --all` to see\n",
+            "  …{hidden_count} background task{plural} (workspace builders) — use `preceipts services --all` to see\n",
             plural = if hidden_count == 1 { "" } else { "s" }
         ));
     }
@@ -271,7 +250,7 @@ fn render_up_table(procs: &[proto::ProcStatus], hidden_count: usize) -> String {
     out
 }
 
-fn daemon_inner(root: PathBuf, tasks: Vec<String>, no_prebuild: bool) -> Result<()> {
+pub fn daemon_inner(root: PathBuf, tasks: Vec<String>, no_prebuild: bool) -> Result<()> {
     let state_dir = daemon::state_dir(&root);
     std::fs::create_dir_all(&state_dir)?;
     let lock_path = state_dir.join("lock");
@@ -284,7 +263,7 @@ fn daemon_inner(root: PathBuf, tasks: Vec<String>, no_prebuild: bool) -> Result<
     rt.block_on(daemon::Daemon::run(project, tasks, state_dir, no_prebuild))
 }
 
-fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
+pub fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
     let root = resolve_root(start)?;
     let socket = daemon::state_dir(&root).join("sock");
     let rt = tokio::runtime::Runtime::new()?;
@@ -305,7 +284,7 @@ fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
                     procs
                         .iter()
                         .filter(|p| {
-                            p.name == "procpane#prebuild"
+                            p.name == daemon::PREBUILD_ID
                                 || p.hostname.is_some()
                                 || p.in_manifest
                                 || matches!(p.state.as_str(), "crashed" | "killed")
@@ -313,8 +292,8 @@ fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
                         .collect()
                 };
                 println!(
-                    "{:<32} {:<10} {:>8} {:>6} {:>10}  {}",
-                    "NAME", "STATE", "PID", "AGE", "LINES", "HOSTNAME"
+                    "{:<32} {:<10} {:>8} {:>6} {:>10}  HOSTNAME",
+                    "NAME", "STATE", "PID", "AGE", "LINES"
                 );
                 for p in rows {
                     println!(
@@ -335,12 +314,12 @@ fn status_cmd(start: PathBuf, json: bool, all: bool) -> Result<()> {
     Ok(())
 }
 
-fn wait_for_cmd(start: PathBuf, name: String, timeout: String) -> Result<()> {
+pub fn wait_for_cmd(start: PathBuf, name: String, timeout: String) -> Result<()> {
     let dur = humantime::parse_duration(&timeout).map_err(|e| anyhow!("invalid --timeout: {e}"))?;
     let root = resolve_root(start)?;
     let socket = daemon::state_dir(&root).join("sock");
     if !socket.exists() {
-        return Err(anyhow!("no procpane daemon running here"));
+        return Err(anyhow!("no preceipts daemon running here"));
     }
     let rt = tokio::runtime::Runtime::new()?;
     let deadline = std::time::Instant::now() + dur;
@@ -397,7 +376,7 @@ fn wait_for_cmd(start: PathBuf, name: String, timeout: String) -> Result<()> {
     }
 }
 
-fn stop_cmd(start: PathBuf) -> Result<()> {
+pub fn stop_cmd(start: PathBuf) -> Result<()> {
     let root = resolve_root(start)?;
     let socket = daemon::state_dir(&root).join("sock");
     if !socket.exists() {
@@ -423,7 +402,7 @@ fn stop_cmd(start: PathBuf) -> Result<()> {
     }
 }
 
-fn proc_cmd(start: PathBuf, name: String, op: ProcOp) -> Result<()> {
+pub fn proc_cmd(start: PathBuf, name: String, op: ProcOp) -> Result<()> {
     let root = resolve_root(start)?;
     let socket = daemon::state_dir(&root).join("sock");
     let rt = tokio::runtime::Runtime::new()?;
@@ -536,16 +515,14 @@ fn proc_signal_cmd(
                             }
                         }
                     }
-                    Ok(Response::Error { message }) => {
-                        if !json {
-                            eprintln!("tail: {message}");
-                        }
+                    Ok(Response::Error { message }) if !json => {
+                        eprintln!("tail: {message}");
                     }
                     _ => {}
                 }
             }
 
-            match cli_client::call(&socket, Request::GetTask { name: name.clone() }).await {
+            match cli_client::call(socket, Request::GetTask { name: name.clone() }).await {
                 Ok(Response::Task { task }) => {
                     final_task = task.clone();
                     if matches!(task.state.as_str(), "completed" | "crashed" | "killed") {
@@ -598,9 +575,9 @@ fn proc_signal_cmd(
     Ok(())
 }
 
-fn trust_cmd(op: TrustOp) -> Result<()> {
+pub fn trust_cmd(op: TrustOp) -> Result<()> {
     match op {
-        TrustOp::Install { pretty_urls } => {
+        TrustOp::Install { forwarder: want } => {
             ca::ensure_ca()?;
             let cert_path = ca::ca_cert_path()?;
             println!("Installing CA into /Library/Keychains/System.keychain");
@@ -621,7 +598,7 @@ fn trust_cmd(op: TrustOp) -> Result<()> {
                 return Err(anyhow!("`security add-trusted-cert` failed"));
             }
             println!("✓ CA installed. Local https URLs are now trusted.");
-            if pretty_urls {
+            if want {
                 forwarder::install()?;
             }
             Ok(())
@@ -635,20 +612,33 @@ fn trust_cmd(op: TrustOp) -> Result<()> {
             } else if forwarder::has_legacy_hosts_block() {
                 forwarder::remove_legacy_hosts_block();
             }
+            // Both names: a CA generated by procpane keeps its own common
+            // name through migration, so removing only the current one would
+            // leave a trusted root behind on exactly the machines that have
+            // been using this longest.
             let cert_path = ca::ca_cert_path()?;
             if cert_path.is_file() {
-                let status = std::process::Command::new("sudo")
-                    .arg("security")
-                    .arg("delete-certificate")
-                    .arg("-c")
-                    .arg(ca::CA_COMMON_NAME)
-                    .arg("-t")
-                    .arg("/Library/Keychains/System.keychain")
-                    .status();
-                match status {
-                    Ok(s) if s.success() => println!("✓ removed from System keychain"),
-                    Ok(_) => eprintln!("(no entry in System keychain, or sudo declined)"),
-                    Err(e) => eprintln!("sudo invocation failed: {e}"),
+                let mut removed = false;
+                for name in [ca::CA_COMMON_NAME, ca::LEGACY_CA_COMMON_NAME] {
+                    let status = std::process::Command::new("sudo")
+                        .arg("security")
+                        .arg("delete-certificate")
+                        .arg("-c")
+                        .arg(name)
+                        .arg("-t")
+                        .arg("/Library/Keychains/System.keychain")
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!("✓ removed \"{name}\" from System keychain");
+                            removed = true;
+                        }
+                        Ok(_) => {}
+                        Err(e) => eprintln!("sudo invocation failed: {e}"),
+                    }
+                }
+                if !removed {
+                    eprintln!("(no entry in System keychain, or sudo declined)");
                 }
             }
             if let Ok(dir) = ca::ca_dir() {
@@ -661,14 +651,14 @@ fn trust_cmd(op: TrustOp) -> Result<()> {
             if ca::is_installed() {
                 println!("✓ CA files present: {}", ca::ca_dir()?.display());
             } else {
-                println!("✗ CA not generated. Run `procpane trust install` first.");
+                println!("✗ CA not generated. Run `preceipts trust install` first.");
             }
             if forwarder::is_installed() {
                 println!("✓ :443 forwarder present: {}", forwarder::PROXY_PLIST_PATH);
                 println!("  Portless URLs such as https://web.proj.localhost work.");
             } else {
                 println!(
-                    "✗ :443 forwarder not installed. Hostname URLs use :{} unless you run `procpane trust install --pretty-urls`.",
+                    "✗ :443 forwarder not installed. Hostname URLs use :{} unless you run `preceipts trust install --forwarder`.",
                     proxy::PROXY_PORT
                 );
             }
@@ -677,7 +667,7 @@ fn trust_cmd(op: TrustOp) -> Result<()> {
             if forwarder::has_legacy_hosts_block() {
                 println!(
                     "! an earlier version left a hostname block in /etc/hosts; \
-                     `procpane trust uninstall` removes it"
+                     `preceipts trust uninstall` removes it"
                 );
             }
             Ok(())
@@ -685,7 +675,7 @@ fn trust_cmd(op: TrustOp) -> Result<()> {
     }
 }
 
-fn env_cmd(start: PathBuf, op: EnvOp, keychain: Option<&str>) -> Result<()> {
+pub fn env_cmd(start: PathBuf, op: EnvOp, keychain: Option<&str>) -> Result<()> {
     let root = resolve_root(start)?;
     let service = secrets::service_name(&root);
     match op {
@@ -696,7 +686,7 @@ fn env_cmd(start: PathBuf, op: EnvOp, keychain: Option<&str>) -> Result<()> {
                 None if !std::io::stdin().is_terminal() => {
                     // Piped/redirected stdin: read the value as a single line,
                     // stripping a trailing newline if present. Keeps
-                    // `echo "$VAL" | procpane env set KEY` ergonomic instead of
+                    // `echo "$VAL" | preceipts secrets set KEY` ergonomic instead of
                     // erroring with "Device not configured" (no TTY for the
                     // password prompt).
                     let mut buf = String::new();
@@ -788,11 +778,14 @@ fn env_cmd(start: PathBuf, op: EnvOp, keychain: Option<&str>) -> Result<()> {
     }
 }
 
+/// Every stored key, and which tasks reference each one.
+type EnvKeyUsage = (Vec<String>, std::collections::BTreeMap<String, Vec<String>>);
+
 fn discover_env_keys(
     root: &std::path::Path,
     service: &str,
     keychain: Option<&str>,
-) -> Result<(Vec<String>, std::collections::BTreeMap<String, Vec<String>>)> {
+) -> Result<EnvKeyUsage> {
     let mut keys: std::collections::BTreeSet<String> = secrets::list_accounts(service, keychain)?
         .into_iter()
         .collect();
@@ -841,7 +834,7 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn grep_cmd(
+pub fn grep_cmd(
     start: PathBuf,
     pattern: String,
     before: usize,

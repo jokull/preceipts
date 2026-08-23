@@ -27,6 +27,11 @@ struct Cli {
     #[arg(long, short = 'C', global = true)]
     path: Option<PathBuf>,
 
+    /// Keychain database to store/read project secrets in. Defaults to the
+    /// default keychain; also settable with PRECEIPTS_KEYCHAIN.
+    #[arg(long, short = 'k', global = true)]
+    keychain: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -130,6 +135,69 @@ enum Command {
         /// Workspace id. Defaults to the one you are standing in.
         id: Option<String>,
     },
+
+    // ---- the environment -------------------------------------------------
+    // These were `procpane`'s. They are here rather than on a second binary
+    // because the lab has one door: anything the app can do, `preceipts` can
+    // do, and an agent should not have to learn which tool owns which verb.
+    /// Bring the project's services up, healthcheck-gated, in the background.
+    #[command(alias = "start")]
+    Up {
+        /// Task names (`dev`) or qualified ids (`web#dev`). Omit for every
+        /// task the project declares.
+        tasks: Vec<String>,
+        /// Run in the foreground rather than detaching.
+        #[arg(long)]
+        foreground: bool,
+        /// Skip the prebuild step for non-persistent dependencies.
+        #[arg(long)]
+        no_prebuild: bool,
+    },
+    /// Stop the daemon for this project.
+    #[command(alias = "stop")]
+    Down,
+    /// What is running, and is it healthy.
+    Services {
+        #[arg(long)]
+        json: bool,
+        /// Include background builders, not just declared services.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Block until a service is healthy. 0 = healthy, 1 = failed, 2 = timeout.
+    WaitFor {
+        /// Task id, e.g. `api#dev`.
+        name: String,
+        #[arg(long, default_value = "5m")]
+        timeout: String,
+    },
+    /// Per-service operations: logs, restart, stop.
+    Proc {
+        name: String,
+        #[command(subcommand)]
+        op: preceiptsd::cli::ProcOp,
+    },
+    /// Search every service's output at once.
+    Grep {
+        pattern: String,
+        #[arg(short = 'A', long, default_value_t = 0)]
+        after: usize,
+        #[arg(short = 'B', long, default_value_t = 0)]
+        before: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Project secrets in the macOS Keychain.
+    #[command(alias = "env")]
+    Secrets {
+        #[command(subcommand)]
+        op: preceiptsd::cli::EnvOp,
+    },
+    /// The local Certificate Authority, and the :443 forwarder.
+    Trust {
+        #[command(subcommand)]
+        op: preceiptsd::cli::TrustOp,
+    },
 }
 
 fn main() {
@@ -146,7 +214,31 @@ fn run() -> Result<()> {
         None => std::env::current_dir().context("reading the working directory")?,
     };
 
+    let keychain = cli
+        .keychain
+        .or_else(|| std::env::var("PRECEIPTS_KEYCHAIN").ok());
+
     match cli.command {
+        Command::Up {
+            tasks,
+            foreground,
+            no_prebuild,
+        } => preceiptsd::commands::run_cmd(path, tasks, foreground, no_prebuild),
+        Command::Down => preceiptsd::commands::stop_cmd(path),
+        Command::Services { json, all } => preceiptsd::commands::status_cmd(path, json, all),
+        Command::WaitFor { name, timeout } => {
+            preceiptsd::commands::wait_for_cmd(path, name, timeout)
+        }
+        Command::Proc { name, op } => preceiptsd::commands::proc_cmd(path, name, op),
+        Command::Grep {
+            pattern,
+            after,
+            before,
+            json,
+        } => preceiptsd::commands::grep_cmd(path, pattern, before, after, json),
+        Command::Secrets { op } => preceiptsd::commands::env_cmd(path, op, keychain.as_deref()),
+        Command::Trust { op } => preceiptsd::commands::trust_cmd(op),
+
         Command::New {
             prompt,
             branch,

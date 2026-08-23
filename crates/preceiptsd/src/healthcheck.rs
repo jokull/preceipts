@@ -17,7 +17,7 @@ pub enum HealthcheckKind {
     /// HTTP probe with a fully-resolved target.
     ///
     /// * `tls` — when true, the connection runs through rustls with the
-    ///   procpane CA trusted, and `sni_host` is sent as the SNI / `Host:` value.
+    ///   the local CA trusted, and `sni_host` is sent as the SNI / `Host:` value.
     /// * `connect_host` / `connect_port` — TCP endpoint to dial.
     /// * `path` — request path (always starts with `/`).
     Http {
@@ -58,7 +58,7 @@ impl HealthcheckKind {
             return Ok(HealthcheckKind::Tcp(port));
         }
         if let Some(spec) = &hc.http {
-            return Ok(resolve_http_target(spec, hostname)?);
+            return resolve_http_target(spec, hostname);
         }
         if let Some(pat) = &hc.log {
             let re = regex::Regex::new(pat)
@@ -193,7 +193,7 @@ async fn probe_tcp(port: u16, t: Duration) -> bool {
 ///
 /// Accepted forms:
 /// * A path (`"/health"`) — requires the task to declare a `hostname`. The
-///   probe goes through procpane's TLS proxy at `127.0.0.1:PROXY_PORT` with
+///   probe goes through the daemon's TLS proxy at `127.0.0.1:PROXY_PORT` with
 ///   SNI = the task's hostname. Matches what the README promises.
 /// * A full URL (`"http://127.0.0.1:8787/health"` or
 ///   `"https://anything.localhost/health"`) — used as-is. Plain `http://` keeps it
@@ -276,7 +276,7 @@ async fn probe_http(
         format!("/{path}")
     };
     let req = format!(
-        "GET {path_norm} HTTP/1.1\r\nHost: {sni_host}\r\nConnection: close\r\nUser-Agent: procpane-healthcheck/1\r\n\r\n"
+        "GET {path_norm} HTTP/1.1\r\nHost: {sni_host}\r\nConnection: close\r\nUser-Agent: preceipts-healthcheck/1\r\n\r\n"
     );
 
     let res = timeout(t, async {
@@ -309,10 +309,10 @@ async fn probe_http(
     }
 }
 
-/// Build a rustls TLS connector that trusts the procpane root CA so we can
+/// Build a rustls TLS connector that trusts the local root CA so we can
 /// probe `https://<task>.<project>.localhost:8443/...` without `-k`-style hacks. The CA is
 /// loaded fresh on each healthcheck attempt — cheap, and lets the user run
-/// `procpane trust install` mid-session without restarting the daemon.
+/// `preceipts trust install` mid-session without restarting the daemon.
 fn build_tls_connector() -> anyhow::Result<tokio_rustls::TlsConnector> {
     let mut roots = rustls::RootCertStore::empty();
     let pem = std::fs::read(crate::ca::ca_cert_path()?)?;

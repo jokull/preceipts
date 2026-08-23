@@ -64,7 +64,7 @@ pub async fn receive(service: &str, keychain: Option<&str>) -> Result<()> {
         println!("    + {k}");
     }
     println!();
-    println!("Stored in Keychain. You can `procpane up` now.");
+    println!("Stored in Keychain. You can `preceipts up` now.");
     Ok(())
 }
 
