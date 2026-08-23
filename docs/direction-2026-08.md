@@ -1052,6 +1052,25 @@ What steps 9–13 leave for the next pass, in the order they block things:
     written, because the error message names who holds the lock. The file is
     deliberately never unlinked — removing a name another process has already
     opened is how two holders end up with two inodes and one worktree.
-20. **The signed bundle**: `SMAppService` registration, the shared Keychain
+20. ~~**One machine-wide proxy.**~~ *Done.* Every workspace runs its own TLS
+    proxy on its own block, which is what lets two worktrees serve at once —
+    but only one could hold the well-known port, so everyone else's URL named
+    one, and the `:443` forwarder could reach only that one. A router now owns
+    the well-known port and splices by hostname.
+
+    **It holds no keys and terminates no TLS.** The server name in a
+    ClientHello is sent in the clear, before anything is encrypted, so routing
+    means reading a few dozen bytes and getting out of the way. Each workspace
+    keeps its own certificate, its own proxy, and its own transcript; the
+    router never sees a plaintext byte and could not record one. That is what
+    makes a shared component acceptable here at all.
+
+    Routes live in a plain file every daemon writes and the router reads —
+    inspectable, like the port reservations, so a daemon that died in an
+    unforeseen way leaves something a person can read rather than a lost
+    connection. The primary worktree's old claim on 8443 is gone with it: that
+    was an arbitrary rule dressed as a default.
+
+21. **The signed bundle**: `SMAppService` registration, the shared Keychain
     access group, notarization — and with them the retirement of the
     open-ACL secrets workaround.

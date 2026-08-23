@@ -23,6 +23,8 @@ pub mod process;
 pub mod project;
 pub mod proto;
 pub mod proxy;
+pub mod router;
+pub mod routes;
 pub mod secrets;
 pub mod services;
 pub mod share;

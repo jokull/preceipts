@@ -24,5 +24,6 @@ fn main() -> Result<()> {
             no_prebuild,
         } => commands::daemon_inner(root, tasks, no_prebuild),
         Cmd::Forward => forwarder::run(),
+        Cmd::Route => preceiptsd::router::run(),
     }
 }

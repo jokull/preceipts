@@ -32,6 +32,9 @@ pub enum Cmd {
     /// Internal: root-owned loopback :443 → :8443 TCP forwarder.
     #[command(hide = true)]
     Forward,
+    /// Internal: the machine-wide SNI router (started on demand).
+    #[command(hide = true)]
+    Route,
 }
 
 #[derive(Subcommand, Debug)]

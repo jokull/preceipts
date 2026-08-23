@@ -169,16 +169,21 @@ restarts, so a bookmark keeps working — and its own TLS proxy and leaf cert,
 under its own hostname:
 
 ```
-web.trip.localhost:8443                  ← the primary worktree
-web.add-checkout-flow.trip.localhost:27800
+web.trip.localhost
+web.add-checkout-flow.trip.localhost
 ```
+
+Both on the same port, because a router owns it and splices by hostname to the
+workspace that owns the name. It holds no keys and terminates no TLS — the
+server name in a ClientHello is in the clear, so routing means reading a few
+dozen bytes and getting out of the way. Each workspace keeps its own
+certificate and its own transcript.
 
 `preceipts requests` reads the HTTP transcript: every request the proxy carried
 and what answered it, with nothing instrumented in your app, because the proxy
 is already in the path. Heads only — a recorded body is a recorded password.
 
-Still ahead: one machine-wide proxy so linked workspaces get portless URLs too,
-the container runtime (`image = …` parses and validates but cannot start yet —
+Still ahead: the container runtime (`image = …` parses and validates but cannot start yet —
 `doctor` says so), and the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
 Keychain access group that retires the open-ACL workaround — waits on a signed
 bundle. Service URLs are

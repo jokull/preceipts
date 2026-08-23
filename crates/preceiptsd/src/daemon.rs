@@ -14,6 +14,7 @@ use crate::healthcheck::{run_healthcheck_loop, HealthcheckKind};
 use crate::process::{Proc, ProcState};
 use crate::proto::{GrepMatch, LineRecord, ProcStatus, Request, Response};
 use crate::proxy::{self, PortRegistry, PROXY_PORT};
+use crate::routes;
 use crate::secrets;
 use crate::services::DependsOnCondition;
 use crate::{ca, forwarder, project::Project};
@@ -205,16 +206,12 @@ impl Daemon {
             allocated_ports.insert(id.clone(), port);
         }
 
-        // Offset 0 of the block is the workspace's own TLS proxy, so two
-        // worktrees do not fight over one listener. The primary working
-        // directory keeps the well-known port instead, because that is the
-        // one the `:443` forwarder points at and the one a person browses
-        // without thinking — a linked workspace uses its own port until the
-        // proxy becomes machine-wide.
-        let proxy_port = match (&workspace, block) {
-            (Some(ws), Some(block)) if !ws.is_primary => block.port(0).unwrap_or(PROXY_PORT),
-            _ => PROXY_PORT,
-        };
+        // Offset 0 of the block is this workspace's TLS proxy. *Every*
+        // workspace takes one, the primary included: the well-known port
+        // belongs to the router now, which splices to whichever workspace owns
+        // the hostname. Before that existed the primary kept 8443 and everyone
+        // else named a port, which was an arbitrary rule dressed as a default.
+        let proxy_port = block.and_then(|b| b.port(0)).unwrap_or(PROXY_PORT);
 
         let manifest_tasks: std::collections::HashSet<String> =
             project.services.tasks.keys().cloned().collect();
@@ -247,6 +244,17 @@ impl Daemon {
                 match proxy::build_tls_config(&host_list) {
                     Ok(tls_cfg) => {
                         let bind: std::net::SocketAddr = ([127, 0, 0, 1], proxy_port).into();
+                        // Tell the router where to find us, and make sure it
+                        // exists. Registering before the proxy is listening is
+                        // deliberate: the router connects lazily, per request,
+                        // so a route that briefly points at a port still
+                        // binding costs one refused connection rather than a
+                        // hostname that works only after a reload.
+                        let hosts: Vec<String> = hostnames.values().cloned().collect();
+                        if let Err(e) = routes::register(&hosts, proxy_port) {
+                            tracing::warn!(?e, "could not publish routes");
+                        }
+                        ensure_router();
                         let reg = Arc::clone(&port_registry);
                         let transcript = Some(Arc::clone(&daemon.transcript));
                         let mut prx_stop = stop_rx.clone();
@@ -359,6 +367,9 @@ impl Daemon {
             p.stop_with_signal(signal, grace);
         }
         scheduler.abort();
+        // Leaving a route behind would send traffic to a port that may since
+        // belong to something else entirely — worse than no route at all.
+        let _ = routes::unregister_port(proxy_port);
         let _ = std::fs::remove_file(&socket_path);
         Ok(())
     }
@@ -969,12 +980,14 @@ fn is_wrangler_invocation(shell_cmd: &str) -> bool {
 
 /// The URL to hand a person or a sibling service.
 ///
-/// `proxy_port` rather than the constant: a linked workspace runs its own TLS
-/// proxy on its own block, so a URL naming 8443 would point at whichever
-/// workspace happens to hold the well-known port. Portless only when the
-/// forwarder is installed *and* this workspace is the one it points at.
+/// Portless whenever the `:443` forwarder is installed — for *every*
+/// workspace, not just one. That is what the router bought: the forwarder
+/// points at one listener, and that listener now splices by hostname to
+/// whichever workspace owns the name. Without the forwarder the URL names
+/// this workspace's own proxy port, which is the honest thing to print when
+/// nothing is listening on 443.
 fn public_url(host: &str, proxy_port: u16) -> String {
-    if forwarder::is_installed() && proxy_port == PROXY_PORT {
+    if forwarder::is_installed() {
         format!("https://{host}")
     } else {
         format!("https://{host}:{proxy_port}")
@@ -1039,10 +1052,13 @@ mod tests {
         );
     }
 
-    /// A linked workspace is never portless, whatever the forwarder's state:
-    /// the forwarder points at 8443, and this workspace is not there.
+    /// Without the forwarder, a URL names the port that is actually serving
+    /// it — this workspace's own proxy, never the well-known one.
     #[test]
-    fn a_workspace_on_its_own_proxy_always_names_its_port() {
+    fn without_the_forwarder_a_url_names_the_port_that_serves_it() {
+        if crate::forwarder::is_installed() {
+            return;
+        }
         assert_eq!(
             public_url("api.feat.proj.localhost", 21000),
             "https://api.feat.proj.localhost:21000"
@@ -1136,6 +1152,41 @@ mod workspace_host_tests {
             "api.fix-checkout.proj.localhost"
         );
         assert_eq!(workspace_host("api", &dir), "api.proj.localhost");
+    }
+}
+
+/// Start the router if nothing is serving the well-known port yet.
+///
+/// Racy by construction — two daemons starting together both see a free port
+/// and both spawn — and that is fine: the loser fails to bind, prints, and
+/// exits, while the winner serves both of them. Coordinating instead would
+/// mean a lock file to leave behind when something is killed, which is a
+/// worse failure than a process that exits immediately.
+fn ensure_router() {
+    if std::net::TcpStream::connect(("127.0.0.1", routes::ROUTER_PORT)).is_ok() {
+        return;
+    }
+    let Ok(daemon) = crate::daemon_exe() else {
+        tracing::warn!("no preceiptsd binary to start the router with");
+        return;
+    };
+    let mut command = std::process::Command::new(daemon);
+    command
+        .arg("route")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        command.pre_exec(|| {
+            // Its own session: the router outlives the workspace that
+            // happened to start it, because the next workspace needs it too.
+            libc::setsid();
+            Ok(())
+        });
+    }
+    if let Err(e) = command.spawn() {
+        tracing::warn!(?e, "could not start the router");
     }
 }
 
