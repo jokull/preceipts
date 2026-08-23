@@ -78,6 +78,14 @@ pub fn ensure_ca() -> Result<()> {
 
 /// Sign a leaf cert for the given DNS names (must be a non-empty list).
 /// Returns (cert PEM, key PEM).
+/// Sign a leaf naming every hostname in `dns_names`, exactly.
+///
+/// **Concrete names only.** A wildcard SAN matches a single label, so
+/// `*.proj.localhost` does not cover `api.fix-checkout.proj.localhost` — and
+/// under the workspace scheme every real hostname has that extra label. The
+/// daemon knows all its hostnames at boot, so naming them is both correct and
+/// cheap; reaching for a wildcard here would silently fail on exactly the
+/// workspaces the fabric exists to serve.
 pub fn sign_leaf(dns_names: &[String]) -> Result<(String, String)> {
     let ca_cert_pem = fs::read_to_string(ca_cert_path()?).context("read CA cert")?;
     let ca_key_pem = fs::read_to_string(ca_key_path()?).context("read CA key")?;
@@ -135,8 +143,12 @@ mod tests {
         // Generate CA.
         ensure_ca().unwrap();
         assert!(is_installed());
-        // Sign a wildcard leaf.
-        let (cert, key) = sign_leaf(&["web.test".to_string(), "api.test".to_string()]).unwrap();
+        // Concrete SANs, never a wildcard — see the note on sign_leaf.
+        let (cert, key) = sign_leaf(&[
+            "web.proj.localhost".to_string(),
+            "api.fix-checkout.proj.localhost".to_string(),
+        ])
+        .unwrap();
         assert!(cert.contains("-----BEGIN CERTIFICATE-----"));
         assert!(key.contains("PRIVATE KEY"));
         // Cleanup.

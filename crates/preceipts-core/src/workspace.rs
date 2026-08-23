@@ -72,11 +72,40 @@ pub struct Workspace {
     pub is_primary: bool,
 }
 
+/// The suffix every workspace hostname ends in.
+///
+/// Decision 13, and it is the reason there is no DNS code in this project.
+/// macOS resolves `*.localhost` to loopback at arbitrary depth in
+/// `getaddrinfo` itself, so `api.fix-checkout.trip.localhost` is answered by
+/// the system with nothing installed — no resolver file, no `/etc/hosts`
+/// block, no responder in the daemon, and nothing to clean up when the app is
+/// deleted. The `.test` scheme this replaced additionally does not work at
+/// all on macOS 26, where mDNSResponder swallows every TLD outside the IANA
+/// root zone and answers it as multicast DNS.
+pub const HOST_SUFFIX: &str = "localhost";
+
 impl Workspace {
-    /// Hostname label for this workspace's services: `<service>.<id>.<project>`
-    /// resolves through the daemon's DNS responder.
-    pub fn host_label(&self, service: &str) -> String {
-        format!("{}.{}.{}", service, self.id, self.project_name())
+    /// The hostname for one of this workspace's services.
+    ///
+    /// `api` in workspace `fix-checkout` of project `trip` becomes
+    /// `api.fix-checkout.trip.localhost`. The workspace dimension is what
+    /// keeps two worktrees of one project from fighting over a hostname, so
+    /// it is not optional — except for the primary working directory, which
+    /// keeps the shorter `api.trip.localhost` because it is the URL a person
+    /// types and a single-worktree project should not pay for a distinction
+    /// it never makes.
+    ///
+    /// A caller may pass a bare label (`api`) or a whole declared hostname
+    /// from an older manifest (`api.trip.test`); only the first segment is
+    /// read, because everything after it is now the fabric's to compose.
+    pub fn hostname(&self, service: &str) -> String {
+        let label = service.split('.').next().unwrap_or(service);
+        let project = self.project_name();
+        if self.is_primary {
+            format!("{label}.{project}.{HOST_SUFFIX}")
+        } else {
+            format!("{label}.{}.{project}.{HOST_SUFFIX}", self.id)
+        }
     }
 
     pub fn project_name(&self) -> String {
@@ -485,7 +514,45 @@ mod tests {
         let (_temp, dir) = project();
         let ws = create(&dir, "feat/Add_Thing", None, None).unwrap();
         assert_eq!(ws.id, "feat-add-thing");
-        assert_eq!(ws.host_label("api"), "api.feat-add-thing.proj");
+        assert_eq!(
+            ws.hostname("api"),
+            "api.feat-add-thing.proj.localhost",
+            "every segment is a slug, and the suffix is the one the OS \
+             already resolves"
+        );
+    }
+
+    /// The point of the workspace dimension: two worktrees of one project
+    /// must not both answer to `api.proj.localhost`.
+    #[test]
+    fn two_workspaces_of_one_project_do_not_collide() {
+        let (_temp, dir) = project();
+        let a = create(&dir, "fix-checkout", None, None).unwrap();
+        let b = create(&dir, "other-thing", None, None).unwrap();
+        assert_ne!(a.hostname("api"), b.hostname("api"));
+        assert_eq!(a.hostname("api"), "api.fix-checkout.proj.localhost");
+        assert_eq!(b.hostname("api"), "api.other-thing.proj.localhost");
+    }
+
+    #[test]
+    fn the_primary_working_directory_keeps_the_short_name() {
+        let (_temp, dir) = project();
+        let primary = locate(&dir).unwrap();
+        assert!(primary.is_primary);
+        assert_eq!(primary.hostname("api"), "api.proj.localhost");
+    }
+
+    /// A manifest written before the fabric existed says `api.trip.test`.
+    /// Only the label survives; the suffix is no longer the author's to pick.
+    #[test]
+    fn a_declared_hostname_is_read_as_a_label() {
+        let (_temp, dir) = project();
+        let ws = create(&dir, "feature", None, None).unwrap();
+        assert_eq!(
+            ws.hostname("api.trip.test"),
+            "api.feature.proj.localhost",
+            "the old suffix is discarded rather than nested"
+        );
     }
 
     #[test]

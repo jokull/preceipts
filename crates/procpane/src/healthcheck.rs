@@ -196,7 +196,7 @@ async fn probe_tcp(port: u16, t: Duration) -> bool {
 ///   probe goes through procpane's TLS proxy at `127.0.0.1:PROXY_PORT` with
 ///   SNI = the task's hostname. Matches what the README promises.
 /// * A full URL (`"http://127.0.0.1:8787/health"` or
-///   `"https://anything.test/health"`) — used as-is. Plain `http://` keeps it
+///   `"https://anything.localhost/health"`) — used as-is. Plain `http://` keeps it
 ///   straightforward to probe a task that pins its own port without a hostname.
 pub fn resolve_http_target(spec: &str, hostname: Option<&str>) -> anyhow::Result<HealthcheckKind> {
     if let Some(rest) = spec.strip_prefix("https://") {
@@ -310,7 +310,7 @@ async fn probe_http(
 }
 
 /// Build a rustls TLS connector that trusts the procpane root CA so we can
-/// probe `https://<task>.test:8443/...` without `-k`-style hacks. The CA is
+/// probe `https://<task>.<project>.localhost:8443/...` without `-k`-style hacks. The CA is
 /// loaded fresh on each healthcheck attempt — cheap, and lets the user run
 /// `procpane trust install` mid-session without restarting the daemon.
 fn build_tls_connector() -> anyhow::Result<tokio_rustls::TlsConnector> {

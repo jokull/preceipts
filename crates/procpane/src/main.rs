@@ -4,11 +4,10 @@ mod cli;
 mod client;
 mod config;
 mod daemon;
+mod forwarder;
 mod graph;
 mod healthcheck;
 mod lock;
-mod pretty_urls;
-mod privileged_proxy;
 mod process;
 mod project;
 mod proto;
@@ -27,7 +26,6 @@ use crate::cli::{Cli, Cmd, EnvOp, ProcOp, TrustOp};
 use crate::client as cli_client;
 use crate::project::Project;
 use crate::proto::{Request, Response};
-use crate::sidecar::Sidecar;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -59,7 +57,7 @@ fn main() -> Result<()> {
         Cmd::Stop => stop_cmd(start),
         Cmd::Proc { name, op } => proc_cmd(start, name, op),
         Cmd::Env { op } => env_cmd(start, op, keychain.as_deref()),
-        Cmd::Trust { op } => trust_cmd(start, op),
+        Cmd::Trust { op } => trust_cmd(op),
         Cmd::Grep {
             pattern,
             after,
@@ -71,7 +69,7 @@ fn main() -> Result<()> {
             root,
             no_prebuild,
         } => daemon_inner(root, tasks, no_prebuild),
-        Cmd::PrettyUrlProxy => privileged_proxy::run(),
+        Cmd::PrettyUrlProxy => forwarder::run(),
     }
 }
 
@@ -229,7 +227,7 @@ async fn wait_and_print_status(socket: &std::path::Path, budget: Duration) {
 fn render_up_table(procs: &[proto::ProcStatus], hidden_count: usize) -> String {
     let mut out = String::new();
     let mut healthy = 0usize;
-    let proxy_port = if pretty_urls::is_installed() {
+    let proxy_port = if forwarder::is_installed() {
         ""
     } else {
         ":8443"
@@ -600,7 +598,7 @@ fn proc_signal_cmd(
     Ok(())
 }
 
-fn trust_cmd(start: PathBuf, op: TrustOp) -> Result<()> {
+fn trust_cmd(op: TrustOp) -> Result<()> {
     match op {
         TrustOp::Install { pretty_urls } => {
             ca::ensure_ca()?;
@@ -622,19 +620,20 @@ fn trust_cmd(start: PathBuf, op: TrustOp) -> Result<()> {
             if !status.success() {
                 return Err(anyhow!("`security add-trusted-cert` failed"));
             }
-            println!("✓ CA installed. https://*.test:8443 is now trusted.");
+            println!("✓ CA installed. Local https URLs are now trusted.");
             if pretty_urls {
-                let hostnames = manifest_hostnames(&start);
-                pretty_urls::install(&hostnames)?;
+                forwarder::install()?;
             }
             Ok(())
         }
         TrustOp::Uninstall => {
-            // Always attempt to tear down pretty-urls — it's an additive install
-            // step and we want `uninstall` to leave the system clean. No-op if
-            // the marker files don't exist.
-            if pretty_urls::is_installed() {
-                pretty_urls::uninstall()?;
+            // Always attempt to tear down the forwarder — it's an additive
+            // install step and `uninstall` should leave the system clean. No-op
+            // if the marker files don't exist.
+            if forwarder::is_installed() {
+                forwarder::uninstall()?;
+            } else if forwarder::has_legacy_hosts_block() {
+                forwarder::remove_legacy_hosts_block();
             }
             let cert_path = ca::ca_cert_path()?;
             if cert_path.is_file() {
@@ -664,57 +663,26 @@ fn trust_cmd(start: PathBuf, op: TrustOp) -> Result<()> {
             } else {
                 println!("✗ CA not generated. Run `procpane trust install` first.");
             }
-            if pretty_urls::is_installed() {
-                println!(
-                    "✓ pretty-urls helper present: {}",
-                    pretty_urls::PROXY_PLIST_PATH
-                );
-                let hostnames = manifest_hostnames(&start);
-                if hostnames.is_empty() {
-                    println!("  No procpane.toml hostnames found from this cwd.");
-                } else {
-                    let missing = pretty_urls::missing_hostnames(&hostnames);
-                    if missing.is_empty() {
-                        println!("✓ hostname entries present: {}", hostnames.join(", "));
-                    } else {
-                        println!("✗ hostname entries missing: {}", missing.join(", "));
-                        println!(
-                            "  Run `procpane trust install --pretty-urls` from this repo to add them."
-                        );
-                    }
-                }
-                println!("  Use portless URLs such as https://web.test once hostnames resolve.");
+            if forwarder::is_installed() {
+                println!("✓ :443 forwarder present: {}", forwarder::PROXY_PLIST_PATH);
+                println!("  Portless URLs such as https://web.proj.localhost work.");
             } else {
                 println!(
-                    "✗ pretty-urls not installed. Hostname URLs use :{} unless you run `procpane trust install --pretty-urls`.",
+                    "✗ :443 forwarder not installed. Hostname URLs use :{} unless you run `procpane trust install --pretty-urls`.",
                     proxy::PROXY_PORT
+                );
+            }
+            // Hostnames themselves need nothing installed: macOS resolves
+            // *.localhost to loopback on its own (decision 13).
+            if forwarder::has_legacy_hosts_block() {
+                println!(
+                    "! an earlier version left a hostname block in /etc/hosts; \
+                     `procpane trust uninstall` removes it"
                 );
             }
             Ok(())
         }
     }
-}
-
-fn manifest_hostnames(start: &PathBuf) -> Vec<String> {
-    let root = match resolve_root(start.clone()) {
-        Ok(root) => root,
-        Err(_) => return Vec::new(),
-    };
-    let sidecar = match Sidecar::load(&root) {
-        Ok(sidecar) => sidecar,
-        Err(e) => {
-            eprintln!("warning: could not read procpane.toml hostnames: {e}");
-            return Vec::new();
-        }
-    };
-    let mut hostnames: Vec<String> = sidecar
-        .tasks
-        .values()
-        .filter_map(|task| task.hostname.clone())
-        .collect();
-    hostnames.sort();
-    hostnames.dedup();
-    hostnames
 }
 
 fn env_cmd(start: PathBuf, op: EnvOp, keychain: Option<&str>) -> Result<()> {

@@ -2,9 +2,10 @@
 //! connection sniffs SNI, looks up the registered backend port for that
 //! hostname, and bidirectionally copies bytes.
 //!
-//! Cert chain is a single leaf signed by the local CA covering every declared
-//! hostname (and a wildcard for the parent domain when present). For the MVP
-//! we sign one cert at daemon startup that names every task's hostname.
+//! Cert chain is a single leaf signed by the local CA naming every declared
+//! hostname exactly — no wildcard, because a wildcard SAN matches one label
+//! and every workspace hostname has one more than the project domain. One
+//! cert is signed at daemon startup covering every task's hostname.
 
 use anyhow::{anyhow, Context, Result};
 use parking_lot::RwLock;
