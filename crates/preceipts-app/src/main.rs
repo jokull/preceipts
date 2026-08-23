@@ -10,8 +10,9 @@ mod theme;
 
 use cockpit::Cockpit;
 use gpui::{
-    px, size, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
+    point, px, size, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 };
+use gpui_component::{Theme as UiTheme, ThemeMode};
 use preceipts_core::{load, DiffScope};
 use std::path::PathBuf;
 
@@ -65,6 +66,15 @@ fn main() {
     }
 
     Application::new().run(move |cx| {
+        // gpui-component keeps its widget state in globals — theme registry,
+        // popover and menu layers, input bindings. Nothing from the library
+        // renders before this runs.
+        gpui_component::init(cx);
+        // The diff surface is a fixed dark palette, so the shell is too rather
+        // than following the system and clashing with it half the time.
+        UiTheme::change(ThemeMode::Dark, None, cx);
+        paint_shell_to_match_the_surface(cx);
+
         // Keystrokes reach the surface by context name, so the bindings have
         // to exist before the window that dispatches them.
         surface_view::bind_keys(cx);
@@ -73,14 +83,59 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
+                    // Still set: this is the name the window carries into the
+                    // Window menu, Mission Control and the app switcher, and
+                    // `appears_transparent` does not take that away. What it
+                    // takes away is the system *drawing* it, which is why the
+                    // cockpit draws its own strip under the traffic lights.
                     title: Some(title.clone().into()),
-                    ..Default::default()
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(9.0), px(9.0))),
                 }),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|cx| Cockpit::new(changeset, workspaces, current, status, cx)),
+            |window, cx| {
+                let cockpit = cx.new(|cx| {
+                    Cockpit::new(changeset, workspaces, current, status, title.into(), cx)
+                });
+                // Root has to be the window's first layer: it is what renders
+                // the dialog, sheet and notification layers, and the library
+                // panics rather than guessing if it is not there.
+                cx.new(|cx| gpui_component::Root::new(cockpit, window, cx))
+            },
         )
         .expect("open window");
         cx.activate(true);
     });
+}
+
+/// Bend gpui-component's dark theme onto the diff surface's palette.
+///
+/// Two dark greys next to each other read as two applications sharing a
+/// window. The surface's colours are the ones that cannot move — they are
+/// tuned against the added/removed tints — so the shell moves to them.
+fn paint_shell_to_match_the_surface(cx: &mut gpui::App) {
+    let ours = theme::Theme::default();
+    let theme = UiTheme::global_mut(cx);
+    theme.background = ours.background;
+    theme.foreground = ours.text;
+    theme.border = ours.border;
+    theme.muted_foreground = ours.text_dim;
+    theme.title_bar = ours.header_bg;
+    theme.title_bar_border = ours.border;
+    theme.sidebar = ours.surface;
+    theme.sidebar_border = ours.border;
+    theme.sidebar_foreground = ours.text;
+    theme.sidebar_accent = ours.header_bg;
+    theme.sidebar_accent_foreground = ours.text;
+    // The HUD's neutral chip is a `Tag::secondary`, and `pending` is the
+    // colour that chip has always been: grey, deliberately not red.
+    theme.secondary = ours.pending;
+    theme.secondary_foreground = ours.text;
+    // Same for the verdicts — green and red stay the exact greens and reds
+    // the diff gutter uses, so a passing receipt matches an added line.
+    theme.success = ours.added_emphasis;
+    theme.success_foreground = ours.text;
+    theme.danger = ours.removed_emphasis;
+    theme.danger_foreground = ours.text;
 }

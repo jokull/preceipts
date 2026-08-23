@@ -19,6 +19,7 @@ use gpui::{
     FocusHandle, FontWeight, Hsla, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     SharedString, StyledText, TextRun, UniformListScrollHandle, Window,
 };
+use gpui_component::scroll::Scrollbar;
 use preceipts_core::model::RowKind;
 use preceipts_core::segments::line_segments;
 use preceipts_core::{Changeset, Surface, SurfaceRow};
@@ -263,7 +264,12 @@ impl SurfaceView {
         cx.notify();
     }
 
-    fn clear_selection(&mut self, _: &ClearSelection, _window: &mut Window, cx: &mut Context<Self>) {
+    fn clear_selection(
+        &mut self,
+        _: &ClearSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.anchor = None;
         self.head = None;
         self.selecting = false;
@@ -564,7 +570,13 @@ impl Render for SurfaceView {
                     .child(self.render_header(file, true)),
             );
         }
-        root
+
+        // Last child, so the thumb sits above the sticky header and stays
+        // grabbable where the two meet. `uniform_list` keeps its own scroll
+        // offset private, but gpui-component implements `ScrollbarHandle` for
+        // exactly this handle — so the bar reads a real position and, because
+        // the trait can also set it, dragging the thumb scrolls the list.
+        root.child(Scrollbar::vertical(&self.scroll))
     }
 }
 
