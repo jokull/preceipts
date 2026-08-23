@@ -16,7 +16,9 @@ pub enum Error {
     #[error("HEAD does not resolve — unborn branch?")]
     UnbornHead,
 
-    #[error("{0}")]
+    // `transparent` rather than `"{0}"`: with #[from] the inner error is also
+    // the source, so a formatted chain would print the same sentence twice.
+    #[error(transparent)]
     Git(#[from] git2::Error),
 }
 

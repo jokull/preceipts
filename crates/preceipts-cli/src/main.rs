@@ -13,6 +13,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use preceipts_core::checks::{self, CheckState};
 use preceipts_core::workspace::{self, Workspace};
+use preceipts_core::LandOptions;
 use preceipts_core::{load, DiffScope};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -80,6 +81,32 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Squash-land a branch onto its base, receipts willing.
+    Land {
+        /// Branch to land. Defaults to the current one.
+        branch: Option<String>,
+        /// Base branch. Defaults to main.
+        #[arg(long)]
+        onto: Option<String>,
+        /// Subject line. Defaults to "<branch> (squash)".
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+        /// Land even though the base moved, recording a Receipts-Stale trailer.
+        #[arg(long)]
+        allow_stale: bool,
+        /// Make a moved base a hard failure rather than a prompt.
+        #[arg(long)]
+        require_fresh: bool,
+        #[arg(long)]
+        no_push: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Every receipt recorded in this repository.
+    Log {
+        #[arg(long)]
+        json: bool,
+    },
     /// Scaffold .preceipts/ in a repository that has none.
     Init,
     /// Remove a workspace's worktree and its registration.
@@ -115,6 +142,27 @@ fn run() -> Result<()> {
         Command::Diff { uncommitted, json } => diff(&path, uncommitted, json),
         Command::Run { checks, json } => run_checks(&path, &checks, json),
         Command::Status { r#ref, json } => show_status(&path, r#ref.as_deref(), json),
+        Command::Land {
+            branch,
+            onto,
+            message,
+            allow_stale,
+            require_fresh,
+            no_push,
+            json,
+        } => land(
+            &path,
+            branch,
+            LandOptions {
+                onto,
+                message,
+                allow_stale,
+                require_fresh,
+                no_push,
+            },
+            json,
+        ),
+        Command::Log { json } => log(&path, json),
         Command::Init => init(&path),
         Command::Remove { id } => remove(&path, id),
     }
@@ -359,6 +407,73 @@ fn show_status(path: &Path, reference: Option<&str>, json: bool) -> Result<()> {
     );
     if !status.green {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn land(path: &Path, branch: Option<String>, options: LandOptions, json: bool) -> Result<()> {
+    let branch = match branch {
+        Some(branch) => branch,
+        None => {
+            let repo = preceipts_core::GitReader::open(path).context("opening the repository")?;
+            repo.head_branch()
+                .context("resolving HEAD")?
+                .0
+                .context("HEAD is detached — name the branch to land")?
+        }
+    };
+    let result = preceipts_core::land(path, &branch, &options).context("landing")?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "branch": result.branch,
+                "base": result.base,
+                "tree": result.tree,
+                "commit": result.commit,
+                "pushed": result.pushed,
+                "stale": result.stale.as_ref().map(|s| json!({
+                    "merge_base": s.merge_base,
+                    "base_head": s.base_head,
+                })),
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("{}", result.commit);
+    eprintln!(
+        "landed {} onto {} — tree {}{}",
+        result.branch,
+        result.base,
+        &result.tree[..12],
+        if result.pushed { ", pushed" } else { "" }
+    );
+    if result.stale.is_some() {
+        eprintln!("note: the base had moved; a Receipts-Stale trailer records it");
+    }
+    Ok(())
+}
+
+fn log(path: &Path, json: bool) -> Result<()> {
+    let repo = preceipts_core::notes::open(path).context("opening the repository")?;
+    let mut receipts = preceipts_core::notes::read_all_receipts(&repo);
+    receipts.sort_by(|a, b| b.started.cmp(&a.started));
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&receipts)?);
+        return Ok(());
+    }
+    for receipt in &receipts {
+        println!(
+            "{} {} {:<16} {:<12} {}",
+            if receipt.ok { "✓" } else { "✗" },
+            receipt.started,
+            receipt.check,
+            preceipts_core::land::format_duration(receipt.duration_ms),
+            &receipt.tree[..12]
+        );
     }
     Ok(())
 }

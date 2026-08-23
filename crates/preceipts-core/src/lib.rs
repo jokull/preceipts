@@ -28,6 +28,7 @@ pub mod find;
 pub mod gitreader;
 pub mod highlight;
 pub mod intraline;
+pub mod land;
 pub mod linediff;
 pub mod loader;
 pub mod model;
@@ -43,13 +44,14 @@ pub mod workspace;
 #[cfg(test)]
 mod testing;
 
-pub use checks::{run, status, CheckState, Config, RunReport, Status};
+pub use checks::{run, status, CheckState, Config, DefinitionSource, RunReport, Status};
 pub use error::{Error, Result};
 pub use filetree::FileTreeNode;
 pub use find::FindIndex;
 pub use gitreader::{worktree_content, ChangedFile, GitReader};
 pub use highlight::{highlight, FileHighlight, HIGHLIGHT_NAMES};
 pub use intraline::word_diff;
+pub use land::{land, LandOptions, LandResult};
 pub use linediff::{diff_rows, LineDiff};
 pub use loader::load;
 pub use model::{Changeset, DiffHunk, DiffRow, DiffScope, FileDiff, FileStatus, LineRef, RowKind};

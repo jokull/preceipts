@@ -241,6 +241,19 @@ pub struct Status {
     pub green: bool,
 }
 
+/// Where "the check as currently defined" is read from, for telling a stale
+/// receipt from a current one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionSource {
+    /// The script on disk right now. `status` answers "do these receipts speak
+    /// to my checks as I have them?"
+    Worktree,
+    /// The script inside the inspected tree itself. `land` uses this, because a
+    /// branch that legitimately changes a check is still self-consistent
+    /// evidence for itself.
+    Tree,
+}
+
 /// Receipt table for a tree.
 ///
 /// `reference` of `None` means "the working tree as it stands" — the same tree
@@ -248,6 +261,14 @@ pub struct Status {
 /// worktree, status must agree with what was just minted, and HEAD would say
 /// "missing".
 pub fn status(root: &Path, reference: Option<&str>) -> Result<Status> {
+    status_with(root, reference, DefinitionSource::Worktree)
+}
+
+pub fn status_with(
+    root: &Path,
+    reference: Option<&str>,
+    source: DefinitionSource,
+) -> Result<Status> {
     let config = load_config(root)?;
     let tree = match reference {
         None => treehash::compute(root)?.tree,
@@ -268,7 +289,10 @@ pub fn status(root: &Path, reference: Option<&str>) -> Result<Status> {
 
     let mut rows = Vec::with_capacity(names.len());
     for name in names {
-        let current = worktree_check_blob(root, &name);
+        let current = match source {
+            DefinitionSource::Worktree => worktree_check_blob(root, &name),
+            DefinitionSource::Tree => tree_check_blob(root, &tree, &name),
+        };
         let receipt = receipts.get(&name).cloned();
         let state = match (&receipt, current) {
             (None, _) => CheckState::Missing,
@@ -303,6 +327,21 @@ pub fn status(root: &Path, reference: Option<&str>) -> Result<Status> {
         rows,
         green,
     })
+}
+
+/// Blob sha of a check script inside a tree, or `None` when the tree lacks it.
+fn tree_check_blob(root: &Path, tree: &str, check: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["ls-tree", tree, "--", &format!("{CHECKS_DIR}/{check}")])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // "<mode> blob <sha>\t<path>"
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace().nth(2).map(str::to_string)
 }
 
 /// Blob sha of a check script as it exists on disk, matching `git hash-object`.
