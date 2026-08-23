@@ -189,6 +189,33 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Either marker roots a project.
+///
+/// `turbo.json` was the only marker accepted before, which made the daemon
+/// unusable for the very case rung 1 of the schema exists for: a single Vite
+/// app with four lines of `preceipts.toml` and no monorepo tooling at all.
+pub const ROOT_MARKERS: [&str; 2] = ["preceipts.toml", "turbo.json"];
+
+/// The project a directory belongs to: the nearest ancestor holding a marker.
+///
+/// Here rather than in the daemon because it is half of the socket's address.
+/// A caller that resolves the root differently looks for the socket in the
+/// wrong place and concludes, wrongly and silently, that no daemon is running
+/// — which is exactly what the app did when it reached for the *git* root
+/// instead. Note what this implies and is meant to: a linked worktree carries
+/// its own copy of the marker, so it gets its own project root and its own
+/// daemon. One environment per workspace is the whole point.
+pub fn project_root(start: &Path) -> Option<PathBuf> {
+    let start = start.canonicalize().ok()?;
+    let mut current = start.as_path();
+    loop {
+        if ROOT_MARKERS.iter().any(|m| current.join(m).is_file()) {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
 #[cfg(test)]
 mod socket_path_tests {
     use super::*;
@@ -231,32 +258,5 @@ mod socket_path_tests {
     fn the_hash_is_stable_across_builds() {
         assert_eq!(fnv1a(b"/Users/x/proj"), fnv1a(b"/Users/x/proj"));
         assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
-    }
-}
-
-/// Either marker roots a project.
-///
-/// `turbo.json` was the only marker accepted before, which made the daemon
-/// unusable for the very case rung 1 of the schema exists for: a single Vite
-/// app with four lines of `preceipts.toml` and no monorepo tooling at all.
-pub const ROOT_MARKERS: [&str; 2] = ["preceipts.toml", "turbo.json"];
-
-/// The project a directory belongs to: the nearest ancestor holding a marker.
-///
-/// Here rather than in the daemon because it is half of the socket's address.
-/// A caller that resolves the root differently looks for the socket in the
-/// wrong place and concludes, wrongly and silently, that no daemon is running
-/// — which is exactly what the app did when it reached for the *git* root
-/// instead. Note what this implies and is meant to: a linked worktree carries
-/// its own copy of the marker, so it gets its own project root and its own
-/// daemon. One environment per workspace is the whole point.
-pub fn project_root(start: &Path) -> Option<PathBuf> {
-    let start = start.canonicalize().ok()?;
-    let mut current = start.as_path();
-    loop {
-        if ROOT_MARKERS.iter().any(|m| current.join(m).is_file()) {
-            return Some(current.to_path_buf());
-        }
-        current = current.parent()?;
     }
 }

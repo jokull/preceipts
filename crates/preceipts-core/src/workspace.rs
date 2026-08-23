@@ -285,6 +285,19 @@ pub fn remove(workspace: &Workspace) -> Result<()> {
 }
 
 /// The main repository behind any worktree of it.
+/// The git directory shared by every worktree of a repository.
+///
+/// Linked worktrees have their own git dir for HEAD, the index and the run
+/// lock, but *refs are common* — `refs/notes/receipts` is one file for the
+/// whole repository, wherever it was written from. A caller that wants to
+/// notice a receipt has to look here rather than in the worktree it is
+/// watching.
+pub fn common_git_dir(worktree: &Path) -> Result<PathBuf> {
+    let repo =
+        Repository::discover(worktree).map_err(|_| Error::NotARepo(worktree.to_path_buf()))?;
+    Ok(main_repository(&repo)?.path().to_path_buf())
+}
+
 fn main_repository(repo: &Repository) -> Result<Repository> {
     if !repo.is_worktree() {
         return Ok(Repository::open(repo.path())?);
@@ -391,6 +404,101 @@ pub fn slug(value: &str) -> String {
         // DNS labels cap at 63 characters.
         out.chars().take(63).collect()
     }
+}
+
+/// The ambient door: notice a worktree the moment git creates it.
+///
+/// git writes one directory under `<main>/.git/worktrees/` per linked
+/// worktree, so `git worktree add` — run by an agent, a script, or your own
+/// muscle memory — shows up here with nobody having told us anything. That is
+/// door three of decision 12, and it is why the app can be a registry that
+/// notices rather than a factory that must be used.
+///
+/// `watch::watch` cannot do this job. It excludes `.git` outright, and has to:
+/// every git command writes in there, so a `git status` in another terminal
+/// would read as an edit. This watch wants exactly the directory that one
+/// throws away.
+///
+/// Blocks. `on_change` fires coalesced, never per-inode-event, and returning
+/// `false` from it stops the watch. It carries no payload on purpose — the
+/// callback's job is to re-run [`discover`], which is the only thing that
+/// actually knows what a workspace is.
+pub fn watch_worktrees<F>(project_root: &Path, mut on_change: F) -> Result<()>
+where
+    F: FnMut() -> bool,
+{
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let repo = Repository::discover(project_root)
+        .map_err(|_| Error::NotARepo(project_root.to_path_buf()))?;
+    let git_dir = main_repository(&repo)?.path().to_path_buf();
+    let worktrees = git_dir.join("worktrees");
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        let Ok(event) = result else { return };
+        if matches!(event.kind, notify::EventKind::Access(_)) {
+            return;
+        }
+        let _ = tx.send(());
+    })
+    .map_err(|e| Error::Git(git2::Error::from_str(&format!("watching: {e}"))))?;
+
+    // Non-recursive on the git dir itself, so that `worktrees/` *appearing* —
+    // which is what happens on a repo that has never had a linked worktree —
+    // is itself an event. Without it the first worktree of a project is the
+    // one the app never notices.
+    watcher
+        .watch(&git_dir, RecursiveMode::NonRecursive)
+        .map_err(|e| {
+            Error::Git(git2::Error::from_str(&format!(
+                "watching {}: {e}",
+                git_dir.display()
+            )))
+        })?;
+    let mut watching_worktrees =
+        worktrees.is_dir() && watcher.watch(&worktrees, RecursiveMode::Recursive).is_ok();
+
+    loop {
+        // Blocking wait, then a short settle: `git worktree add` writes half a
+        // dozen files, and re-discovering once per file would be six repo
+        // opens for one workspace.
+        if rx.recv().is_err() {
+            return Ok(());
+        }
+        while rx.recv_timeout(Duration::from_millis(150)).is_ok() {}
+
+        if !watching_worktrees && worktrees.is_dir() {
+            watching_worktrees = watcher.watch(&worktrees, RecursiveMode::Recursive).is_ok();
+        }
+        if !on_change() {
+            return Ok(());
+        }
+    }
+}
+
+/// When this worktree's directory was created, for ordering a list newest
+/// first. `None` on a filesystem that does not record it — APFS does.
+///
+/// Read from the git dir rather than the worktree: `git worktree add` into an
+/// existing directory leaves that directory’s own birth time untouched, and
+/// what the list wants to say is "this workspace is new", not "this folder
+/// is new".
+pub fn created_at(workspace: &Workspace) -> Option<std::time::SystemTime> {
+    let git_dir = if workspace.is_primary {
+        workspace.project_root.join(".git")
+    } else {
+        workspace
+            .project_root
+            .join(".git/worktrees")
+            .join(&workspace.id)
+    };
+    std::fs::metadata(&git_dir)
+        .or_else(|_| std::fs::metadata(&workspace.path))
+        .ok()
+        .and_then(|m| m.created().ok())
 }
 
 #[cfg(test)]
@@ -625,99 +733,4 @@ mod tests {
             changeset.files.iter().map(|f| &f.path).collect::<Vec<_>>()
         );
     }
-}
-
-/// The ambient door: notice a worktree the moment git creates it.
-///
-/// git writes one directory under `<main>/.git/worktrees/` per linked
-/// worktree, so `git worktree add` — run by an agent, a script, or your own
-/// muscle memory — shows up here with nobody having told us anything. That is
-/// door three of decision 12, and it is why the app can be a registry that
-/// notices rather than a factory that must be used.
-///
-/// `watch::watch` cannot do this job. It excludes `.git` outright, and has to:
-/// every git command writes in there, so a `git status` in another terminal
-/// would read as an edit. This watch wants exactly the directory that one
-/// throws away.
-///
-/// Blocks. `on_change` fires coalesced, never per-inode-event, and returning
-/// `false` from it stops the watch. It carries no payload on purpose — the
-/// callback's job is to re-run [`discover`], which is the only thing that
-/// actually knows what a workspace is.
-pub fn watch_worktrees<F>(project_root: &Path, mut on_change: F) -> Result<()>
-where
-    F: FnMut() -> bool,
-{
-    use notify::{RecursiveMode, Watcher};
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    let repo = Repository::discover(project_root)
-        .map_err(|_| Error::NotARepo(project_root.to_path_buf()))?;
-    let git_dir = main_repository(&repo)?.path().to_path_buf();
-    let worktrees = git_dir.join("worktrees");
-
-    let (tx, rx) = mpsc::channel();
-    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        let Ok(event) = result else { return };
-        if matches!(event.kind, notify::EventKind::Access(_)) {
-            return;
-        }
-        let _ = tx.send(());
-    })
-    .map_err(|e| Error::Git(git2::Error::from_str(&format!("watching: {e}"))))?;
-
-    // Non-recursive on the git dir itself, so that `worktrees/` *appearing* —
-    // which is what happens on a repo that has never had a linked worktree —
-    // is itself an event. Without it the first worktree of a project is the
-    // one the app never notices.
-    watcher
-        .watch(&git_dir, RecursiveMode::NonRecursive)
-        .map_err(|e| {
-            Error::Git(git2::Error::from_str(&format!(
-                "watching {}: {e}",
-                git_dir.display()
-            )))
-        })?;
-    let mut watching_worktrees =
-        worktrees.is_dir() && watcher.watch(&worktrees, RecursiveMode::Recursive).is_ok();
-
-    loop {
-        // Blocking wait, then a short settle: `git worktree add` writes half a
-        // dozen files, and re-discovering once per file would be six repo
-        // opens for one workspace.
-        if rx.recv().is_err() {
-            return Ok(());
-        }
-        while rx.recv_timeout(Duration::from_millis(150)).is_ok() {}
-
-        if !watching_worktrees && worktrees.is_dir() {
-            watching_worktrees = watcher.watch(&worktrees, RecursiveMode::Recursive).is_ok();
-        }
-        if !on_change() {
-            return Ok(());
-        }
-    }
-}
-
-/// When this worktree's directory was created, for ordering a list newest
-/// first. `None` on a filesystem that does not record it — APFS does.
-///
-/// Read from the git dir rather than the worktree: `git worktree add` into an
-/// existing directory leaves that directory’s own birth time untouched, and
-/// what the list wants to say is "this workspace is new", not "this folder
-/// is new".
-pub fn created_at(workspace: &Workspace) -> Option<std::time::SystemTime> {
-    let git_dir = if workspace.is_primary {
-        workspace.project_root.join(".git")
-    } else {
-        workspace
-            .project_root
-            .join(".git/worktrees")
-            .join(&workspace.id)
-    };
-    std::fs::metadata(&git_dir)
-        .or_else(|_| std::fs::metadata(&workspace.path))
-        .ok()
-        .and_then(|m| m.created().ok())
 }

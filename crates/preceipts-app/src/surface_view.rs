@@ -113,6 +113,38 @@ impl SurfaceView {
         }
     }
 
+    /// Swap in a freshly loaded changeset, keeping the reader where they were.
+    ///
+    /// Row indices do not survive a reload — a file that grew by ten lines
+    /// moves every row beneath it — so the thing held onto is the *file* the
+    /// top of the viewport was inside, found again by path. That is also what
+    /// a person means by "where I was" while an agent edits underneath them.
+    ///
+    /// The selection is dropped rather than remapped. A pair of row indices
+    /// into a surface that no longer exists is not a selection that got
+    /// slightly wrong; it is a highlight over unrelated text.
+    pub fn replace(&mut self, changeset: Changeset, cx: &mut Context<Self>) {
+        let anchor_path = self
+            .file_of(self.first_visible)
+            .and_then(|index| self.changeset.files.get(index))
+            .map(|file| file.path.clone());
+
+        self.surface = Surface::build(&changeset);
+        self.changeset = changeset;
+        self.anchor = None;
+        self.head = None;
+        self.selecting = false;
+
+        if let Some(row) = anchor_path
+            .and_then(|path| self.changeset.files.iter().position(|f| f.path == path))
+            .and_then(|index| self.surface.file_anchors.get(index).copied())
+        {
+            self.first_visible = row;
+            self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+        }
+        cx.notify();
+    }
+
     pub fn row_count(&self) -> usize {
         self.surface.rows.len()
     }

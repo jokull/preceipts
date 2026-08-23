@@ -13,17 +13,17 @@
 //! appears in that list within a moment of git writing it, newest at the top —
 //! click `+`, ask the agent for a branch, and watch it arrive.
 
-use crate::workspace_pane::WorkspacePane;
+use crate::workspace_pane::{Activity, Verdict, WorkspacePane};
 use futures::StreamExt as _;
 use gpui::prelude::*;
-use gpui::{div, px, App, Context, Entity, SharedString, Window};
+use gpui::{div, px, Context, Entity, SharedString, Window};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::popover::Popover;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, TitleBar};
 use preceipts_core::workspace::{self, Workspace};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// An open tab. The pane is a `Result` because one unreadable worktree must
@@ -33,6 +33,10 @@ use std::time::SystemTime;
 struct TabState {
     workspace: Workspace,
     pane: Result<Entity<WorkspacePane>, String>,
+    /// The worktree was removed while this tab was open. The tab stays —
+    /// closing someone's view out from under them is worse than a dead one —
+    /// but it stops claiming to be a live workspace.
+    gone: bool,
 }
 
 pub struct Cockpit {
@@ -74,7 +78,7 @@ impl Cockpit {
     /// wants at the top of the list is the worktree that just appeared, and
     /// the primary working directory — always the oldest — settles to the
     /// bottom on its own without a special case.
-    fn ordered(project_root: &PathBuf) -> Vec<Workspace> {
+    fn ordered(project_root: &Path) -> Vec<Workspace> {
         let mut all = workspace::discover(project_root).unwrap_or_default();
         all.sort_by_key(|w| {
             std::cmp::Reverse(workspace::created_at(w).unwrap_or(SystemTime::UNIX_EPOCH))
@@ -113,11 +117,18 @@ impl Cockpit {
                 self.fresh.insert(workspace.id.clone());
             }
         }
+        // The same watch that notices a worktree appearing notices one going
+        // away, and an open tab is the only place that fact would otherwise
+        // not reach — rediscovery fixes the `+` list on its own.
+        let live: HashSet<&str> = self.known.iter().map(|w| w.id.as_str()).collect();
+        for tab in &mut self.tabs {
+            tab.gone = !live.contains(tab.workspace.id.as_str());
+        }
         cx.notify();
     }
 
     /// Open a workspace as a tab, or focus it if it is already open.
-    fn open_workspace(&mut self, workspace: Workspace, cx: &mut App) {
+    fn open_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
         if let Some(index) = self
             .tabs
             .iter()
@@ -128,7 +139,18 @@ impl Cockpit {
         }
         self.fresh.remove(&workspace.id);
         let pane = WorkspacePane::open(workspace.clone(), cx);
-        self.tabs.push(TabState { workspace, pane });
+        // The tab's dot is the pane's verdict, and a pane updates itself when
+        // the tree goes quiet. Without this the badge would only refresh when
+        // something else happened to repaint the window — which, for a person
+        // watching an agent work, is never.
+        if let Ok(pane) = &pane {
+            cx.observe(pane, |_, _, cx| cx.notify()).detach();
+        }
+        self.tabs.push(TabState {
+            workspace,
+            pane,
+            gone: false,
+        });
         self.active = self.tabs.len() - 1;
     }
 
@@ -167,25 +189,37 @@ impl Cockpit {
             .iter()
             .enumerate()
             .map(|(index, tab)| {
-                let broken = tab.pane.is_err();
+                // The badge — step 8's other half. It says what the receipts
+                // say, which is the only thing worth a tab's one pixel of
+                // colour: primary-versus-linked, which it used to show, is
+                // already in the label and never changes.
+                let dot = match (&tab.pane, tab.gone) {
+                    (Err(_), _) => cx.theme().danger,
+                    (_, true) => cx.theme().border,
+                    (Ok(pane), false) => {
+                        let pane = pane.read(cx);
+                        // Amber outranks the verdict: while the tree is
+                        // changing, the last verdict is about a tree that no
+                        // longer exists, and showing it green would be a lie
+                        // with a specific cost.
+                        if pane.activity() == Activity::Working {
+                            cx.theme().warning
+                        } else {
+                            match pane.verdict() {
+                                Verdict::Green => cx.theme().success,
+                                Verdict::Failed => cx.theme().danger,
+                                Verdict::NotRun => cx.theme().muted_foreground,
+                                Verdict::Absent => cx.theme().border,
+                            }
+                        }
+                    }
+                };
                 Tab::new()
                     .label(Self::label(&tab.workspace))
                     // A dot rather than an icon: `IconName` needs an
                     // `AssetSource` this app does not install, and what the
-                    // dot has to say is one of three things anyway.
-                    .prefix(
-                        div()
-                            .size(px(6.0))
-                            .rounded_full()
-                            .bg(if broken {
-                                cx.theme().danger
-                            } else if tab.workspace.is_primary {
-                                cx.theme().muted_foreground
-                            } else {
-                                cx.theme().success
-                            })
-                            .flex_none(),
-                    )
+                    // dot has to say is one colour anyway.
+                    .prefix(div().size(px(6.0)).rounded_full().bg(dot).flex_none())
                     .when(closable, |tab| {
                         tab.suffix(
                             Button::new(("close-tab", index))
@@ -245,8 +279,8 @@ impl Cockpit {
                 let this = this.clone();
                 let rows: Vec<_> = candidates
                     .iter()
-                    .cloned()
                     .map(|(workspace, fresh)| {
+                        let (workspace, fresh) = (workspace.clone(), *fresh);
                         let this = this.clone();
                         let label = Self::label(&workspace);
                         let genesis = workspace.genesis.clone();
@@ -332,6 +366,7 @@ impl Render for Cockpit {
             Some(TabState {
                 pane: Err(message),
                 workspace,
+                ..
             }) => v_flex()
                 .size_full()
                 .items_center()

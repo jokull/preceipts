@@ -620,3 +620,31 @@ docs/direction-2026-08.md.
     fabric's whole claim in one line of JavaScript — the same page works
     unchanged in a linked worktree where every name has a workspace
     segment in the middle.
+
+15. **The loop closes on observation, not integration** (2026-08-23). The
+    north-star feature — the agent stops typing, the checks fire, the badge
+    turns — now exists on the app's side. Two facts shaped it.
+
+    **The app does not run checks.** `preceipts watch` does, from a
+    terminal, and the app notices. That keeps the read surface a read
+    surface: a window that spawns `cargo test` because you scrolled it is a
+    host, and the whole product is the promise that it is not one. It also
+    means the loop works with the window closed, which is the honest test
+    of whether the CLI is the real interface.
+
+    **Noticing needs two watches, because of an exclusion made earlier for
+    a good reason.** The tree watch ignores `.git`, since every git command
+    writes there and a `git status` in another terminal would otherwise
+    read as an edit. Receipts are git notes. So the moment worth showing —
+    a check going green — writes into exactly the directory the tree watch
+    throws away, and one watch would have left the badge saying "not run"
+    after the checks passed. The second watch takes the *common* git dir,
+    since refs are shared across worktrees even where HEAD and the index
+    are not, and covers both forms a ref takes: loose under `refs/notes/`,
+    packed in `packed-refs`.
+
+    The badge shows amber while the tree is moving, and amber outranks the
+    verdict. Mid-edit the last verdict is about a tree that no longer
+    exists; painting it green is not a stale reading, it is a false claim
+    at the exact moment someone is deciding whether to land.
+

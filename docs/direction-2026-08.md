@@ -970,6 +970,38 @@ The order that keeps a working app at every step:
    last because it needs everything above. Build the observation path
    first and ship it complete; lifecycle adapters come after, as
    precision on top of something that already works alone.
+   *Done — the observation path, both halves.* `preceipts watch` runs the
+   checks; the app never does. What the app does is notice: each pane
+   watches its worktree and reloads the diff and the receipts when the
+   typing stops, and the tab's dot carries the verdict — green, red, grey
+   for not-run, amber while the tree is moving. Amber outranks the verdict
+   deliberately: mid-edit the last verdict describes a tree that no longer
+   exists, and green would be a lie with a specific cost.
+
+   **Two watches, not one, and the reason is a line in `watch.rs`.** The
+   tree watch excludes `.git` outright — every git command writes there, so
+   a `git status` in another terminal would read as an edit. Receipts are
+   git notes. So a check that passes in a terminal writes into precisely
+   the directory the tree watch throws away, and with one watch the badge
+   would sit at "not run" *after* the checks went green: the north-star
+   moment, displayed wrong. `notes::watch_receipts` watches the common git
+   dir instead — common, because refs are shared across worktrees even
+   though HEAD and the index are not — non-recursively for `packed-refs`
+   and recursively over `refs/notes/` once it exists, since a repository
+   that has never recorded a receipt does not have that directory yet.
+
+   Reloads run on the background executor. A changeset load is tens of
+   milliseconds, which on the render thread is a window that stutters every
+   time an agent saves a file — the same mistake as enumerating fonts in a
+   render, already made once here. A failed load keeps the last good diff
+   rather than blanking: mid-edit a worktree passes through states git will
+   not read, and flickering through them is worse than being a moment
+   behind. And the reader keeps their place across a reload by *file*, not
+   by row — a file that grew ten lines moves every row beneath it.
+
+   Verified by doing it: editing a file in a terminal moved the diff and
+   the counts without the window being touched, and `preceipts run` in that
+   same terminal turned the tab green with no interaction at all.
 
 ### Amendments — 2026-08-23
 

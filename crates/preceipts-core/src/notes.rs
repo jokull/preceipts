@@ -4,7 +4,7 @@
 //! part of the wire format — notes written by the TypeScript engine live under
 //! these exact refs, and so must ours.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::receipt::{self, Receipt};
 use git2::{Oid, Repository, Signature};
 use std::path::Path;
@@ -132,6 +132,73 @@ fn hostname() -> String {
 /// Open the repository at `path` for receipt work.
 pub fn open(path: &Path) -> Result<Repository> {
     Repository::discover(path).map_err(|_| crate::error::Error::NotARepo(path.to_path_buf()))
+}
+
+/// Watch for receipts arriving, calling `on_change` when the notes ref moves.
+///
+/// This is the second half of the north-star loop, and it exists because of a
+/// deliberate exclusion elsewhere: [`crate::watch`] ignores `.git` outright,
+/// since every git command touches it and a `git status` in another terminal
+/// would otherwise read as an edit. Receipts are git notes. So a check that
+/// passes in a terminal writes into exactly the directory the tree watch
+/// throws away, and without this the verdict would sit at "not run" *after*
+/// the checks went green — the north-star moment, displayed wrong.
+///
+/// Blocks, like the other watches. `on_change` returning `false` ends it.
+pub fn watch_receipts<F>(worktree: &Path, mut on_change: F) -> Result<()>
+where
+    F: FnMut() -> bool,
+{
+    use notify::{RecursiveMode, Watcher};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // Refs are common to every worktree, so this is the *main* git dir even
+    // when the pane is looking at a linked one.
+    let git_dir = crate::workspace::common_git_dir(worktree)?;
+    let notes_dir = git_dir.join("refs/notes");
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+        let Ok(event) = result else { return };
+        if matches!(event.kind, notify::EventKind::Access(_)) {
+            return;
+        }
+        let _ = tx.send(());
+    })
+    .map_err(|e| Error::Git(git2::Error::from_str(&format!("watching: {e}"))))?;
+
+    // Non-recursive on the git dir catches `packed-refs`, which is where the
+    // ref lives after a `git gc` — and where it lives *only* until the next
+    // write makes it loose again. Both forms are ordinary, so both are
+    // watched, and `refs/notes/` is attached separately because on a
+    // repository that has never recorded a receipt it does not exist yet.
+    watcher
+        .watch(&git_dir, RecursiveMode::NonRecursive)
+        .map_err(|e| {
+            Error::Git(git2::Error::from_str(&format!(
+                "watching {}: {e}",
+                git_dir.display()
+            )))
+        })?;
+    let mut watching_notes =
+        notes_dir.is_dir() && watcher.watch(&notes_dir, RecursiveMode::Recursive).is_ok();
+
+    loop {
+        if rx.recv().is_err() {
+            return Ok(());
+        }
+        // `git notes append` writes a lock file, the object, then the ref.
+        // Settling means one reload per receipt rather than three.
+        while rx.recv_timeout(Duration::from_millis(120)).is_ok() {}
+
+        if !watching_notes && notes_dir.is_dir() {
+            watching_notes = watcher.watch(&notes_dir, RecursiveMode::Recursive).is_ok();
+        }
+        if !on_change() {
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(test)]

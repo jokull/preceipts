@@ -11,6 +11,7 @@
 
 use crate::lab_panel::LabPanel;
 use crate::surface_view::SurfaceView;
+use futures::StreamExt as _;
 use gpui::prelude::*;
 use gpui::{div, px, App, Context, Entity, SharedString, Window};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -23,13 +24,14 @@ use preceipts_core::checks::{CheckState, Status};
 use preceipts_core::workspace::Workspace;
 use preceipts_core::{load, Changeset, DiffScope};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// How the verdict chip is painted. Not green covers two different facts, and
 /// collapsing them is the one thing this HUD must not do: a check that failed
 /// is a verdict, a check that never ran is an absence, and painting both red
 /// tells a person their tree is broken when nobody has looked at it yet.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Verdict {
+pub enum Verdict {
     Green,
     Failed,
     /// Outstanding, but only because nobody has run it. Never red.
@@ -38,7 +40,32 @@ enum Verdict {
     Absent,
 }
 
+/// Whether anything is currently writing to this worktree.
+///
+/// Observation, not integration: no harness reports this. A tree that stopped
+/// changing is a tree that stopped being worked on, and that is equally true
+/// of an agent, an editor and a person with a keyboard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Idle,
+    Working,
+}
+
+/// What the two watches have to say. They share one channel because the pane
+/// reacts to both in the same place, and because a receipt arriving in the
+/// same instant as an edit should not race two independent reloads.
+enum Signal {
+    Busy,
+    /// The tree held still: reload the diff *and* re-read the receipts.
+    Quiet,
+    /// The notes ref moved: a check recorded a verdict.
+    Receipts,
+}
+
 pub struct WorkspacePane {
+    /// Kept so the pane can reload itself; the load path takes a path, and
+    /// the workspace is what the two watches are pointed at.
+    path: PathBuf,
     lab: Entity<LabPanel>,
     /// `None` means "follow the environment": the panel appears when the
     /// workspace has services running and stays away when it does not, because
@@ -49,6 +76,12 @@ pub struct WorkspacePane {
     changeset_summary: (usize, usize, usize, String),
     status: Option<Status>,
     surface: Entity<SurfaceView>,
+    activity: Activity,
+    /// A reload is in flight. Reloads are not queued: a second request while
+    /// one is running sets `restack` and is served once, because what the
+    /// reader wants is the newest tree, not every tree it passed through.
+    reloading: bool,
+    restack: bool,
 }
 
 impl WorkspacePane {
@@ -77,6 +110,7 @@ impl WorkspacePane {
             changeset.total_removed(),
             changeset.base_name.clone(),
         );
+        let path = workspace.path.clone();
         let lab = cx.new(|cx| LabPanel::new(workspace, cx));
         cx.observe(&lab, |_, _, cx| cx.notify()).detach();
         let code_font = crate::theme::code_font(cx);
@@ -85,13 +119,141 @@ impl WorkspacePane {
         // has to repaint when the surface scrolls. Child entities do not
         // notify their parent on their own.
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
-        Self {
+        let this = Self {
+            path,
             lab,
             lab_open: None,
             changeset_summary: summary,
             status,
             surface,
+            activity: Activity::Idle,
+            reloading: false,
+            restack: false,
+        };
+        this.live(cx);
+        this
+    }
+
+    /// The north-star loop, on the observation side: watch the worktree, and
+    /// watch the receipts.
+    ///
+    /// Two watches rather than one, because they cannot be the same watch.
+    /// The tree watch deliberately excludes `.git` — otherwise a `git status`
+    /// in another terminal reads as an edit — and receipts are git notes, so
+    /// a verdict lands in precisely the directory the first watch ignores.
+    ///
+    /// Both block, so both get a thread, and both reach the pane through one
+    /// channel. Shutdown rides on that channel rather than a flag: the pane
+    /// drops, the task ends, the receiver drops, and the next send fails, so
+    /// the watch returns. "The next send" is the honest part — a thread over a
+    /// closed tab lingers until its worktree changes once more. Bounded by
+    /// tabs opened, and cheap enough to be the right trade against a second
+    /// shutdown path that has to be got right in two places.
+    fn live(&self, cx: &mut Context<Self>) {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<Signal>();
+
+        let path = self.path.clone();
+        let sender = tx.clone();
+        std::thread::spawn(move || {
+            let _ = preceipts_core::watch::watch(
+                &path,
+                preceipts_core::watch::DEFAULT_QUIET,
+                |event| {
+                    let signal = match event {
+                        preceipts_core::watch::Event::Busy => Signal::Busy,
+                        preceipts_core::watch::Event::Quiet => Signal::Quiet,
+                    };
+                    sender.unbounded_send(signal).is_ok()
+                },
+            );
+        });
+
+        let path = self.path.clone();
+        std::thread::spawn(move || {
+            let _ = preceipts_core::notes::watch_receipts(&path, || {
+                tx.unbounded_send(Signal::Receipts).is_ok()
+            });
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Some(signal) = rx.next().await {
+                let updated = this.update(cx, |this, cx| match signal {
+                    Signal::Busy => {
+                        this.activity = Activity::Working;
+                        cx.notify();
+                    }
+                    Signal::Quiet => {
+                        this.activity = Activity::Idle;
+                        this.reload(cx);
+                    }
+                    Signal::Receipts => this.reload(cx),
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Re-read the diff and the receipts, off the main thread.
+    ///
+    /// Off it because loading a changeset is measured in tens of
+    /// milliseconds — `--stats` exists to say how many — and tens of
+    /// milliseconds on the render thread is a window that stutters every time
+    /// an agent saves a file. The same class of mistake as enumerating fonts
+    /// in a render, which this app has already made once.
+    fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.reloading {
+            self.restack = true;
+            return;
         }
+        self.reloading = true;
+        let path = self.path.clone();
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move {
+                    let changeset = load(&path, DiffScope::Branch, true).ok();
+                    let status = preceipts_core::checks::status(&path, None).ok();
+                    (changeset, status)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let (changeset, status) = loaded;
+                // A failed load leaves the last good diff on screen. Mid-edit
+                // a worktree passes through states git will not read, and
+                // blanking the surface for each of them would make the window
+                // flicker at exactly the moment it is being watched.
+                if let Some(changeset) = changeset {
+                    this.changeset_summary = (
+                        changeset.files.len(),
+                        changeset.total_added(),
+                        changeset.total_removed(),
+                        changeset.base_name.clone(),
+                    );
+                    this.surface
+                        .update(cx, |surface, cx| surface.replace(changeset, cx));
+                }
+                this.status = status;
+                this.reloading = false;
+                cx.notify();
+                if std::mem::take(&mut this.restack) {
+                    this.reload(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn activity(&self) -> Activity {
+        self.activity
+    }
+
+    /// What the receipts say, for anyone drawing a badge rather than a chip.
+    pub fn verdict(&self) -> Verdict {
+        self.judge().1
     }
 
     /// What the tab and the window title say about this workspace.
@@ -232,11 +394,10 @@ impl WorkspacePane {
             .unwrap_or_else(|| self.lab.read(cx).has_services())
     }
 
-    /// The footer: diff stats, and the receipt verdict.
-    fn render_hud(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (files, added, removed, base) = &self.changeset_summary;
-
-        let (verdict, kind) = match &self.status {
+    /// The receipts, read once and used twice: as the HUD's sentence and as
+    /// the tab's dot.
+    fn judge(&self) -> (String, Verdict) {
+        match &self.status {
             None => ("no checks".to_string(), Verdict::Absent),
             Some(status) if status.green => ("green".to_string(), Verdict::Green),
             Some(status) => {
@@ -257,7 +418,13 @@ impl WorkspacePane {
                     (format!("failed: {}", failed.join(", ")), Verdict::Failed)
                 }
             }
-        };
+        }
+    }
+
+    /// The footer: diff stats, and the receipt verdict.
+    fn render_hud(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (files, added, removed, base) = &self.changeset_summary;
+        let (verdict, kind) = self.judge();
 
         let chip = match kind {
             Verdict::Green => Tag::success(),
@@ -295,6 +462,17 @@ impl WorkspacePane {
             .child(Label::new(format!("+{added} −{removed}")).text_size(px(11.0)))
             .child(rule())
             .child(chip.small().child(SharedString::from(verdict)))
+            // While the tree is moving the verdict beside this is about a
+            // tree that no longer exists. Saying so is cheaper than
+            // suppressing it, and it is the line that tells a person the
+            // window is live rather than a snapshot they opened an hour ago.
+            .when(self.activity == Activity::Working, |hud| {
+                hud.child(
+                    Label::new("editing…")
+                        .text_size(px(11.0))
+                        .text_color(cx.theme().warning),
+                )
+            })
             // Pushes the lab toggle to the right edge, where a panel switch
             // belongs and where it is not in the way of the verdict.
             .child(div().flex_1())
