@@ -469,10 +469,28 @@ impl LabPanel {
                             )
                             .child(
                                 div()
-                                    .w(px(38.0))
+                                    .w(px(34.0))
                                     .flex_none()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(SharedString::from(exchange.method.clone())),
+                            )
+                            .child(
+                                // The service, by its first label only. The
+                                // rest of the name is the same on every row of
+                                // one workspace and would push the path out.
+                                div()
+                                    .w(px(46.0))
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(SharedString::from(
+                                        exchange
+                                            .host
+                                            .split('.')
+                                            .next()
+                                            .unwrap_or(&exchange.host)
+                                            .to_string(),
+                                    )),
                             )
                             .child(
                                 div()
