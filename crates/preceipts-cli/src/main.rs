@@ -107,6 +107,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate preceipts.toml and explain what is wrong with it.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     /// Scaffold .preceipts/ in a repository that has none.
     Init,
     /// Remove a workspace's worktree and its registration.
@@ -163,6 +168,7 @@ fn run() -> Result<()> {
             json,
         ),
         Command::Log { json } => log(&path, json),
+        Command::Doctor { json } => doctor(&path, json),
         Command::Init => init(&path),
         Command::Remove { id } => remove(&path, id),
     }
@@ -476,6 +482,93 @@ fn log(path: &Path, json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn doctor(path: &Path, json: bool) -> Result<()> {
+    use preceipts_core::manifest;
+
+    let (manifest, source) = match manifest::load(path).context("loading preceipts.toml")? {
+        Some(manifest) => (Some(manifest), "preceipts.toml"),
+        // No file is a valid state — rung 0 of the schema. Say what would be
+        // assumed rather than complaining that a file is missing.
+        None => (manifest::detect(path), "detected"),
+    };
+
+    let Some(manifest) = manifest else {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "source": "none",
+                    "problems": ["nothing to run: no preceipts.toml, and no dev script or Cargo.toml to infer one from"],
+                }))?
+            );
+        } else {
+            println!(
+                "no preceipts.toml, and nothing obvious to infer — write one, or add a dev script"
+            );
+        }
+        std::process::exit(1);
+    };
+
+    let problems = manifest.problems();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "source": source,
+                "services": manifest.services.iter().map(|s| json!({
+                    "name": s.name,
+                    "runtime": s.runtime.as_str(),
+                    "fidelity": s.fidelity.as_str(),
+                    "host": s.host,
+                    "needs": s.needs,
+                })).collect::<Vec<_>>(),
+                "actions": manifest.actions.iter().map(|a| &a.name).collect::<Vec<_>>(),
+                "drains": manifest.drains.iter().map(|d| &d.name).collect::<Vec<_>>(),
+                "problems": problems,
+            }))?
+        );
+        if !problems.is_empty() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    println!("{source}");
+    if let Ok(order) = manifest.boot_order() {
+        for service in order {
+            let host = service
+                .host
+                .as_deref()
+                .map(|h| format!("  {h}.<workspace>"))
+                .unwrap_or_default();
+            println!(
+                "  {:<18} {:<10} {:<16}{host}",
+                service.name,
+                service.runtime.as_str(),
+                service.fidelity.as_str()
+            );
+        }
+    }
+    if !manifest.actions.is_empty() {
+        let names: Vec<&str> = manifest.actions.iter().map(|a| a.name.as_str()).collect();
+        println!("  actions: {}", names.join(", "));
+    }
+    if !manifest.drains.is_empty() {
+        let names: Vec<&str> = manifest.drains.iter().map(|d| d.name.as_str()).collect();
+        println!("  drains:  {}", names.join(", "));
+    }
+
+    if problems.is_empty() {
+        println!("no problems");
+        return Ok(());
+    }
+    println!();
+    for problem in &problems {
+        println!("✗ {problem}");
+    }
+    std::process::exit(1);
 }
 
 fn init(path: &Path) -> Result<()> {

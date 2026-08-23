@@ -1,0 +1,144 @@
+# The benchmark from docs/direction-2026-08.md: trip's sandbox, expressed as
+# one manifest plus the project's own scripts. Everything here is drawn from
+# trip's real procpane.toml and packages/sandbox/README.md.
+#
+# What is NOT here is the point: no Docker compose file, no seed logic, no
+# provider-mock code, no email/analytics/error plumbing. Those are fixtures
+# and scripts the project already owns.
+schema = 1
+
+[env.shared]
+keys = ["ENV", "SECRET", "SENTRY_*", "DATOCMS_*"]
+
+[env.providers]
+keys = ["BOKUN_*", "LINKTIVITY_*", "EXPEDIA_*"]
+
+# Live keys must never reach a sandbox. A failed assertion stops the boot.
+[env.STRIPE_SECRET_KEY]
+require_prefix = "sk_test_"
+
+[env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY]
+require_prefix = "pk_test_"
+
+[env.KLING_SECRET_KEY]
+require_prefix = "sk_test_"
+
+[setup]
+run = ["pnpm install", "pnpm db:migrate"]
+
+[services.db]
+image = "postgres:17"
+health.tcp = 5432
+
+[services.stripe-webhook]
+run = "stripe listen --forward-to {{services.api.url}}/stripe/webhook"
+capture.STRIPE_WEBHOOK_SECRET = "whsec_\\w+"
+env = ["STRIPE_SECRET_KEY"]
+fidelity = "local-simulated"
+
+[services.api]
+run = "pnpm --filter @trip/api dev"
+host = "api"
+health.log = "VITE .* ready in"
+needs = ["db", "stripe-webhook"]
+env = ["@shared", "@providers", "STRIPE_SECRET_KEY", "KLING_SECRET_KEY"]
+
+[services.next]
+run = "pnpm --filter @trip/next dev"
+host = "web"
+health.log = "Ready in|started server on"
+needs = ["api"]
+env = ["@shared", "@providers", "NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY"]
+
+[services.admin]
+run = "pnpm --filter @trip/admin dev"
+host = "admin"
+health.log = "VITE .* ready in|Local:.*localhost"
+needs = ["db"]
+env = ["@shared", "@providers"]
+
+[services.urgentry]
+run = "pnpm --filter @trip/urgentry start"
+host = "urgentry"
+health.http = "/health"
+fidelity = "local-real"
+
+# Browser work waits on this, not on "every process started".
+[ready]
+requires = ["api", "next", "admin", "db"]
+
+[mocks.bokun]
+match = "https://api.bokun.io/**"
+fixtures = "packages/sandbox/src/mocks/bokun"
+record = true
+
+[mocks.linktivity]
+match = "https://*.linktivity.*/**"
+fixtures = "packages/sandbox/src/mocks/linktivity"
+record = true
+
+[mocks.expedia]
+match = "https://*.expediapartnersolutions.com/**"
+fixtures = "packages/sandbox/src/mocks/expedia"
+record = true
+
+[drains.email]
+kind = "outbox"
+from = "artifacts/emails"
+
+[drains.analytics]
+kind = "jsonl"
+from = "posthog-events.jsonl"
+
+[drains.errors]
+kind = "sentry"
+
+[drains.external-requests]
+kind = "jsonl"
+from = "external-requests.jsonl"
+
+[bundles.admin-user]
+run = "pnpm sandbox seed admin-user"
+
+[bundles.customer-user]
+run = "pnpm sandbox seed customer-user"
+
+[bundles.trip]
+run = "pnpm sandbox seed trip"
+
+[bundles.booking]
+run = "pnpm sandbox seed booking"
+
+[bundles.checkout]
+run = "pnpm sandbox seed checkout"
+
+[bundles.tour-commerce-basic]
+run = "pnpm sandbox seed tour-commerce-basic"
+
+[radii]
+s = ["admin-user", "customer-user"]
+m = ["@s", "trip", "booking"]
+l = ["@m", "checkout", "tour-commerce-basic"]
+
+# Everything domain-specific is a declared verb. None of it is modelled here.
+[actions.auth]
+run = "pnpm sandbox auth {{actor}}"
+args = ["actor"]
+about = "Mint cookie-backed browser state for a seeded actor"
+
+[actions.purchase-smoke]
+run = "pnpm sandbox purchase-smoke"
+about = "Whole-funnel checkout proof with DB and analytics invariants"
+
+[actions.provider-contracts]
+run = "pnpm sandbox provider-contracts"
+about = "Exercise the provider mock chain with production-shaped bodies"
+
+[actions.emails]
+run = "pnpm sandbox emails"
+about = "Local email outbox index"
+
+[actions.posthog]
+run = "pnpm sandbox posthog --require {{events}}"
+args = ["events"]
+about = "Assert required analytics events were emitted"
