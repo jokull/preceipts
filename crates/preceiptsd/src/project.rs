@@ -88,10 +88,15 @@ impl Project {
     pub fn discover(start: &Path) -> Result<Self> {
         let root = find_root(start)?;
         let turbo_path = root.join("turbo.json");
-        if !turbo_path.exists() {
-            return Err(anyhow!("no turbo.json found at {}", turbo_path.display()));
-        }
-        let turbo = TurboJson::load(&turbo_path)?;
+        // A project may have no turbo at all — `preceipts.toml` alone is a
+        // complete description of one. An empty TurboJson contributes no
+        // tasks, which is exactly right: everything then comes from the
+        // manifest.
+        let turbo = if turbo_path.is_file() {
+            TurboJson::load(&turbo_path)?
+        } else {
+            TurboJson::default()
+        };
         let sidecar = Sidecar::load(&root)?;
 
         let patterns = discover_workspace_patterns(&root)?;
@@ -104,6 +109,14 @@ impl Project {
         if let Ok(mut root_pkg) = read_package(&root) {
             root_pkg.is_root = true;
             packages.push(root_pkg);
+        }
+
+        // Services declared with `run` are not turbo tasks, but the daemon
+        // addresses everything as `pkg#task`. They become scripts on a
+        // synthetic package so the graph builder finds them the ordinary way,
+        // rather than growing a second code path for a second kind of node.
+        if let Some(synthetic) = synthetic_package(&root)? {
+            packages.push(synthetic);
         }
 
         let mut builder = GlobSetBuilder::new();
@@ -160,16 +173,28 @@ impl Project {
     }
 }
 
+/// Either marker roots a project.
+///
+/// `turbo.json` was the only one procpane accepted, which made the daemon
+/// unusable for the very case rung 1 of the schema exists for: a single Vite
+/// app with four lines of `preceipts.toml` and no monorepo tooling at all.
+pub const ROOT_MARKERS: [&str; 2] = ["preceipts.toml", "turbo.json"];
+
 fn find_root(start: &Path) -> Result<PathBuf> {
     let start = start.canonicalize().with_context(|| "canonicalize start")?;
     let mut cur = start.as_path();
     loop {
-        if cur.join("turbo.json").is_file() {
+        if ROOT_MARKERS.iter().any(|m| cur.join(m).is_file()) {
             return Ok(cur.to_path_buf());
         }
         match cur.parent() {
             Some(p) => cur = p,
-            None => return Err(anyhow!("no turbo.json found from {}", start.display())),
+            None => {
+                return Err(anyhow!(
+                    "no preceipts.toml or turbo.json found from {}",
+                    start.display()
+                ))
+            }
         }
     }
 }
@@ -264,4 +289,166 @@ fn read_package(dir: &Path) -> Result<Package> {
         turbo,
         is_root: false, // overwritten by caller for the workspace-root package
     })
+}
+
+/// A package whose "scripts" are the manifest's non-task services.
+///
+/// Returns `None` when the manifest declares nothing that needs one — every
+/// service bound to a `task`, or no manifest at all — so a plain turborepo
+/// sees no change.
+///
+/// A service declared with `image` gets no script: containers need a runtime
+/// this project has not built yet, and inventing a shell command that pretends
+/// to start one would turn a missing feature into a confusing failure. `doctor`
+/// is where that is said; here it is simply absent.
+fn synthetic_package(root: &Path) -> Result<Option<Package>> {
+    let Some(manifest) =
+        preceipts_core::manifest::load(root).map_err(|e| anyhow!("reading preceipts.toml: {e}"))?
+    else {
+        return Ok(None);
+    };
+
+    let scripts: BTreeMap<String, String> = manifest
+        .services
+        .iter()
+        .filter(|service| service.task.is_none())
+        .filter_map(|service| {
+            service
+                .run
+                .as_ref()
+                .map(|run| (service.name.clone(), run.clone()))
+        })
+        .collect();
+    if scripts.is_empty() {
+        return Ok(None);
+    }
+
+    // The synthetic package brings its own task definitions rather than
+    // inheriting `TaskDef::default()`. A service *is* persistent — that is
+    // what the word means here — and a task that defaults to non-persistent
+    // is rejected by the daemon with "for non-persistent tasks use turbo run
+    // directly", which is useless advice for a service turbo has never heard
+    // of. Caching is off for the same reason: there is no output to cache.
+    let tasks = scripts
+        .keys()
+        .map(|name| {
+            (
+                name.clone(),
+                crate::config::TaskDef {
+                    persistent: true,
+                    cache: Some(false),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+
+    Ok(Some(Package {
+        name: crate::bridge::SYNTHETIC_PACKAGE.to_string(),
+        short: crate::bridge::SYNTHETIC_PACKAGE.to_string(),
+        path: root.to_path_buf(),
+        scripts,
+        deps: Vec::new(),
+        turbo: Some(crate::config::TurboJson {
+            tasks,
+            pipeline: BTreeMap::new(),
+        }),
+        // Not the root package: root packages are skipped by bare-name
+        // expansion because their scripts are usually aggregators. These are
+        // the opposite — they are the actual services.
+        is_root: false,
+    }))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, text: &str) {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+
+    /// Rung 1 of the schema: one service, no monorepo tooling at all. This is
+    /// the case procpane could not serve, because it required a turbo.json to
+    /// even find the root.
+    #[test]
+    fn a_project_can_be_rooted_by_the_manifest_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(
+            root,
+            "preceipts.toml",
+            "[services.web]\nrun = \"vite\"\nhost = \"web\"\nhealth.log = \"ready\"\n",
+        );
+
+        let project = Project::discover(root).expect("no turbo.json needed");
+        assert!(project.turbo.tasks.is_empty(), "nothing came from turbo");
+        assert!(
+            project.sidecar.tasks.contains_key("preceipts#web"),
+            "the service is there: {:?}",
+            project.sidecar.tasks.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A service is persistent by definition. Inheriting turbo's default of
+    /// non-persistent got it rejected with advice about `turbo run`, for a
+    /// task turbo has never heard of.
+    #[test]
+    fn a_synthetic_service_is_persistent_and_uncached() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(root, "preceipts.toml", "[services.web]\nrun = \"vite\"\n");
+
+        let package = synthetic_package(root).unwrap().expect("a package");
+        assert_eq!(package.scripts.get("web").map(String::as_str), Some("vite"));
+        let def = package.turbo.as_ref().unwrap().task("web").unwrap();
+        assert!(def.persistent, "a service does not exit");
+        assert_eq!(def.cache, Some(false), "there is no output to cache");
+    }
+
+    /// A service bound to a turbo task is turbo's to start; synthesizing a
+    /// second definition of it would be the drift the `task` field exists to
+    /// prevent.
+    #[test]
+    fn a_task_backed_service_gets_no_synthetic_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(
+            root,
+            "preceipts.toml",
+            "[services.api]\ntask = \"api#dev\"\n",
+        );
+        assert!(synthetic_package(root).unwrap().is_none());
+    }
+
+    /// Containers have no runtime here yet. A script that pretended to start
+    /// one would turn a missing feature into a confusing failure.
+    #[test]
+    fn a_container_service_is_absent_rather_than_faked() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(
+            root,
+            "preceipts.toml",
+            "[services.db]\nimage = \"postgres:17\"\n",
+        );
+        assert!(synthetic_package(root).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_plain_turborepo_gains_nothing_it_did_not_have() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write(
+            root,
+            "turbo.json",
+            r#"{"tasks": {"dev": {"persistent": true}}}"#,
+        );
+        write(root, "package.json", r#"{"name": "r", "workspaces": []}"#);
+        assert!(
+            synthetic_package(root).unwrap().is_none(),
+            "no manifest, no synthetic package"
+        );
+        assert!(Project::discover(root).is_ok());
+    }
 }

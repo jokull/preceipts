@@ -729,6 +729,7 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
                 "actions": manifest.actions.iter().map(|a| &a.name).collect::<Vec<_>>(),
                 "drains": manifest.drains.iter().map(|d| &d.name).collect::<Vec<_>>(),
                 "problems": problems,
+                "unsupported": manifest.unsupported(),
                 "cache": cache.iter().map(|f| json!({
                     "key": f.key,
                     "message": f.message,
@@ -767,13 +768,20 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
         println!("  drains:  {}", names.join(", "));
     }
 
-    if problems.is_empty() && cache.is_empty() {
+    let unsupported = manifest.unsupported();
+    if problems.is_empty() && cache.is_empty() && unsupported.is_empty() {
         println!("no problems");
         return Ok(());
     }
     println!();
     for problem in &problems {
         println!("✗ {problem}");
+    }
+    // Capability gaps read differently from mistakes: nothing is wrong with
+    // the file, we simply cannot honour it yet. Exiting non-zero over one
+    // would punish an author for describing their stack accurately.
+    for gap in manifest.unsupported() {
+        println!("· {gap}");
     }
     // Cache findings are warnings, not errors: they are about turbo.json,
     // which this tool does not own. Saying so and exiting 0 is the difference

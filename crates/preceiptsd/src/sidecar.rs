@@ -117,9 +117,25 @@ mod humantime_opt {
 }
 
 impl Sidecar {
-    /// Load `procpane.toml` (required) and merge `procpane.local.toml` (optional).
-    /// Missing root file → empty sidecar; missing local file → silently skipped.
+    /// Load the project's service declarations.
+    ///
+    /// `preceipts.toml` first: it is the one file anyone should be authoring,
+    /// and it describes a service graph rather than a set of amendments to
+    /// turbo's tasks. It is translated into this overlay shape by `bridge`,
+    /// because the daemon's graph and probes are built on it and rewriting
+    /// them to make a point would risk working behaviour for tidiness.
+    ///
+    /// `procpane.toml` remains readable so a repository that has one does not
+    /// break on the day it upgrades. It is not merged with the new file:
+    /// having both would mean two answers to "what runs here", and silently
+    /// combining them is how you get a service nobody can find the source of.
     pub fn load(root: &Path) -> Result<Self> {
+        if let Some(manifest) = preceipts_core::manifest::load(root)
+            .map_err(|e| anyhow::anyhow!("reading preceipts.toml: {e}"))?
+        {
+            return Ok(crate::bridge::to_sidecar(&manifest));
+        }
+
         let main_path = root.join("procpane.toml");
         let local_path = root.join("procpane.local.toml");
 

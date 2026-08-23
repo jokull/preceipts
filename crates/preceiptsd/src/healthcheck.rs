@@ -314,6 +314,9 @@ async fn probe_http(
 /// loaded fresh on each healthcheck attempt — cheap, and lets the user run
 /// `preceipts trust install` mid-session without restarting the daemon.
 fn build_tls_connector() -> anyhow::Result<tokio_rustls::TlsConnector> {
+    // Same reason as the proxy: two providers are compiled in, so rustls will
+    // not pick one on its own and panics instead of erroring.
+    crate::proxy::install_crypto_provider();
     let mut roots = rustls::RootCertStore::empty();
     let pem = std::fs::read(crate::ca::ca_cert_path()?)?;
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =

@@ -119,8 +119,15 @@ pub enum Health {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
     pub name: String,
-    /// Command to run. Mutually exclusive with `image`.
+    /// Command to run. Mutually exclusive with `image` and `task`.
     pub run: Option<String>,
+    /// A task in the repository's own runner — `api#dev` for turbo — run
+    /// through it rather than spawned directly.
+    ///
+    /// This is what lets a monorepo keep one definition of how a package
+    /// starts. Writing `run = "pnpm --filter api dev"` next to a turbo.json
+    /// that already says so is a second copy waiting to drift.
+    pub task: Option<String>,
     /// Container image. Implies `runtime = "container"` unless overridden.
     pub image: Option<String>,
     pub runtime: Runtime,
@@ -137,6 +144,18 @@ pub struct Service {
     /// `stripe listen` printing a `whsec_…` is the motivating case.
     pub capture: BTreeMap<String, String>,
     pub fidelity: Fidelity,
+    /// Signal sent to stop this service. `SIGINT` by default, because dev
+    /// servers overwhelmingly treat it as "shut down cleanly".
+    pub stop_signal: Option<String>,
+    /// How long the service gets to stop before it is killed.
+    pub stop_grace: Option<std::time::Duration>,
+}
+
+impl Service {
+    /// What actually starts this service, whichever way it was declared.
+    pub fn command(&self) -> Option<&str> {
+        self.run.as_deref().or(self.task.as_deref())
+    }
 }
 
 /// A named set of env keys, so twenty repeated names become one `@shared`.
@@ -380,15 +399,23 @@ impl Manifest {
         }
 
         for service in &self.services {
-            if service.run.is_none() && service.image.is_none() {
+            let declared = [
+                service.run.is_some(),
+                service.task.is_some(),
+                service.image.is_some(),
+            ]
+            .iter()
+            .filter(|d| **d)
+            .count();
+            if declared == 0 {
                 problems.push(format!(
-                    "service \"{}\" has neither run nor image — nothing to start",
+                    "service \"{}\" has none of run, task, or image — nothing to start",
                     service.name
                 ));
             }
-            if service.run.is_some() && service.image.is_some() {
+            if declared > 1 {
                 problems.push(format!(
-                    "service \"{}\" has both run and image — pick one",
+                    "service \"{}\" declares more than one of run, task, and image — pick one",
                     service.name
                 ));
             }
@@ -691,10 +718,37 @@ fn parse_service(name: &str, value: &toml::Value) -> Result<Service> {
         })
         .unwrap_or_default();
 
+    let stop_grace = match table.get("stop_grace") {
+        None => None,
+        Some(value) => {
+            let text = value.as_str().ok_or_else(|| {
+                err(format!(
+                    "service \"{name}\": stop_grace must be a string like \"30s\""
+                ))
+            })?;
+            Some(
+                crate::checks::parse_duration(text)
+                    .map_err(|e| err(format!("service \"{name}\": stop_grace {e}")))?,
+            )
+        }
+    };
+    if let Some(signal) = table.get("stop_signal").and_then(|v| v.as_str()) {
+        if !matches!(signal, "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT") {
+            return Err(err(format!(
+                "service \"{name}\": stop_signal \"{signal}\" is not one of SIGINT, \
+                 SIGTERM, SIGHUP, SIGQUIT"
+            )));
+        }
+    }
+
     Ok(Service {
         name: name.to_string(),
         run: table
             .get("run")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        task: table
+            .get("task")
             .and_then(|v| v.as_str())
             .map(str::to_string),
         image,
@@ -716,6 +770,11 @@ fn parse_service(name: &str, value: &toml::Value) -> Result<Service> {
             .unwrap_or_default(),
         capture,
         fidelity,
+        stop_signal: table
+            .get("stop_signal")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        stop_grace,
     })
 }
 
@@ -771,6 +830,7 @@ pub fn detect(root: &Path) -> Option<Manifest> {
         services: vec![Service {
             name: "app".to_string(),
             run: Some(run),
+            task: None,
             image: None,
             runtime: Runtime::Native,
             health,
@@ -779,6 +839,8 @@ pub fn detect(root: &Path) -> Option<Manifest> {
             env: Vec::new(),
             capture: BTreeMap::new(),
             fidelity: Fidelity::LocalReal,
+            stop_signal: None,
+            stop_grace: None,
         }],
         ..Default::default()
     })
@@ -1048,7 +1110,50 @@ fidelity = "local-simulated"
         assert!(manifest
             .problems()
             .iter()
-            .any(|p| p.contains("neither run nor image")));
+            .any(|p| p.contains("none of run, task, or image")));
+    }
+
+    /// A monorepo already says how a package starts; repeating it in the
+    /// manifest is a second copy waiting to drift.
+    #[test]
+    fn a_service_can_be_a_task_in_the_repositorys_own_runner() {
+        let manifest = parse(
+            "[services.api]\ntask = \"api#dev\"\nhost = \"api\"\nhealth.http = \"/health\"\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.services[0].task.as_deref(), Some("api#dev"));
+        assert_eq!(manifest.services[0].command(), Some("api#dev"));
+        assert!(
+            manifest.problems().is_empty(),
+            "a task is something to start: {:?}",
+            manifest.problems()
+        );
+    }
+
+    #[test]
+    fn declaring_two_ways_to_start_one_service_is_refused() {
+        let manifest = parse("[services.api]\ntask = \"api#dev\"\nrun = \"pnpm dev\"\n").unwrap();
+        assert!(manifest
+            .problems()
+            .iter()
+            .any(|p| p.contains("more than one of run, task, and image")));
+    }
+
+    #[test]
+    fn stop_semantics_are_declarable_and_validated() {
+        let manifest = parse(
+            "[services.api]\nrun = \"pnpm dev\"\nstop_signal = \"SIGTERM\"\nstop_grace = \"30s\"\n",
+        )
+        .unwrap();
+        assert_eq!(manifest.services[0].stop_signal.as_deref(), Some("SIGTERM"));
+        assert_eq!(
+            manifest.services[0].stop_grace,
+            Some(std::time::Duration::from_secs(30))
+        );
+        // A signal that does not exist is caught at parse rather than at the
+        // moment someone is trying to stop a service.
+        assert!(parse("[services.a]\nrun = \"x\"\nstop_signal = \"SIGBANANA\"\n").is_err());
+        assert!(parse("[services.a]\nrun = \"x\"\nstop_grace = \"soon\"\n").is_err());
     }
 
     #[test]
@@ -1112,6 +1217,29 @@ fidelity = "local-simulated"
         assert!(detect(temp.path()).is_none());
         std::fs::write(temp.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
         assert!(detect(temp.path()).is_none(), "no dev script, no guess");
+    }
+}
+
+impl Manifest {
+    /// What this manifest asks for that is correct but not yet built.
+    ///
+    /// Deliberately not part of `problems`. "Your manifest is wrong" and "we
+    /// cannot do that yet" are different sentences with different audiences:
+    /// the first is the author's to fix, the second is ours. Merging them
+    /// would also make a perfectly valid manifest — trip's, which declares
+    /// containers — report as invalid, which is a lie about the file.
+    pub fn unsupported(&self) -> Vec<String> {
+        self.services
+            .iter()
+            .filter(|service| service.image.is_some())
+            .map(|service| {
+                format!(
+                    "service \"{}\" declares an image, and container runtimes are not \
+                     built yet — it will not start. Give it a run or task in the meantime.",
+                    service.name
+                )
+            })
+            .collect()
     }
 }
 

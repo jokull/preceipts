@@ -7,6 +7,7 @@
 //! two halves of one system. `preceipts-core` stays on the frame path — git,
 //! diff, highlight, watch, schema — and never grows a process supervisor.
 
+pub mod bridge;
 pub mod buffer;
 pub mod ca;
 pub mod cli;

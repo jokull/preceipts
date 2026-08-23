@@ -44,9 +44,28 @@ impl PortRegistry {
     }
 }
 
+/// Choose the crypto backend explicitly, once per process.
+///
+/// rustls 0.23 auto-selects a provider only when exactly one is compiled in.
+/// Both `aws-lc-rs` and `ring` end up in this binary — the second arrives
+/// through `magic-wormhole` — so auto-selection gives up and *panics* the
+/// first time any TLS config is built. That made the whole HTTPS path a
+/// crash for anyone who had actually installed the CA, which is to say for
+/// anyone using the feature.
+///
+/// An already-installed provider is not an error: this is called from both
+/// the proxy and the healthcheck connector, and whichever runs first wins.
+pub fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// Build a rustls ServerConfig that presents a single leaf cert covering all
 /// of `hostnames`. The cert is signed by the local CA on the fly.
 pub fn build_tls_config(hostnames: &[String]) -> Result<Arc<ServerConfig>> {
+    install_crypto_provider();
     if !ca::is_installed() {
         return Err(anyhow!(
             "local CA not generated; run `preceipts trust install` first"

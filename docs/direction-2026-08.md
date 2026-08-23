@@ -984,10 +984,16 @@ same sequence:
 
 What steps 9–13 leave for the next pass, in the order they block things:
 
-14. **One manifest.** `procpane.toml` and `preceipts.toml` are two schemas
-    for one job — the daemon reads the first, everything else reads the
-    second. Converging them is what makes the sandbox rungs real rather
-    than documented.
+14. ~~**One manifest.**~~ *Done.* `preceipts.toml` is the only file anyone
+    authors; `procpane.toml` still loads so an existing repository does not
+    break on upgrade, but the two are never merged — having both would mean
+    two answers to "what runs here". The manifest describes a service graph
+    and is translated into the overlay shape the daemon's internals are built
+    on, rather than rewriting working machinery to make a point. Two things
+    the convergence forced: `turbo.json` is no longer required to root a
+    project (rung 1 — one Vite service, no monorepo tooling — could not boot
+    before), and a service declared with `run` becomes a script on a synthetic
+    package so the graph builder finds it the ordinary way.
 15. **Boot a workspace's environment through the daemon**: per-workspace
     ports, certs, and the URL registry, which is where the fabric stops
     being a naming scheme and starts being a thing you can open.

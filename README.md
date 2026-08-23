@@ -88,7 +88,7 @@ image = "postgres:17"          # an image implies a container
 health.tcp = 5432
 
 [services.api]
-run = "pnpm --filter api dev"  # native, where iteration speed lives
+task = "api#dev"               # a task your runner already defines
 needs = ["db"]
 health.http = "/health"
 host = "api"                   # a label; the fabric composes the FQDN
@@ -119,6 +119,11 @@ neither file can say alone:
 
 The second one is the dangerous direction: a cache *miss* is slow, a wrong
 cache *hit* is green.
+
+`task` points at something the repository's own runner already defines, so a
+monorepo keeps one definition of how a package starts; `run` is the plain
+command for everything else. A project needs no turbo at all — four lines of
+`preceipts.toml` and `preceipts up` is a complete setup.
 
 The rule: **if the app or a receipt must understand it, it is schema; if only
 the project understands it, it is an action.** So services, env policy,
@@ -153,10 +158,9 @@ Every verb lives on `preceipts` — `up`, `down`, `services`, `proc`, `grep`,
 and an agent should not have to learn which tool owns which verb. `preceiptsd`
 answers only to launchd and to `preceipts up`.
 
-Still ahead: converging `procpane.toml` into `preceipts.toml` (two schemas, one
-job), booting a workspace's environment through the daemon, per-workspace certs
-behind the `:443` forwarder, the HTTP transcript, and the env panel and project
-tabs. Registering the forwarder through `SMAppService` — and with it the shared
+Still ahead: per-workspace ports and certs so two worktrees can run at once,
+the container runtime (`image = …` parses and validates but cannot start yet —
+`doctor` says so), the HTTP transcript, and the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
 Keychain access group that retires the open-ACL workaround — waits on a signed
 bundle. Service URLs are
 `<service>.<workspace>.<project>.localhost` — the system resolves `*.localhost` to

@@ -50,13 +50,20 @@ use crate::proto::{Request, Response};
 pub fn resolve_root(start: PathBuf) -> Result<PathBuf> {
     let mut cur = start.canonicalize().with_context(|| "canonicalize cwd")?;
     loop {
-        if cur.join("turbo.json").is_file() {
+        if crate::project::ROOT_MARKERS
+            .iter()
+            .any(|marker| cur.join(marker).is_file())
+        {
             return Ok(cur);
         }
         let parent = cur.parent().map(|p| p.to_path_buf());
         match parent {
             Some(p) if p != cur => cur = p,
-            _ => return Err(anyhow!("no turbo.json found from given cwd")),
+            _ => {
+                return Err(anyhow!(
+                    "no preceipts.toml or turbo.json found from given cwd"
+                ))
+            }
         }
     }
 }
