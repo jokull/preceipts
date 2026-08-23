@@ -173,30 +173,18 @@ impl Project {
     }
 }
 
-/// Either marker roots a project.
-///
-/// `turbo.json` was the only marker accepted before, which made the daemon
-/// unusable for the very case rung 1 of the schema exists for: a single Vite
-/// app with four lines of `preceipts.toml` and no monorepo tooling at all.
-pub const ROOT_MARKERS: [&str; 2] = ["preceipts.toml", "turbo.json"];
+pub use preceipts_proto::ROOT_MARKERS;
 
+/// The daemon's own error wording around the shared resolver. The resolution
+/// itself lives in `preceipts-proto`, because it is half of the socket's
+/// address and every client has to agree on it.
 fn find_root(start: &Path) -> Result<PathBuf> {
-    let start = start.canonicalize().with_context(|| "canonicalize start")?;
-    let mut cur = start.as_path();
-    loop {
-        if ROOT_MARKERS.iter().any(|m| cur.join(m).is_file()) {
-            return Ok(cur.to_path_buf());
-        }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => {
-                return Err(anyhow!(
-                    "no preceipts.toml or turbo.json found from {}",
-                    start.display()
-                ))
-            }
-        }
-    }
+    preceipts_proto::project_root(start).ok_or_else(|| {
+        anyhow!(
+            "no preceipts.toml or turbo.json found from {}",
+            start.display()
+        )
+    })
 }
 
 fn detect_package_manager(root: &Path) -> String {

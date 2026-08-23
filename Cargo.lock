@@ -5023,6 +5023,8 @@ dependencies = [
  "gpui",
  "gpui-component",
  "preceipts-core",
+ "preceipts-proto",
+ "serde_json",
 ]
 
 [[package]]
@@ -5070,6 +5072,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "preceipts-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "preceiptsd"
 version = "0.1.0"
 dependencies = [
@@ -5088,6 +5097,7 @@ dependencies = [
  "petgraph",
  "portable-pty",
  "preceipts-core",
+ "preceipts-proto",
  "rcgen",
  "regex",
  "rpassword",

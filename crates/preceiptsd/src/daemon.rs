@@ -19,6 +19,7 @@ use crate::secrets;
 use crate::services::DependsOnCondition;
 use crate::{ca, forwarder, project::Project};
 use preceipts_core::ports;
+pub use preceipts_proto::socket_path;
 
 pub const PREBUILD_ID: &str = "preceipts#prebuild";
 
@@ -33,6 +34,15 @@ pub struct Daemon {
     pub hostnames: BTreeMap<String, String>,
     /// Per-task allocated TCP port (when hostname is set; PORT env injected).
     pub allocated_ports: BTreeMap<String, u16>,
+    /// Whether the TLS proxy is actually listening.
+    ///
+    /// Load-bearing for what we tell people the URL is. Without the local CA
+    /// there is no proxy, and a hostname that resolves to loopback with
+    /// nothing bound on the proxy port is a connection refused — so printing
+    /// `https://api.stand.localhost:8443` in that state is a lie the status
+    /// table tells with a straight face. Set at boot and cleared if the TLS
+    /// config fails to build.
+    pub https: Arc<std::sync::atomic::AtomicBool>,
     /// Every HTTP exchange the proxy has carried for this workspace.
     ///
     /// Lives on the daemon rather than in the proxy so `Request::Transcript`
@@ -255,6 +265,9 @@ impl Daemon {
             started_at: Instant::now(),
             hostnames: hostnames.clone(),
             allocated_ports: allocated_ports.clone(),
+            https: Arc::new(std::sync::atomic::AtomicBool::new(
+                !hostnames.is_empty() && ca::is_installed(),
+            )),
             proxy_port,
             transcript: crate::transcript::Transcript::new(),
             workspace_key: workspace
@@ -316,6 +329,9 @@ impl Daemon {
                     }
                     Err(e) => {
                         eprintln!("preceipts: skipping HTTPS proxy ({e})");
+                        daemon
+                            .https
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             } else {
@@ -928,88 +944,6 @@ fn dispatch(daemon: &Daemon, req: Request) -> Response {
     }
 }
 
-/// The daemon's control socket for a project.
-///
-/// **Not** under the project, which is where it used to live. A unix socket
-/// path is capped at 104 bytes on macOS (`SUN_LEN`), and a worktree a few
-/// directories deep blows straight through that — the bind fails with a
-/// message about `SUN_LEN` that says nothing about the real cause, and the
-/// only symptom a user sees is "daemon did not come up". Naming it from a
-/// hash of the canonical root in the per-user temp directory makes the length
-/// constant and the identity still one-to-one with the project.
-///
-/// Exposed so callers do not each rebuild the path from parts — the CLI, the
-/// MCP server, and the daemon itself all have to agree on it, and a
-/// disagreement reads as "no daemon running" rather than as a bug.
-pub fn socket_path(root: &Path) -> PathBuf {
-    let canonical = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .to_string_lossy()
-        .into_owned();
-    std::env::temp_dir().join(format!(
-        "preceipts-{:016x}.sock",
-        fnv1a(canonical.as_bytes())
-    ))
-}
-
-/// FNV-1a. Not `DefaultHasher`: its output is explicitly not guaranteed stable
-/// across releases, and this value has to mean the same thing to a daemon
-/// started last week and a CLI built today.
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x1000_0000_01b3);
-    }
-    hash
-}
-
-#[cfg(test)]
-mod socket_path_tests {
-    use super::*;
-
-    /// The regression: the socket used to live under the project, so a deep
-    /// worktree could not start a daemon at all.
-    #[test]
-    fn the_path_stays_short_however_deep_the_project_is() {
-        let deep = PathBuf::from("/Users/someone/Code")
-            .join("a-fairly-long-directory-name".repeat(4))
-            .join("another-quite-long-directory-name")
-            .join("worktrees")
-            .join("fix-the-checkout-race-in-payments");
-        let socket = socket_path(&deep);
-        assert!(
-            socket.as_os_str().len() < 104,
-            "unix sockets cap at 104 bytes: {} was {}",
-            socket.display(),
-            socket.as_os_str().len()
-        );
-    }
-
-    #[test]
-    fn two_projects_do_not_share_a_socket() {
-        assert_ne!(
-            socket_path(Path::new("/tmp/one")),
-            socket_path(Path::new("/tmp/two"))
-        );
-    }
-
-    #[test]
-    fn the_same_project_always_gets_the_same_socket() {
-        let root = Path::new("/tmp/one");
-        assert_eq!(socket_path(root), socket_path(root));
-    }
-
-    /// Pinned because a daemon started before an upgrade must still be
-    /// reachable by a CLI built after one.
-    #[test]
-    fn the_hash_is_stable_across_builds() {
-        assert_eq!(fnv1a(b"/Users/x/proj"), fnv1a(b"/Users/x/proj"));
-        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
-    }
-}
-
 pub fn state_dir(root: &Path) -> PathBuf {
     root.join(".preceipts").join("daemon")
 }
@@ -1160,10 +1094,19 @@ fn build_proc_status(daemon: &Daemon, id: &str, p: &Proc) -> ProcStatus {
         persistent: p.persistent,
         hostname: daemon.hostnames.get(id).cloned(),
         port: daemon.allocated_ports.get(id).copied(),
-        url: daemon
-            .hostnames
-            .get(id)
-            .map(|host| public_url(host, daemon.proxy_port)),
+        url: match (
+            daemon.hostnames.get(id),
+            daemon.https.load(std::sync::atomic::Ordering::Relaxed),
+        ) {
+            (Some(host), true) => Some(public_url(host, daemon.proxy_port)),
+            // No proxy is listening, so the hostname is not an address. The
+            // allocated port is — and saying so is how "what is around me"
+            // stays answerable before anything privileged is installed.
+            _ => daemon
+                .allocated_ports
+                .get(id)
+                .map(|port| format!("http://127.0.0.1:{port}")),
+        },
         notes,
         in_manifest: daemon.manifest_tasks.contains(id),
     }

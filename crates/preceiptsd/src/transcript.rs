@@ -23,7 +23,6 @@
 //! copying.
 
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,29 +38,7 @@ pub const CAPACITY: usize = 2000;
 /// much memory to take by never sending a blank line.
 const MAX_HEAD: usize = 32 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Exchange {
-    /// Monotonic id, never reused.
-    ///
-    /// Positions shift as the ring evicts, so a response that arrives after
-    /// its request was pushed out would otherwise stamp its status onto
-    /// whichever exchange had slid into that slot. An id cannot be
-    /// misattributed: it either still exists or it does not.
-    pub id: u64,
-    /// Which service answered — the hostname the request arrived on.
-    pub host: String,
-    pub method: String,
-    pub path: String,
-    /// None while the response has not arrived, which is also how a hung
-    /// request looks. That distinction is the point of recording it early.
-    pub status: Option<u16>,
-    pub duration_ms: Option<u64>,
-    pub request_bytes: u64,
-    pub response_bytes: u64,
-    pub content_type: Option<String>,
-    /// Seconds since the epoch, when the request line was seen.
-    pub at: i64,
-}
+pub use preceipts_proto::Exchange;
 
 /// A workspace's recent HTTP, newest last.
 #[derive(Debug, Default)]

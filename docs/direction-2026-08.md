@@ -829,15 +829,31 @@ the word if the Actions/Vercel rollup should survive.
 
 ## UI shape
 
-- Window: **tab per project** (GPUI tabs; a project registry replaces
-  today's `PreceiptsApp <repo>` single-repo launch).
-- Left: **workspace list** — worktree cards showing branch, genesis
-  prompt, receipt verdict, service health dots.
-- Center: **diff surface** — gpui-component's virtual table, one scroll
-  surface, tree-sitter highlighting.
-- Dock: **tree browser** and **env panel** — services with clickable
-  URLs, health, log tail from the daemon's ring buffers.
-- ⌘K palette; ⌘F find; no vim keys.
+*Amended 2026-08-23 (decision 14). This section originally read "tab per
+project" with the workspaces in a list down the left. It is the other way
+round: a window is the unit you arrange on a screen beside an agent, and what
+you arrange beside an agent is a project.*
+
+- Window: **one per project**. Its title is the project.
+- Tabs: **one per workspace** — the project's worktrees, each with a health
+  dot. The `+` lists worktrees that exist and are not open, newest first,
+  with the recorded intent beside each; it creates nothing. `.git/worktrees/`
+  is watched, so a worktree an agent makes in a terminal appears in that list
+  within a couple of seconds, and the button carries the count and turns green
+  so arrival is visible without the menu open.
+- Left: **jump list** — one dense row per changed file, status letter
+  coloured, marking the file the surface is currently inside.
+- Center: **diff surface** — one scroll surface, tree-sitter highlighting,
+  character selection, patience diff.
+- Right: **the lab** — services with health, addresses, and the instrument
+  pane: a service's output or the workspace's HTTP transcript. It appears on
+  its own when the workspace has an environment up and stays away when it does
+  not; toggling it once takes the decision away from the environment for good.
+  At its foot, the **agent brief**: the app door's honest handoff, built from
+  live state — where the worktree is, what is already running and on what
+  address, and which verbs will tell the agent more.
+- Foot: **the HUD** — base, file count, line count, receipt verdict.
+- ⌘K palette; ⌘F find; no vim keys. *(Not built.)*
 
 ## Decision 12, as drafted
 

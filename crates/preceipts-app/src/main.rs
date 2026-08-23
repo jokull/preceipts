@@ -5,6 +5,8 @@
 //! tabs themselves are step 5's workspace list, moved to the top edge.
 
 mod cockpit;
+mod daemon;
+mod lab_panel;
 mod surface_view;
 mod theme;
 mod workspace_pane;

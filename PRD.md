@@ -559,3 +559,64 @@ docs/direction-2026-08.md.
     workspace with APFS copy-on-write, and its refusal to call unproven
     isolation verified. Refused — the harness itself, which owns the
     agent loop and is this project's stated anti-goal.
+
+14. **One window per project; tabs are workspaces** (2026-08-23, user
+    decision). Decision 12's UI shape had it the other way round — a tab
+    per project, workspaces in a list down the left. A window is the unit
+    you arrange on a screen beside an agent conversation, and what you
+    arrange beside an agent is a project; the workspaces are what you flip
+    between while it works. So: **one window per project, one tab per
+    worktree.**
+
+    The `+` is the ambient door made visible, and it **creates nothing**.
+    It lists the worktrees that already exist and are not open, newest
+    first, with each one's recorded intent beside it. `.git/worktrees/` is
+    watched with FSEvents — `watch.rs` cannot do that job, it excludes
+    `.git` outright because every git command writes there — so a worktree
+    an agent creates in a terminal appears within about two seconds of git
+    writing it. The count and the arrival colour ride on the button
+    itself: a workspace that showed up behind a closed popover is one you
+    never learn about. This is decision 12's "adoption, not creation" with
+    a surface, and the click-then-wait loop the user asked for — press
+    `+`, ask the agent for a branch, watch it arrive.
+
+    **The lab panel is the read surface's x-ray.** Services with health
+    and addresses, and one instrument pane showing either a service's
+    output (the daemon's ring buffers, polled with a cursor) or the
+    workspace's HTTP transcript (the TLS proxy, which is in the path of
+    every request anyway). Every fact on it comes over the same socket the
+    CLI and the MCP server use — **no UI-only features** — and nothing on
+    it starts, stops or restarts anything. The control plane is earned one
+    verb at a time. It appears on its own when the workspace has an
+    environment up and stays away when it does not, because a panel that
+    only ever says "no environment up" is a panel you resent; toggling it
+    once takes the decision away from the environment permanently.
+
+    At its foot, the **agent brief** — the app door's honest handoff from
+    decision 12, as a clipboard button rather than a launched terminal. It
+    is built from live state (where the worktree is, its intent, what is
+    running and on what address, and the verbs that answer more) because a
+    brief listing services that are not up is worse than no brief.
+
+    Two things the wiring forced into the open. The wire vocabulary moved
+    to its own crate, `preceipts-proto`: the app has to speak it, and
+    depending on `preceiptsd` for the privilege would drag tokio, rustls,
+    a PTY layer and a wormhole implementation into a GPUI binary that
+    opens one blocking socket. **Where the socket is** went with it —
+    resolving the project root differently from the daemon means looking
+    for the socket in the wrong place and concluding, silently, that
+    nothing is running. And the boot table stopped composing its own URL
+    from a hostname and a port: without the local CA there is no proxy, so
+    `https://api.stand.localhost:8443` was an address that refuses
+    connections, printed with a straight face. The daemon now answers with
+    the allocated port in that state, and every renderer prints the
+    daemon's answer.
+
+    `examples/hot-dog-stand/` exists to be pointed at: four `run =` lines
+    over plain `node`, nothing to install, exercising port allocation,
+    subdomain composition, healthcheck ordering, ring buffers and the
+    transcript. Its counter page finds its neighbours by swapping the
+    first label of whatever host it was reached on, which is the URL
+    fabric's whole claim in one line of JavaScript — the same page works
+    unchanged in a linked worktree where every name has a workspace
+    segment in the middle.

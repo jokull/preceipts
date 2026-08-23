@@ -1,0 +1,61 @@
+# The Hot Dog Stand.
+#
+# A deliberately silly project that exists to exercise the serious parts: port
+# allocation, subdomain mapping, healthcheck ordering, the log ring buffers,
+# and the HTTP transcript. Nothing here is a dependency of preceipts — it is
+# the thing preceipts is pointed *at*, so that the lab panel has something to
+# be an x-ray of.
+#
+# It has no package.json, no lockfile, and nothing to install. Every service is
+# a `run =` line over plain `node`, which is the smallest possible shape a
+# project can have and still be a project: rung 1 of the schema, proven.
+#
+#   preceipts up          boots it
+#   preceipts services    what is running, and on what URL
+#   preceipts requests    every request the proxy carried
+#   preceipts down        packs up the stand
+
+schema = 1
+
+# One-shot. No health block, so "done" is the whole claim — everything else
+# waits on it via `needs`. Lighting the coals before taking orders is the only
+# sequencing this project has, and it is enough to prove the graph runs.
+[services.grill]
+run = "node stand/grill.js"
+
+# An upstream provider that happens to live next door. It gets its own
+# hostname for the same reason a real one would: a service is a thing with an
+# address and a healthcheck, and where it runs is not the address's business.
+[services.condiments]
+run = "node stand/condiments.js"
+host = "condiments"
+needs = ["grill"]
+health.log = "condiments ready"
+
+# The orders API. The daemon allocates a port and hands it over as `$PORT`;
+# the service never picks its own number, which is what
+# lets two worktrees of this project run at once without a word about it.
+[services.api]
+run = "node stand/api.js"
+host = "api"
+needs = ["condiments"]
+# A log check, not `health.http = "/health"`, even though the API has that
+# endpoint and probing it would be the better test. An HTTP probe goes through
+# the proxy over TLS, so it needs the local CA installed — and this example's
+# whole promise is that it runs with nothing installed. `preceipts trust
+# install` first, and then the http form is the one to prefer.
+health.log = "api: listening on"
+
+# The counter. Serves one page, and that page fetches the other two services
+# by name — which is the point of the whole exercise: open it in a browser and
+# `preceipts requests` fills up with real exchanges through the real proxy.
+[services.web]
+run = "node stand/web.js"
+host = "web"
+needs = ["api"]
+health.log = "counter open"
+
+# Health is per-service; readiness is a claim about the stand. "Every process
+# is up" and "you may now order a hot dog" are different sentences.
+[ready]
+requires = ["api", "web"]

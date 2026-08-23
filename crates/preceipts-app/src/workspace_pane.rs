@@ -9,9 +9,11 @@
 //! worktree taking the whole cockpit down, so the load returns an error the
 //! tab can render instead.
 
+use crate::lab_panel::LabPanel;
 use crate::surface_view::SurfaceView;
 use gpui::prelude::*;
 use gpui::{div, px, App, Context, Entity, SharedString, Window};
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::divider::Divider;
 use gpui_component::label::Label;
 use gpui_component::resizable::{h_resizable, resizable_panel};
@@ -37,6 +39,13 @@ enum Verdict {
 }
 
 pub struct WorkspacePane {
+    lab: Entity<LabPanel>,
+    /// `None` means "follow the environment": the panel appears when the
+    /// workspace has services running and stays away when it does not, because
+    /// a panel that only ever says "no environment up" is a panel you resent.
+    /// Toggling it once takes the decision away from the environment for good
+    /// — an explicit choice must not be undone by a dev server restarting.
+    lab_open: Option<bool>,
     changeset_summary: (usize, usize, usize, String),
     status: Option<Status>,
     surface: Entity<SurfaceView>,
@@ -53,17 +62,23 @@ impl WorkspacePane {
         // Checks degrade rather than fail: a project with no check config is
         // a project whose HUD says "no checks", not a tab that will not open.
         let status = preceipts_core::checks::status(&workspace.path, None).ok();
-        let _ = &workspace;
-        Ok(cx.new(|cx| Self::new(changeset, status, cx)))
+        Ok(cx.new(|cx| Self::new(workspace, changeset, status, cx)))
     }
 
-    fn new(changeset: Changeset, status: Option<Status>, cx: &mut Context<Self>) -> Self {
+    fn new(
+        workspace: Workspace,
+        changeset: Changeset,
+        status: Option<Status>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let summary = (
             changeset.files.len(),
             changeset.total_added(),
             changeset.total_removed(),
             changeset.base_name.clone(),
         );
+        let lab = cx.new(|cx| LabPanel::new(workspace, cx));
+        cx.observe(&lab, |_, _, cx| cx.notify()).detach();
         let code_font = crate::theme::code_font(cx);
         let surface = cx.new(|cx| SurfaceView::new(changeset, code_font, cx));
         // The file list marks the file you are currently inside, so this view
@@ -71,6 +86,8 @@ impl WorkspacePane {
         // notify their parent on their own.
         cx.observe(&surface, |_, _, cx| cx.notify()).detach();
         Self {
+            lab,
+            lab_open: None,
             changeset_summary: summary,
             status,
             surface,
@@ -210,8 +227,13 @@ impl WorkspacePane {
             )
     }
 
+    fn lab_showing(&self, cx: &App) -> bool {
+        self.lab_open
+            .unwrap_or_else(|| self.lab.read(cx).has_services())
+    }
+
     /// The footer: diff stats, and the receipt verdict.
-    fn render_hud(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_hud(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (files, added, removed, base) = &self.changeset_summary;
 
         let (verdict, kind) = match &self.status {
@@ -273,6 +295,22 @@ impl WorkspacePane {
             .child(Label::new(format!("+{added} −{removed}")).text_size(px(11.0)))
             .child(rule())
             .child(chip.small().child(SharedString::from(verdict)))
+            // Pushes the lab toggle to the right edge, where a panel switch
+            // belongs and where it is not in the way of the verdict.
+            .child(div().flex_1())
+            .child(
+                Button::new("lab")
+                    .ghost()
+                    .xsmall()
+                    .label("Lab")
+                    .when(self.lab_showing(cx), |button| {
+                        button.text_color(cx.theme().foreground)
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.lab_open = Some(!this.lab_showing(cx));
+                        cx.notify();
+                    })),
+            )
     }
 }
 
@@ -291,7 +329,15 @@ impl Render for WorkspacePane {
                                 .size_range(px(180.0)..px(420.0))
                                 .child(self.render_file_list(cx)),
                         )
-                        .child(resizable_panel().child(self.surface.clone())),
+                        .child(resizable_panel().child(self.surface.clone()))
+                        .when(self.lab_showing(cx), |split| {
+                            split.child(
+                                resizable_panel()
+                                    .size(px(320.0))
+                                    .size_range(px(240.0)..px(560.0))
+                                    .child(self.lab.clone()),
+                            )
+                        }),
                 ),
             )
             .child(self.render_hud(cx))

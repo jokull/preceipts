@@ -56,11 +56,16 @@ impl Config {
     }
 }
 
-/// Parse `30s`, `15m`, `12h`, `30d`, or a compound like `1h30m`.
+/// Parse `500ms`, `30s`, `15m`, `12h`, `30d`, or a compound like `1h30m`.
 ///
 /// A bare number is rejected rather than guessed at: `timeout = 30` reads as
 /// thirty of *something*, and a config that means minutes but runs seconds is
 /// worse than one that refuses to load.
+///
+/// `ms` needs the lookahead below and earns it: a healthcheck's start period
+/// is routinely sub-second, and without it `start_period = "500ms"` parsed as
+/// five hundred *minutes* followed by a stray `s` — which is how the demo
+/// fixture in this repository came to be a manifest that would not load.
 pub fn parse_duration(text: &str) -> std::result::Result<Duration, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -69,7 +74,8 @@ pub fn parse_duration(text: &str) -> std::result::Result<Duration, String> {
     let mut total = Duration::ZERO;
     let mut digits = String::new();
     let mut saw_unit = false;
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
         if ch.is_ascii_digit() {
             digits.push(ch);
             continue;
@@ -77,18 +83,25 @@ pub fn parse_duration(text: &str) -> std::result::Result<Duration, String> {
         let value: u64 = digits
             .parse()
             .map_err(|_| format!("{text:?}: unit {ch:?} has no number before it"))?;
-        let secs = match ch {
-            's' => 1,
-            'm' => 60,
-            'h' => 60 * 60,
-            'd' => 24 * 60 * 60,
-            other => {
-                return Err(format!(
-                    "{text:?}: unknown unit {other:?} — use s, m, h, or d"
-                ))
-            }
-        };
-        total += Duration::from_secs(value * secs);
+        // `m` is minutes unless an `s` follows it, in which case the pair is
+        // one unit and both characters belong to it.
+        if ch == 'm' && chars.peek() == Some(&'s') {
+            chars.next();
+            total += Duration::from_millis(value);
+        } else {
+            let secs = match ch {
+                's' => 1,
+                'm' => 60,
+                'h' => 60 * 60,
+                'd' => 24 * 60 * 60,
+                other => {
+                    return Err(format!(
+                        "{text:?}: unknown unit {other:?} — use ms, s, m, h, or d"
+                    ))
+                }
+            };
+            total += Duration::from_secs(value * secs);
+        }
         digits.clear();
         saw_unit = true;
     }
@@ -102,6 +115,39 @@ pub fn parse_duration(text: &str) -> std::result::Result<Duration, String> {
         return Err(format!("{text:?}: not a duration"));
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::parse_duration;
+    use std::time::Duration;
+
+    #[test]
+    fn milliseconds_are_a_unit() {
+        assert_eq!(parse_duration("500ms"), Ok(Duration::from_millis(500)));
+    }
+
+    /// The regression: `m` used to swallow the number and leave `s` bare.
+    #[test]
+    fn ms_does_not_read_as_minutes() {
+        assert_ne!(parse_duration("500ms"), Ok(Duration::from_secs(500 * 60)));
+    }
+
+    #[test]
+    fn a_bare_m_is_still_minutes() {
+        assert_eq!(parse_duration("15m"), Ok(Duration::from_secs(900)));
+    }
+
+    #[test]
+    fn compounds_still_add_up() {
+        assert_eq!(parse_duration("1h30m"), Ok(Duration::from_secs(5400)));
+        assert_eq!(parse_duration("1s500ms"), Ok(Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn a_bare_number_is_refused() {
+        assert!(parse_duration("30").is_err());
+    }
 }
 
 /// Load `.preceipts/config.toml`. A missing `.preceipts/` is an honest error —

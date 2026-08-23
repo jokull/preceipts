@@ -213,11 +213,6 @@ async fn wait_and_print_status(socket: &std::path::Path, budget: Duration) {
 fn render_up_table(procs: &[proto::ProcStatus], hidden_count: usize) -> String {
     let mut out = String::new();
     let mut healthy = 0usize;
-    let proxy_port = if forwarder::is_installed() {
-        ""
-    } else {
-        ":8443"
-    };
     for p in procs {
         let mark = match p.state.as_str() {
             "healthy" | "completed" => {
@@ -227,11 +222,14 @@ fn render_up_table(procs: &[proto::ProcStatus], hidden_count: usize) -> String {
             "crashed" | "killed" => "✗",
             _ => "⏳",
         };
-        let host = p.hostname.as_deref().unwrap_or("");
-        let host_disp = if host.is_empty() {
-            String::new()
-        } else {
-            format!("  https://{host}{proxy_port}")
+        // The daemon's own answer, not a second one assembled here. This used
+        // to compose `https://{hostname}{proxy_port}` from parts, which meant
+        // the boot table happily advertised an HTTPS URL on a project with no
+        // CA — where no proxy is listening and that address is a refused
+        // connection.
+        let host_disp = match &p.url {
+            Some(url) => format!("  {url}"),
+            None => String::new(),
         };
         out.push_str(&format!(
             "{mark} {name:<28} {state:<10}{host}\n",
