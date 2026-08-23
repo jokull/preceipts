@@ -5154,6 +5154,7 @@ name = "preceipts-core"
 version = "0.1.0"
 dependencies = [
  "git2",
+ "libc",
  "memchr",
  "notify 8.2.0",
  "notify-debouncer-full",

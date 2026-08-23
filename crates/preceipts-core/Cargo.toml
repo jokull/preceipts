@@ -8,6 +8,7 @@ description = "Git reads, diff, highlighting, and watching — in-process, off t
 
 [dependencies]
 git2 = "0.19"
+libc = "0.2"
 memchr = "2"
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"

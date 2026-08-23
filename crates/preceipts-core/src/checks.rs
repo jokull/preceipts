@@ -19,8 +19,9 @@ use crate::error::{Error, Result};
 use crate::notes;
 use crate::receipt::{latest_by_check, Receipt};
 use crate::treehash;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const PRECEIPTS_DIR: &str = ".preceipts";
@@ -34,6 +35,8 @@ pub struct PrepareStep {
     pub name: String,
     /// Shell command, run from the repository root.
     pub cmd: String,
+    /// How long it may run before it is killed and the whole run aborts.
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,6 +45,63 @@ pub struct Config {
     pub required: Vec<String>,
     /// Normalization commands run before the receipt tree is computed.
     pub prepare: Vec<PrepareStep>,
+    /// Per-check overrides of [`DEFAULT_TIMEOUT`], from `[check.<name>] timeout`.
+    pub timeouts: BTreeMap<String, Duration>,
+}
+
+impl Config {
+    /// How long `name` may run before it is killed.
+    pub fn timeout_for(&self, name: &str) -> Duration {
+        self.timeouts.get(name).copied().unwrap_or(DEFAULT_TIMEOUT)
+    }
+}
+
+/// Parse `30s`, `15m`, `12h`, `30d`, or a compound like `1h30m`.
+///
+/// A bare number is rejected rather than guessed at: `timeout = 30` reads as
+/// thirty of *something*, and a config that means minutes but runs seconds is
+/// worse than one that refuses to load.
+pub fn parse_duration(text: &str) -> std::result::Result<Duration, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("empty duration".to_string());
+    }
+    let mut total = Duration::ZERO;
+    let mut digits = String::new();
+    let mut saw_unit = false;
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        let value: u64 = digits
+            .parse()
+            .map_err(|_| format!("{text:?}: unit {ch:?} has no number before it"))?;
+        let secs = match ch {
+            's' => 1,
+            'm' => 60,
+            'h' => 60 * 60,
+            'd' => 24 * 60 * 60,
+            other => {
+                return Err(format!(
+                    "{text:?}: unknown unit {other:?} — use s, m, h, or d"
+                ))
+            }
+        };
+        total += Duration::from_secs(value * secs);
+        digits.clear();
+        saw_unit = true;
+    }
+    if !digits.is_empty() {
+        return Err(format!(
+            "{text:?}: missing a unit — write {}s for seconds",
+            digits
+        ));
+    }
+    if !saw_unit {
+        return Err(format!("{text:?}: not a duration"));
+    }
+    Ok(total)
 }
 
 /// Load `.preceipts/config.toml`. A missing `.preceipts/` is an honest error —
@@ -81,7 +141,12 @@ pub fn load_config(root: &Path) -> Result<Config> {
         .unwrap_or_default();
 
     let prepare = parse_prepare(parsed.get("prepare"))?;
-    Ok(Config { required, prepare })
+    let timeouts = parse_timeouts(parsed.get("check"))?;
+    Ok(Config {
+        required,
+        prepare,
+        timeouts,
+    })
 }
 
 /// `[prepare] commands = [...]` with a `[prepare.<name>]` table each.
@@ -133,9 +198,25 @@ fn parse_prepare(section: Option<&toml::Value>) -> Result<Vec<PrepareStep>> {
                      [prepare.{name}] table with a cmd string"
                 )))
             })?;
+        let timeout = match table.get(name).and_then(|t| t.get("timeout")) {
+            None => DEFAULT_TIMEOUT,
+            Some(value) => {
+                let text = value.as_str().ok_or_else(|| {
+                    Error::Git(git2::Error::from_str(&format!(
+                        "[prepare.{name}].timeout in {CONFIG_FILE} must be a string like \"5m\""
+                    )))
+                })?;
+                parse_duration(text).map_err(|e| {
+                    Error::Git(git2::Error::from_str(&format!(
+                        "[prepare.{name}].timeout in {CONFIG_FILE}: {e}"
+                    )))
+                })?
+            }
+        };
         steps.push(PrepareStep {
             name: name.clone(),
             cmd: cmd.to_string(),
+            timeout,
         });
     }
 
@@ -150,6 +231,161 @@ fn parse_prepare(section: Option<&toml::Value>) -> Result<Vec<PrepareStep>> {
     }
 
     Ok(steps)
+}
+
+/// `[check.<name>] timeout = "5m"` — the only per-check knob there is.
+///
+/// A table for a check that does not exist is not an error: a check can be
+/// added and removed on a branch while the config stays put, and refusing to
+/// load over a stale stanza would make the config the fragile part.
+fn parse_timeouts(section: Option<&toml::Value>) -> Result<BTreeMap<String, Duration>> {
+    let Some(section) = section else {
+        return Ok(BTreeMap::new());
+    };
+    let table = section.as_table().ok_or_else(|| {
+        Error::Git(git2::Error::from_str(&format!(
+            "[check] in {CONFIG_FILE} must be a table of per-check settings"
+        )))
+    })?;
+
+    let mut timeouts = BTreeMap::new();
+    for (name, settings) in table {
+        let Some(value) = settings.get("timeout") else {
+            continue;
+        };
+        let text = value.as_str().ok_or_else(|| {
+            Error::Git(git2::Error::from_str(&format!(
+                "[check.{name}].timeout in {CONFIG_FILE} must be a string like \"5m\""
+            )))
+        })?;
+        let duration = parse_duration(text).map_err(|e| {
+            Error::Git(git2::Error::from_str(&format!(
+                "[check.{name}].timeout in {CONFIG_FILE}: {e}"
+            )))
+        })?;
+        timeouts.insert(name.clone(), duration);
+    }
+    Ok(timeouts)
+}
+
+/// What a bounded child did.
+struct Bounded {
+    output: std::process::Output,
+    /// True when the deadline expired and the child was killed.
+    timed_out: bool,
+}
+
+/// Run a command, killing it — and everything it started — if it outruns
+/// `timeout`.
+///
+/// Two hazards make this longer than a `wait_timeout` call would be.
+///
+/// **Grandchildren.** A check is a shell script, so `cargo test` is a child of
+/// bash, not of us. Killing bash leaves cargo running *and holding the write
+/// end of our pipes*, so a naive kill swaps a hung check for a hung parent and
+/// a leaked build. The child is therefore its own process group and the whole
+/// group is signalled. The cost is that Ctrl-C at a terminal no longer reaches
+/// a running check; the parent is expected to pass that on.
+///
+/// **Pipe buffers.** Draining stdout after waiting deadlocks the moment a check
+/// out-writes the buffer: it blocks writing, we block waiting. Reader threads
+/// stream into shared buffers instead, so whatever a check managed to say
+/// survives its own death and we never join a thread that may never finish.
+fn bounded(mut command: Command, timeout: Duration) -> Result<Bounded> {
+    use std::os::unix::process::CommandExt;
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| Error::Git(git2::Error::from_str(&format!("spawning: {e}"))))?;
+
+    let pid = child.id() as i32;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Err(e) => {
+                return Err(Error::Git(git2::Error::from_str(&format!(
+                    "waiting on child: {e}"
+                ))))
+            }
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            // SIGKILL rather than SIGTERM: a check that outran its budget has
+            // already shown it will not wind itself down politely. The negative
+            // pid addresses the group, which is the point.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            timed_out = true;
+            break child.wait().map_err(|e| {
+                Error::Git(git2::Error::from_str(&format!("reaping killed child: {e}")))
+            })?;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    // Give the readers a moment to drain what is still sitting in the pipes.
+    // They are never *waited* on: a descendant that survived the kill would
+    // hold the pipe open forever, and a lost tail is better than a lost run.
+    let settle = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < settle && (!stdout.done() || !stderr.done()) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    Ok(Bounded {
+        output: std::process::Output {
+            status,
+            stdout: stdout.take(),
+            stderr: stderr.take(),
+        },
+        timed_out,
+    })
+}
+
+/// A pipe being read on its own thread, readable before the thread finishes.
+struct Drain {
+    buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drain {
+    fn done(&self) -> bool {
+        self.finished.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn take(&self) -> Vec<u8> {
+        self.buffer.lock().map(|b| b.clone()).unwrap_or_default()
+    }
+}
+
+fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> Drain {
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(pipe.is_none()));
+    if let Some(mut pipe) = pipe {
+        let buffer = std::sync::Arc::clone(&buffer);
+        let finished = std::sync::Arc::clone(&finished);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut buffer) = buffer.lock() {
+                            buffer.extend_from_slice(&chunk[..n]);
+                        }
+                    }
+                }
+            }
+            finished.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+    Drain { buffer, finished }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,12 +619,22 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
 
     let before_prepare = treehash::compute(root)?.tree;
     for step in &config.prepare {
-        let output = shell(root, &step.cmd)?;
-        if !output.status.success() {
+        let result = shell(root, &step.cmd, step.timeout)?;
+        if result.timed_out {
+            // Prepare runs *before* the receipt tree is computed, so a step
+            // that hangs leaves the tree half-normalized. Nothing is minted.
+            return Err(Error::Git(git2::Error::from_str(&format!(
+                "prepare step \"{}\" timed out after {}ms and was killed — \
+                 no receipts minted",
+                step.name,
+                step.timeout.as_millis()
+            ))));
+        }
+        if !result.output.status.success() {
             return Err(Error::Git(git2::Error::from_str(&format!(
                 "prepare step \"{}\" failed: {}",
                 step.name,
-                String::from_utf8_lossy(&output.stderr).trim()
+                String::from_utf8_lossy(&result.output.stderr).trim()
             ))));
         }
     }
@@ -420,21 +666,36 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
             ))));
         }
         let started = Instant::now();
-        let output = Command::new(&check.path)
-            .current_dir(root)
-            .output()
-            .map_err(|e| {
-                Error::Git(git2::Error::from_str(&format!(
-                    "running check \"{}\": {e}",
-                    check.name
-                )))
-            })?;
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        let timeout = config.timeout_for(&check.name);
+        let mut command = Command::new(&check.path);
+        command.current_dir(root);
+        let result = bounded(command, timeout).map_err(|e| {
+            Error::Git(git2::Error::from_str(&format!(
+                "running check \"{}\": {e}",
+                check.name
+            )))
+        })?;
+
+        let mut text = String::from_utf8_lossy(&result.output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&result.output.stderr));
+        if result.timed_out {
+            // A timeout is a *failed check*, not a failed run: the receipt
+            // should record that this check does not finish, and the log
+            // should say why the output stops where it does.
+            text.push_str(&format!(
+                "\n[preceipts] check \"{}\" timed out after {}ms and was killed\n",
+                check.name,
+                timeout.as_millis()
+            ));
+        }
         outcomes.push(CheckOutcome {
             name: check.name.clone(),
-            ok: output.status.success(),
-            exit: output.status.code().unwrap_or(-1),
+            ok: !result.timed_out && result.output.status.success(),
+            exit: if result.timed_out {
+                -1
+            } else {
+                result.output.status.code().unwrap_or(-1)
+            },
             duration: started.elapsed(),
             output: text,
         });
@@ -482,12 +743,10 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
     })
 }
 
-fn shell(root: &Path, cmd: &str) -> Result<std::process::Output> {
-    Command::new("bash")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(root)
-        .output()
+fn shell(root: &Path, cmd: &str, timeout: Duration) -> Result<Bounded> {
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(cmd).current_dir(root);
+    bounded(command, timeout)
         .map_err(|e| Error::Git(git2::Error::from_str(&format!("running {cmd:?}: {e}"))))
 }
 
@@ -562,7 +821,7 @@ mod tests {
     use super::*;
     use crate::notes;
 
-    fn sh(dir: &Path, args: &[&str]) {
+    pub(super) fn sh(dir: &Path, args: &[&str]) {
         assert!(Command::new(args[0])
             .args(&args[1..])
             .current_dir(dir)
@@ -571,7 +830,7 @@ mod tests {
             .success());
     }
 
-    fn write_check(dir: &Path, name: &str, body: &str) {
+    pub(super) fn write_check(dir: &Path, name: &str, body: &str) {
         let path = dir.join(CHECKS_DIR).join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, body).unwrap();
@@ -582,7 +841,7 @@ mod tests {
         }
     }
 
-    fn project(config: &str) -> (tempfile::TempDir, PathBuf) {
+    pub(super) fn project(config: &str) -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().to_path_buf();
         sh(&dir, &["git", "init", "-q", "-b", "main"]);
@@ -834,5 +1093,145 @@ mod tests {
         // Sanity-check the calendar maths against a known instant.
         let (y, m, d, h, min, s) = civil_from_unix(1_700_000_000);
         assert_eq!((y, m, d, h, min, s), (2023, 11, 14, 22, 13, 20));
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::tests::{project, write_check};
+    use super::*;
+    #[test]
+    fn durations_parse_the_forms_the_engine_accepted() {
+        assert_eq!(parse_duration("90s").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("15m").unwrap(), Duration::from_secs(900));
+        assert_eq!(parse_duration("12h").unwrap(), Duration::from_secs(43_200));
+        assert_eq!(
+            parse_duration("30d").unwrap(),
+            Duration::from_secs(2_592_000)
+        );
+        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5_400));
+        assert_eq!(parse_duration(" 5m ").unwrap(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn a_duration_without_a_unit_is_refused_rather_than_guessed() {
+        // The whole point: "30" could be seconds or minutes, and a config that
+        // means one but runs the other produces a green that means nothing.
+        assert!(parse_duration("30").is_err());
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("5y").is_err());
+        assert!(parse_duration("m").is_err());
+    }
+
+    #[test]
+    fn a_check_with_no_stanza_gets_the_default() {
+        let (_t, dir) = project("[required]\nchecks = [\"green\"]\n");
+        let config = load_config(&dir).unwrap();
+        assert_eq!(config.timeout_for("green"), DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn a_check_stanza_overrides_the_default() {
+        let (_t, dir) =
+            project("[required]\nchecks = [\"slow\"]\n\n[check.slow]\ntimeout = \"45m\"\n");
+        let config = load_config(&dir).unwrap();
+        assert_eq!(config.timeout_for("slow"), Duration::from_secs(2_700));
+        assert_eq!(config.timeout_for("other"), DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn a_stanza_for_a_check_that_no_longer_exists_is_not_an_error() {
+        let (_t, dir) = project("[check.removed]\ntimeout = \"1m\"\n");
+        assert!(
+            load_config(&dir).is_ok(),
+            "a stale stanza must not block a run"
+        );
+    }
+
+    #[test]
+    fn a_bad_duration_names_the_check_it_came_from() {
+        let (_t, dir) = project("[check.slow]\ntimeout = \"soon\"\n");
+        let message = load_config(&dir).unwrap_err().to_string();
+        assert!(message.contains("check.slow"), "{message}");
+    }
+
+    /// The regression this all exists for: before timeouts, a check that never
+    /// returned hung `run` — and therefore `watch` — forever.
+    #[test]
+    fn a_hanging_check_is_killed_and_recorded_as_failed() {
+        let (_t, dir) =
+            project("[required]\nchecks = [\"hang\"]\n\n[check.hang]\ntimeout = \"3s\"\n");
+        write_check(&dir, "hang", "#!/bin/bash\necho starting\nsleep 120\n");
+
+        let started = Instant::now();
+        let report = run(&dir, None).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the run returned instead of hanging"
+        );
+
+        let outcome = &report.outcomes[0];
+        assert!(!outcome.ok, "a killed check is not a pass");
+        assert!(
+            outcome.output.contains("starting"),
+            "output written before the kill survives: {:?}",
+            outcome.output
+        );
+        assert!(
+            outcome
+                .output
+                .contains("timed out after 3000ms and was killed"),
+            "the log says why it stops: {:?}",
+            outcome.output
+        );
+
+        // And the verdict is durable — a timeout mints a red receipt rather
+        // than leaving the tree with no evidence either way.
+        let status = status(&dir, None).unwrap();
+        assert!(!status.green);
+        assert_eq!(status.rows[0].state, CheckState::Fail);
+    }
+
+    #[test]
+    fn a_fast_check_is_untouched_by_a_generous_timeout() {
+        let (_t, dir) =
+            project("[required]\nchecks = [\"green\"]\n\n[check.green]\ntimeout = \"5m\"\n");
+        write_check(&dir, "green", "#!/bin/bash\necho fine\n");
+        let report = run(&dir, None).unwrap();
+        assert!(report.outcomes[0].ok);
+        assert!(report.outcomes[0].output.contains("fine"));
+        assert!(!report.outcomes[0].output.contains("timed out"));
+    }
+
+    /// A check that writes more than a pipe buffer holds used to be the other
+    /// way to hang: the child blocks writing, we block waiting.
+    #[test]
+    fn a_check_that_floods_its_output_still_completes() {
+        let (_t, dir) = project("[required]\nchecks = [\"loud\"]\n");
+        write_check(
+            &dir,
+            "loud",
+            "#!/bin/bash\nfor i in $(seq 1 20000); do echo \"line $i padding padding padding\"; done\n",
+        );
+        let report = run(&dir, None).unwrap();
+        assert!(report.outcomes[0].ok);
+        assert!(report.outcomes[0].output.len() > 512 * 1024);
+    }
+
+    #[test]
+    fn a_hanging_prepare_step_aborts_the_run_with_nothing_minted() {
+        let (_t, dir) = project(
+            "[prepare]\ncommands = [\"stuck\"]\n\n[prepare.stuck]\ncmd = \"sleep 120\"\ntimeout = \"1s\"\n",
+        );
+        write_check(&dir, "green", "#!/bin/bash\necho fine\n");
+
+        let started = Instant::now();
+        let error = run(&dir, None).unwrap_err().to_string();
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(
+            error.contains("prepare step \"stuck\" timed out"),
+            "{error}"
+        );
+        assert!(error.contains("no receipts minted"), "{error}");
     }
 }
