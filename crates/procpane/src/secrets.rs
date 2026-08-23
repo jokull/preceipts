@@ -8,11 +8,73 @@ use anyhow::{anyhow, Result};
 use std::path::Path;
 
 /// Compute the per-repo service name used as the Keychain namespace.
+/// Keychain service name for a repository's secrets.
+///
+/// Scoped to the **project**, not the worktree. Every workspace of a project
+/// is a different directory, so keying on the working directory would mean a
+/// new worktree cannot see the secrets you already stored — you would re-enter
+/// your Stripe key per branch. Secrets belong to the repository; workspaces
+/// borrow them.
+///
+/// The prefix stays `procpane:` so existing Keychain entries keep working
+/// through the rename.
 pub fn service_name(repo_root: &Path) -> String {
-    let canon = repo_root
-        .canonicalize()
+    let root = preceipts_core::workspace::locate(repo_root)
+        .map(|workspace| workspace.project_root)
         .unwrap_or_else(|_| repo_root.to_path_buf());
+    let canon = root.canonicalize().unwrap_or(root);
     format!("procpane:{}", canon.display())
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::service_name;
+    use std::process::Command;
+
+    fn sh(dir: &std::path::Path, args: &[&str]) {
+        assert!(Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    /// The bug the workspace dimension exposes: a worktree is its own
+    /// directory, so a path-keyed secret scope would hide the project's
+    /// secrets from every branch.
+    #[test]
+    fn every_workspace_of_a_project_shares_one_secret_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        sh(&project, &["git", "init", "-q", "-b", "main"]);
+        sh(&project, &["git", "config", "user.name", "t"]);
+        sh(&project, &["git", "config", "user.email", "t@t.local"]);
+        sh(&project, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(project.join("a.txt"), "one\n").unwrap();
+        sh(&project, &["git", "add", "-A"]);
+        sh(&project, &["git", "commit", "-qm", "base"]);
+
+        let workspace = preceipts_core::workspace::create(&project, "feature", None, None).unwrap();
+
+        assert_eq!(
+            service_name(&project),
+            service_name(&workspace.path),
+            "a workspace must see the project's secrets"
+        );
+    }
+
+    /// Two unrelated projects must not share a scope.
+    #[test]
+    fn different_projects_keep_different_scopes() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_ne!(service_name(&a), service_name(&b));
+    }
 }
 
 #[cfg(target_os = "macos")]

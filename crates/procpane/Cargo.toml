@@ -41,6 +41,10 @@ dirs = "5"
 time = "0.3"
 magic-wormhole = { version = "0.8", default-features = false, features = ["transit"] }
 futures = "0.3"
+preceipts-core = { version = "0.1.0", path = "../preceipts-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3.27.0"

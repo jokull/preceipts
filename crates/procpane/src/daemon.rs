@@ -158,7 +158,7 @@ impl Daemon {
             let n = &graph.graph[*idx];
             let id = n.id();
             if let Some(h) = &n.overlay.hostname {
-                hostnames.insert(id.clone(), h.clone());
+                hostnames.insert(id.clone(), workspace_host(h, &project.root));
                 let port = proxy::allocate_port()?;
                 allocated_ports.insert(id.clone(), port);
             }
@@ -796,6 +796,32 @@ pub fn state_dir(root: &Path) -> PathBuf {
     root.join(".procpane")
 }
 
+/// Give a declared hostname its workspace dimension.
+///
+/// A manifest declares a *label* — `api`, or historically `api.trip.test`. Two
+/// worktrees of the same project would then fight over one hostname, which is
+/// the whole reason hostnames have to carry the workspace:
+///
+///   api  +  workspace "fix-checkout"  ->  api.fix-checkout.test
+///
+/// The primary working directory keeps the bare label, so a single-worktree
+/// project sees exactly what it always did.
+pub fn workspace_host(declared: &str, root: &Path) -> String {
+    // A declared name may already carry a suffix; the label is its first part.
+    let label = declared.split('.').next().unwrap_or(declared);
+    let suffix = declared
+        .split_once('.')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| "test".to_string());
+
+    match preceipts_core::workspace::locate(root) {
+        Ok(workspace) if !workspace.is_primary => {
+            format!("{label}.{}.{suffix}", workspace.id)
+        }
+        _ => format!("{label}.{suffix}"),
+    }
+}
+
 /// Returns true if the shell command runs `wrangler` as a command (not as a
 /// substring of some other word). Tokenize on whitespace and shell separators.
 fn is_wrangler_invocation(shell_cmd: &str) -> bool {
@@ -900,5 +926,72 @@ fn build_proc_status(daemon: &Daemon, id: &str, p: &Proc) -> ProcStatus {
         hostname: daemon.hostnames.get(id).cloned(),
         notes,
         in_manifest: daemon.manifest_tasks.contains(id),
+    }
+}
+
+#[cfg(test)]
+mod workspace_host_tests {
+    use super::workspace_host;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn sh(dir: &Path, args: &[&str]) {
+        assert!(Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn project(temp: &Path) -> std::path::PathBuf {
+        let dir = temp.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        sh(&dir, &["git", "init", "-q", "-b", "main"]);
+        sh(&dir, &["git", "config", "user.name", "t"]);
+        sh(&dir, &["git", "config", "user.email", "t@t.local"]);
+        sh(&dir, &["git", "config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        sh(&dir, &["git", "add", "-A"]);
+        sh(&dir, &["git", "commit", "-qm", "base"]);
+        dir
+    }
+
+    #[test]
+    fn a_single_worktree_project_keeps_the_bare_label() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = project(temp.path());
+        assert_eq!(workspace_host("api", &dir), "api.test");
+    }
+
+    /// The collision this exists to prevent: two worktrees of one project both
+    /// wanting `api.test`.
+    #[test]
+    fn a_workspace_takes_its_own_hostname() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = project(temp.path());
+        let a = preceipts_core::workspace::create(&dir, "fix-checkout", None, None).unwrap();
+        let b = preceipts_core::workspace::create(&dir, "other-thing", None, None).unwrap();
+
+        assert_eq!(workspace_host("api", &a.path), "api.fix-checkout.test");
+        assert_eq!(workspace_host("api", &b.path), "api.other-thing.test");
+        assert_ne!(
+            workspace_host("api", &a.path),
+            workspace_host("api", &b.path)
+        );
+    }
+
+    /// A manifest written before workspaces existed says `api.trip.test`. The
+    /// label is its first part; the rest is kept as the suffix.
+    #[test]
+    fn a_legacy_fully_qualified_name_still_works() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = project(temp.path());
+        let ws = preceipts_core::workspace::create(&dir, "feature", None, None).unwrap();
+        assert_eq!(workspace_host("api.trip.test", &dir), "api.trip.test");
+        assert_eq!(
+            workspace_host("api.trip.test", &ws.path),
+            "api.feature.trip.test"
+        );
     }
 }
