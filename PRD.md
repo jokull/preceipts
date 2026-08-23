@@ -398,3 +398,77 @@ user/agent action — `hud` reports staleness, it doesn't network.
     reaches parity, then removed. An intermediate "Swift shell over a
     Rust-core C FFI" design was considered the same day and dropped
     before any code shipped. Rationale in docs/desktop-app-design.md.
+12. **Product pivot: the AI-coding workbench; Rust + GPUI; procpane
+    absorbed** (2026-08-22, user decision). preceipts becomes the
+    workbench *around* AI coding and explicitly never hosts it — no
+    terminal pane, no agent harness; the user drives their own agent.
+    **Adoption, not creation, is the primitive:** any worktree of a
+    registered project is adopted as a workspace whether it came from
+    the CLI (`preceipts new`, the default path — no handoff needed
+    because the user is already in a terminal), the app (creates, then
+    hands off to the user's terminal and stops caring), or an agent
+    running `git worktree add` on its own (detected via FSEvents on
+    `.git/worktrees/`). **No capability may depend on a specific harness
+    or model vendor**: the full loop runs on observation alone —
+    worktree detection, file-write activity, quiet debounce, git, and
+    checks in the live env — for harnesses that have never heard of
+    preceipts. The CLI verbs (`adopt`, `intent`, `check`, `release`) are
+    a public interface anything may call to trade a heuristic for an
+    exact signal; harness-specific lifecycle adapters are contributed,
+    not designed in. Branch naming is a local slug by default; any model
+    call is optional, non-blocking, vendor-neutral, and never shipped
+    with a key. **Sandbox rails are pluggable, never written here:** the
+    URL fabric treats a service as "an address plus a healthcheck," so
+    the runtime is per-project — `native` (default, no VM, isolation by
+    port/hostname/DB namespacing), `confined` (Seatbelt profile derived
+    from the worktree plus egress allowlist enforced by our own proxy,
+    kept behind a trait because `sandbox-exec` is deprecated with no
+    replacement), or `container` (delegated to Apple `container` first —
+    Apache 2.0, per-container VM, own IP on macOS 26 — then OrbStack and
+    Docker/Lima through the same adapter). We do not build a VMM.
+    Projects author their environment in one `preceipts.toml` with
+    progressive disclosure — zero config by detection, up to trip's
+    kitchen sink. The schema owns what the app and receipts must
+    understand: services, health, per-service runtime, env **policy**
+    (masked dotenvs, Keychain by reference, test-key assertions that
+    fail the boot), captured env from service output, a composite
+    readiness gate, provider mocks, **drains** (email outbox, analytics
+    ledger, local error sink, HTTP transcript), a **fidelity** map
+    (`local-real | local-simulated | mocked | disabled |
+    remote-required`, adopted from trip), seed bundles and radii, and
+    checks. Everything domain-specific is a declared `[actions.*]` verb,
+    surfaced automatically as a CLI command, an MCP tool, and a panel
+    button. **Receipts record the fidelity map of the environment they
+    were minted in** — tree hash plus fidelity is the honest proof.
+    Benchmark: trip's sandbox must be expressible as one
+    `preceipts.toml` plus fixtures, with Docker optional.
+    Scope: tab per project, worktree workspaces carrying a genesis
+    prompt, per-workspace dev environments with subdomain URLs, a fast
+    diff and tree browser, and receipts as pre-CI signal fired
+    automatically when the worktree goes quiet. The PR conversation
+    surface (~3.5k LOC) is deleted. Decision 11 is reversed: the UI
+    returns to GPUI/gpui-component and the system unifies on Rust — one
+    cargo workspace, `preceipts-core` in-process for git/diff/highlight/
+    watch, `preceiptsd` for processes, healthchecks, TLS proxy, secrets,
+    and check runs, `preceipts` CLI on the same socket. The TS/Bun
+    engine is retired: receipt reads move into core, writes into the
+    daemon. procpane's `Workspace` is renamed `Project`; every keyed
+    resource gains a workspace dimension. Algorithms port forward from
+    `PreceiptsKit` (27 XCTests as the conformance suite), not backward
+    from the deleted Rust core. The workspace is a **laboratory**: every
+    instrument the UI shows (logs, health, URLs, HTTP transcript, diff,
+    receipts, process control) is equally available to agents through
+    the CLI and an MCP server (open protocol, no vendor assumed), and
+    a worktree self-identifies via
+    `PRECEIPTS_WORKSPACE` so any harness started inside it locates the
+    lab with no configuration. macOS integration is first-class:
+    data-protection Keychain with a shared access group across signed
+    app and daemon (retiring procpane's open-ACL workaround),
+    `SMAppService` LaunchAgent, `/etc/resolver/test` + an in-daemon DNS
+    responder replacing `/etc/hosts` (which cannot express per-workspace
+    subdomains), per-workspace leaf certs, Touch ID for secret reveal,
+    notarized bundle. Accepted cost: GPUI draws its own widgets, so
+    native feel — text selection, IME, VoiceOver, scroll physics — is
+    built and budgeted rather than inherited from AppKit.
+    Full design, and the sequencing it was built to,
+    in docs/direction-2026-08.md.
