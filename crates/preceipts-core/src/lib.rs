@@ -40,6 +40,7 @@ pub mod receipt;
 pub mod segments;
 pub mod surface;
 pub mod treehash;
+pub mod watch;
 pub mod workspace;
 
 #[cfg(test)]
@@ -62,4 +63,5 @@ pub use ports::{Block, Reservations};
 pub use receipt::{Receipt, Runner};
 pub use segments::{line_segments, HighlightSpan, Segment};
 pub use surface::{Side, Surface, SurfaceRow};
+pub use watch::watch;
 pub use workspace::Workspace;

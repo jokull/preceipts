@@ -113,6 +113,14 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the checks whenever the worktree goes quiet.
+    Watch {
+        /// Seconds the tree must hold still before checks fire.
+        #[arg(long, default_value = "2")]
+        quiet: u64,
+        /// Only these checks.
+        checks: Vec<String>,
+    },
     /// Serve the lab's instruments over MCP on stdio.
     Mcp,
     /// Scaffold .preceipts/ in a repository that has none.
@@ -172,6 +180,7 @@ fn run() -> Result<()> {
         ),
         Command::Log { json } => log(&path, json),
         Command::Doctor { json } => doctor(&path, json),
+        Command::Watch { quiet, checks } => watch(&path, quiet, checks),
         Command::Mcp => mcp::serve(&path),
         Command::Init => init(&path),
         Command::Remove { id } => remove(&path, id),
@@ -485,6 +494,49 @@ fn log(path: &Path, json: bool) -> Result<()> {
             &receipt.tree[..12]
         );
     }
+    Ok(())
+}
+
+/// The north-star loop: the agent stops typing, checks fire in the already-warm
+/// workspace, the answer arrives without a push or a queue.
+fn watch(path: &Path, quiet: u64, only: Vec<String>) -> Result<()> {
+    use preceipts_core::watch::{self, Event};
+    use std::time::Duration;
+
+    let only = (!only.is_empty()).then_some(only);
+    let watched = watch::watched_paths(path).len();
+    eprintln!(
+        "watching {watched} files in {} — checks fire after {quiet}s of quiet",
+        path.display()
+    );
+
+    watch::watch(path, Duration::from_secs(quiet), |event| {
+        match event {
+            Event::Busy => eprintln!("…"),
+            Event::Quiet => {
+                match checks::run(path, only.as_deref()) {
+                    Ok(report) => {
+                        let failed: Vec<&str> = report
+                            .outcomes
+                            .iter()
+                            .filter(|o| !o.ok)
+                            .map(|o| o.name.as_str())
+                            .collect();
+                        if failed.is_empty() {
+                            println!("✓ green — tree {}", &report.tree[..12]);
+                        } else {
+                            println!("✗ {} — tree {}", failed.join(", "), &report.tree[..12]);
+                        }
+                    }
+                    // A failed run must not end the watch: the usual cause is
+                    // a half-saved file, and the next quiet period fixes it.
+                    Err(error) => eprintln!("run failed: {error}"),
+                }
+            }
+        }
+        true
+    })
+    .context("watching")?;
     Ok(())
 }
 
