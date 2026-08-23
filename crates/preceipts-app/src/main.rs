@@ -65,6 +65,9 @@ fn main() {
     }
 
     Application::new().run(move |cx| {
+        // Keystrokes reach the surface by context name, so the bindings have
+        // to exist before the window that dispatches them.
+        surface_view::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
         cx.open_window(
             WindowOptions {

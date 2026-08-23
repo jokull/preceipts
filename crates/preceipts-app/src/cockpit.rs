@@ -41,7 +41,7 @@ impl Cockpit {
         let code_font = crate::theme::code_font(cx);
         let surface = {
             let code_font = code_font.clone();
-            cx.new(|_| SurfaceView::new(changeset, code_font))
+            cx.new(|cx| SurfaceView::new(changeset, code_font, cx))
         };
         Self {
             workspaces,

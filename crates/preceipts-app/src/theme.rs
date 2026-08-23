@@ -19,6 +19,10 @@ pub struct Theme {
     pub added_emphasis: Hsla,
     pub removed_emphasis: Hsla,
     pub header_bg: Hsla,
+    /// Behind selected text. Replaces a row's added/removed tint rather than
+    /// blending with it — two translucent layers over syntax colours is how a
+    /// selection stops being legible.
+    pub selection: Hsla,
     /// For a check that has not run. Deliberately not red: an unrecorded
     /// check and a failing one are different facts, and this project's whole
     /// claim is that a receipt means something.
@@ -40,6 +44,7 @@ impl Default for Theme {
             removed_emphasis: rgb(0x6e2229).into(),
             header_bg: rgb(0x2a2a2e).into(),
             pending: rgb(0x3f3f46).into(),
+            selection: rgb(0x2f4f7f).into(),
         }
     }
 }
