@@ -853,7 +853,10 @@ you arrange beside an agent is a project.*
   live state — where the worktree is, what is already running and on what
   address, and which verbs will tell the agent more.
 - Foot: **the HUD** — base, file count, line count, receipt verdict.
-- ⌘K palette; ⌘F find; no vim keys. *(Not built.)*
+- ⌘K palette; ⌘F find; the tree browser the original section put in a dock.
+  *(None built. The tree browser is not cut — the jump list answers "where am
+  I" and the tree answers "what else is there", which is a different question
+  and still unanswered.)*
 
 ## Decision 12, as drafted
 

@@ -59,3 +59,22 @@ health.log = "counter open"
 # is up" and "you may now order a hot dog" are different sentences.
 [ready]
 requires = ["api", "web"]
+
+# The cold store, for tomorrow's sausages.
+#
+# Commented out because this example promises to run with nothing installed,
+# and this one line breaks that promise: `image` implies `runtime =
+# "container"`, which delegates to whatever is on PATH — Apple `container`,
+# OrbStack, Docker, colima. Uncomment it if you have one.
+#
+# Verified working against OrbStack (Docker 29.4.0) on 2026-08-23: the daemon
+# publishes 6379 on the allocated port, probes it, and reports `icebox`
+# alongside the node services with the same shape of address. That is the
+# claim the runtime tier rests on — a service is a thing with an address and a
+# healthcheck, and the workspace, the URLs, the instruments and the receipts
+# are identical whether a process or a microVM is behind it.
+#
+# [services.icebox]
+# image = "redis:7-alpine"
+# host = "icebox"
+# health.tcp = 6379

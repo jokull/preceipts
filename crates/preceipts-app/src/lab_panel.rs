@@ -59,6 +59,9 @@ pub struct LabPanel {
     exchanges: Vec<Exchange>,
     /// The log is a tail, so it lives at the bottom.
     log_scroll: ScrollHandle,
+    /// Resolved once. A `render` has no business asking the text system
+    /// anything — see the note on `theme::code_font`.
+    font: SharedString,
     copied: bool,
 }
 
@@ -80,6 +83,7 @@ impl LabPanel {
             instrument: Instrument::Output,
             exchanges: Vec::new(),
             log_scroll: ScrollHandle::new(),
+            font: crate::theme::code_font(cx),
             copied: false,
         };
         this.poll(cx);
@@ -385,7 +389,7 @@ impl LabPanel {
 
     /// The lower half: one instrument at a time, with its own switch.
     fn render_instrument(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let font = crate::theme::code_font(cx);
+        let font = self.font.clone();
         let showing = self.instrument;
 
         let tab = |label: &'static str, which: Instrument, cx: &mut Context<Self>| {
@@ -506,12 +510,15 @@ impl LabPanel {
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
                                 // Says why it is empty rather than just being
-                                // empty: nothing has been served *through the
-                                // proxy*, which is a different fact from
-                                // nothing having been served.
+                                // empty — and names the usual reason, which is
+                                // not "nothing was served". Without the CA
+                                // there is no proxy at all, the addresses above
+                                // are direct ports, and traffic to them can
+                                // never appear here however much of it there is.
                                 .child(
-                                    "Nothing has gone through the proxy yet. \
-                                     Open one of the URLs above.",
+                                    "Empty until the proxy is in the path. \
+                                     `preceipts trust install`, then \
+                                     `preceipts down && preceipts up`.",
                                 ),
                         )
                     })
@@ -609,6 +616,18 @@ impl Render for LabPanel {
                             cx.write_to_clipboard(ClipboardItem::new_string(this.brief()));
                             this.copied = true;
                             cx.notify();
+                            // A confirmation, not a state. Left standing it
+                            // becomes the button's name, and the next person
+                            // to want the brief cannot tell whether pressing
+                            // it did anything.
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor().timer(Duration::from_secs(3)).await;
+                                let _ = this.update(cx, |this, cx| {
+                                    this.copied = false;
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         })),
                 ),
             )

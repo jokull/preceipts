@@ -93,11 +93,25 @@ pub fn code_font(cx: &gpui::App) -> gpui::SharedString {
         "Menlo",
         "Monaco",
     ];
-    let available = cx.text_system().all_font_names();
-    for name in PREFERRED {
-        if available.iter().any(|found| found == name) {
-            return name.into();
-        }
-    }
-    "monospace".into()
+
+    // Cached, and the caching is not an optimization — it is the difference
+    // between a window that draws and one that does not.
+    //
+    // `all_font_names()` enumerates every font installed on the machine.
+    // Measured on this one: **317–344ms per call**. Called from a `render`, as
+    // the lab panel's log pane did, that is three frames a second — which is
+    // exactly what "the GUI is super slow" looks like from the outside. The
+    // answer cannot change while the process runs, so ask once.
+    static CHOSEN: std::sync::OnceLock<gpui::SharedString> = std::sync::OnceLock::new();
+    CHOSEN
+        .get_or_init(|| {
+            let available = cx.text_system().all_font_names();
+            for name in PREFERRED {
+                if available.iter().any(|found| found == name) {
+                    return name.into();
+                }
+            }
+            "monospace".into()
+        })
+        .clone()
 }
