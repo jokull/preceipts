@@ -154,7 +154,7 @@ mod mac {
     //! Which ACL gets written depends on how this build is signed —
     //! `signing::KeychainStrategy` decides, per binary, at runtime.
     use super::*;
-    use security_framework::os::macos::keychain::SecKeychain;
+    use security_framework::os::macos::keychain::{KeychainUserInteractionLock, SecKeychain};
     use security_framework::os::macos::passwords::find_generic_password;
     use security_framework::passwords::set_generic_password;
     use std::collections::BTreeSet;
@@ -289,6 +289,23 @@ mod mac {
         accts.sort();
         accts.dedup();
         Ok(accts)
+    }
+
+    /// Refuse to put a dialog on screen for the rest of this process.
+    ///
+    /// For the daemon, which reads secrets while launching tasks with nobody
+    /// watching. A keychain read the ACL does not allow otherwise raises a GUI
+    /// authorization dialog, and a background process waiting on one is a
+    /// `preceipts up` that hangs with no visible cause. Suppressed, the same
+    /// read fails immediately and the error reaches the log, where a person
+    /// can act on it.
+    ///
+    /// The returned guard restores prompting when dropped, so it is held for
+    /// the process's life by binding it in `daemon_inner`. `None` if the
+    /// system refuses, which is not worth failing startup over — the
+    /// hang it prevents is a bad outcome, not a corrupt one.
+    pub fn hush_prompts() -> Option<KeychainUserInteractionLock> {
+        SecKeychain::disable_user_interaction().ok()
     }
 
     /// `errSecItemNotFound` — an absent secret, not a failure.
@@ -472,5 +489,9 @@ mod unsupported {
     }
     pub fn list_accounts(_service: &str, _keychain: Option<&str>) -> Result<Vec<String>> {
         Err(err())
+    }
+    /// Nothing prompts here, because nothing stores anything here.
+    pub fn hush_prompts() -> Option<()> {
+        None
     }
 }

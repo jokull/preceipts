@@ -258,6 +258,11 @@ fn render_up_table(procs: &[proto::ProcStatus], hidden_count: usize) -> String {
 }
 
 pub fn daemon_inner(root: PathBuf, tasks: Vec<String>, no_prebuild: bool) -> Result<()> {
+    // Nobody is watching a daemon. Held for the whole process, so a keychain
+    // read that the ACL refuses fails loudly in the log instead of stalling
+    // task launch behind a dialog on someone else's screen.
+    let _no_prompts = secrets::hush_prompts();
+
     let state_dir = daemon::state_dir(&root);
     std::fs::create_dir_all(&state_dir)?;
     let lock_path = state_dir.join("lock");

@@ -134,19 +134,40 @@ pub fn bundled() -> Option<std::path::PathBuf> {
 /// Only paths that exist are returned: naming an absent one makes `security`
 /// fail the whole write, which would turn a partial install into no secrets
 /// at all.
+///
+/// The installed `.app` is searched too, because siblings is not the only
+/// shape this ships in. A `preceipts` copied onto `PATH` by itself would
+/// otherwise write items trusting nothing but that one binary, and the daemon
+/// inside the bundle — the process that actually reads secrets when tasks
+/// launch — would be locked out of them.
 pub fn trusted_binaries() -> Vec<std::path::PathBuf> {
     const SIBLINGS: [&str; 3] = ["preceipts", "preceiptsd", "preceipts-app"];
-    let Ok(exe) = std::env::current_exe() else {
-        return Vec::new();
-    };
-    let Some(dir) = exe.parent() else {
-        return Vec::new();
-    };
-    SIBLINGS
-        .iter()
-        .map(|name| dir.join(name))
-        .filter(|path| path.is_file())
-        .collect()
+    const INSTALLED: &str = "/Applications/Preceipts.app/Contents/MacOS";
+
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|exe| {
+        let parent = exe.parent()?;
+        Some(parent.to_path_buf())
+    }) {
+        dirs.push(dir);
+    }
+    let installed = std::path::PathBuf::from(INSTALLED);
+    if !dirs.contains(&installed) {
+        dirs.push(installed);
+    }
+
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    for dir in dirs {
+        for name in SIBLINGS {
+            let path = dir.join(name);
+            // Two directories can hold the same name — the running copy wins,
+            // and a duplicate `-T` is a second ACL entry for one application.
+            if path.is_file() && !found.iter().any(|seen| seen.ends_with(name)) {
+                found.push(path);
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -206,6 +227,22 @@ mod tests {
         for path in trusted_binaries() {
             assert!(path.is_file(), "{} does not exist", path.display());
         }
+    }
+
+    /// Searching two directories means the same name can be found twice —
+    /// a dev build beside an installed one. Each application belongs in the
+    /// ACL once, and the copy that is running is the one that counts.
+    #[test]
+    fn no_binary_is_offered_to_the_acl_twice() {
+        let found = trusted_binaries();
+        let mut names: Vec<_> = found
+            .iter()
+            .filter_map(|path| path.file_name())
+            .collect();
+        names.sort();
+        let count = names.len();
+        names.dedup();
+        assert_eq!(count, names.len(), "duplicate binary in {found:?}");
     }
 
     /// An unsigned build must say what it is doing instead. The compromise is

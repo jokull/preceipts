@@ -1164,6 +1164,29 @@ What steps 9–13 leave for the next pass, in the order they block things:
     - An unsigned `cargo build` still takes the `-A` branch and still works,
       so the dev loop is intact. It says so in `trust status`.
 
+    Two consequences of having a real ACL, both handled. A daemon must never
+    put a dialog on screen: `daemon_inner` holds
+    `SecKeychain::disable_user_interaction` for the process's life, so a read
+    the ACL refuses fails into the log instead of stalling task launch behind
+    a prompt nobody is sitting in front of. And the ACL is written from
+    whichever binaries are found, so `trusted_binaries` looks in the installed
+    `.app` as well as beside the running executable — a `preceipts` copied
+    onto `PATH` alone would otherwise write items that the bundled daemon,
+    the process that actually reads them, could not open.
+
+    **One measurement is still owed, and it needs the machine's owner.** All
+    of the above was measured in a throwaway keychain. The login keychain
+    additionally enforces a *partition list*, which is set from the creating
+    application — and these items are created by `/usr/bin/security`. If that
+    turns out to shut our own signed binaries out of items whose ACL names
+    them, the write has to move in-process to `SecItemAdd` with an ACL built
+    by `SecAccessCreate`, which is raw FFI: the `security-framework` crate
+    exposes no ACL construction at all. The probe that would have answered it
+    locked the login keychain (`set-generic-password-partition-list` with an
+    empty `-k` fails the unlock), and unlocking needs a password this process
+    does not have. Until it is answered, do not migrate a real project's
+    secrets with a signed build.
+
     What is still not done, now stated as what it is rather than as a
     certificate problem: **`SMAppService` registration is not implemented.**
     A signed bundle is *eligible* — `can_register_daemon` answers "would this
