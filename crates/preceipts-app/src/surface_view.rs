@@ -17,9 +17,8 @@ use gpui::prelude::*;
 use gpui::{
     actions, canvas, div, font, px, uniform_list, App, Bounds, ClipboardItem, Context, Entity,
     FocusHandle, FontWeight, Hsla, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    SharedString, StyledText, TextRun, UniformListScrollHandle, Window,
+    ScrollStrategy, SharedString, StyledText, TextRun, UniformListScrollHandle, Window,
 };
-use gpui_component::scroll::Scrollbar;
 use preceipts_core::model::RowKind;
 use preceipts_core::segments::line_segments;
 use preceipts_core::{Changeset, Surface, SurfaceRow};
@@ -61,6 +60,15 @@ struct DisplayLine {
     background: Option<Hsla>,
 }
 
+/// One row of the file list: enough to render it without handing out the
+/// changeset.
+pub struct FileEntry {
+    pub path: SharedString,
+    pub status: SharedString,
+    pub added: usize,
+    pub removed: usize,
+}
+
 pub struct SurfaceView {
     changeset: Changeset,
     surface: Surface,
@@ -81,6 +89,9 @@ pub struct SurfaceView {
     anchor: Option<Cursor>,
     head: Option<Cursor>,
     selecting: bool,
+    /// Dragging the scrollbar. Distinct from `selecting` so a scrub never
+    /// leaves a stray text selection behind it.
+    scrubbing: bool,
 }
 
 impl SurfaceView {
@@ -98,11 +109,41 @@ impl SurfaceView {
             anchor: None,
             head: None,
             selecting: false,
+            scrubbing: false,
         }
     }
 
     pub fn row_count(&self) -> usize {
         self.surface.rows.len()
+    }
+
+    /// Every changed file, in surface order.
+    pub fn file_entries(&self) -> Vec<FileEntry> {
+        self.changeset
+            .files
+            .iter()
+            .map(|file| FileEntry {
+                path: SharedString::from(file.path.clone()),
+                status: SharedString::from(file.status.code().to_string()),
+                added: file.added,
+                removed: file.removed,
+            })
+            .collect()
+    }
+
+    /// The file the top of the viewport is inside — which file you are in,
+    /// for a list that wants to say so.
+    pub fn current_file(&self) -> Option<usize> {
+        self.file_of(self.first_visible)
+    }
+
+    /// Scroll so `file` starts at the top. `Surface` already records where
+    /// each file's header landed, so this is a lookup rather than a search.
+    pub fn jump_to_file(&mut self, file: usize, cx: &mut Context<Self>) {
+        if let Some(&row) = self.surface.file_anchors.get(file) {
+            self.scroll.scroll_to_item(row, ScrollStrategy::Top);
+            cx.notify();
+        }
     }
 
     /// The selection as an ordered pair, or `None` when it is empty. Dragging
@@ -287,6 +328,85 @@ impl SurfaceView {
                 SurfaceRow::Line { file, .. } => Some(*file),
                 SurfaceRow::Gap { .. } => None,
             })
+    }
+
+    /// A scrollbar, drawn here rather than taken from gpui-component.
+    ///
+    /// Its `Scrollbar` binds to `UniformListScrollHandle` and ought to have
+    /// been a one-liner, but it renders nothing in this window — proven by
+    /// putting a plain coloured bar at the same coordinates, which paints
+    /// fine. Rather than debug someone else's element from the outside, this
+    /// draws the two rectangles it needs, and it can be honest in a way the
+    /// generic one cannot: the position comes from the first row the list
+    /// actually built, so the thumb tracks rows rather than a pixel offset a
+    /// virtualized list never exposes.
+    fn render_scrollbar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        const WIDTH: f32 = 11.0;
+        const MIN_THUMB: f32 = 28.0;
+
+        let rows = self.row_count().max(1) as f32;
+        let track = f32::from(self.bounds.size.height).max(1.0);
+        let visible = (track / ROW_HEIGHT).min(rows);
+        // Nothing to scroll, nothing to say. A bar that always reads "all of
+        // it" is furniture.
+        if visible >= rows {
+            return div().into_any_element();
+        }
+
+        let thumb = (visible / rows * track).max(MIN_THUMB).min(track);
+        let progress = (self.first_visible as f32 / (rows - visible)).clamp(0.0, 1.0);
+        let top = progress * (track - thumb);
+
+        // Clicking or dragging anywhere on the track goes there. The row is
+        // the unit, so it lands on a row boundary rather than mid-line.
+        fn scrub(this: &mut SurfaceView, y: Pixels, cx: &mut Context<SurfaceView>) {
+            let track = f32::from(this.bounds.size.height).max(1.0);
+            let rows = this.row_count().max(1) as f32;
+            let visible = (track / ROW_HEIGHT).min(rows);
+            if visible >= rows {
+                return;
+            }
+            let thumb = (visible / rows * track).max(MIN_THUMB).min(track);
+            let local = f32::from(y - this.bounds.origin.y).clamp(0.0, track);
+            let usable = (track - thumb).max(1.0);
+            let progress = ((local - thumb / 2.0) / usable).clamp(0.0, 1.0);
+            let row = (progress * (rows - visible)).round() as usize;
+            this.scroll.scroll_to_item(row, ScrollStrategy::Top);
+            cx.notify();
+        }
+
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .w(px(WIDTH))
+            .h_full()
+            .bg(self.theme.surface)
+            .border_l_1()
+            .border_color(self.theme.border)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.scrubbing = true;
+                    scrub(this, event.position.y, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
+                if this.scrubbing {
+                    scrub(this, event.position.y, cx);
+                }
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(2.0))
+                    .right(px(2.0))
+                    .top(px(top))
+                    .h(px(thumb))
+                    .rounded_full()
+                    .bg(self.theme.gutter),
+            )
+            .into_any_element()
     }
 
     fn render_row(&self, index: usize, handle: &Entity<Self>) -> gpui::AnyElement {
@@ -526,6 +646,7 @@ impl Render for SurfaceView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.selecting = false;
+                    this.scrubbing = false;
                     cx.notify();
                 }),
             )
@@ -533,6 +654,7 @@ impl Render for SurfaceView {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.selecting = false;
+                    this.scrubbing = false;
                     cx.notify();
                 }),
             )
@@ -549,7 +671,12 @@ impl Render for SurfaceView {
             .child(
                 uniform_list("diff-surface", count, move |range, _window, cx| {
                     let start = range.start;
-                    view.update(cx, |this, _| this.first_visible = start);
+                    view.update(cx, |this, cx| {
+                        if this.first_visible != start {
+                            this.first_visible = start;
+                            cx.notify();
+                        }
+                    });
                     let handle = view.clone();
                     let surface = view.read(cx);
                     range
@@ -572,11 +699,8 @@ impl Render for SurfaceView {
         }
 
         // Last child, so the thumb sits above the sticky header and stays
-        // grabbable where the two meet. `uniform_list` keeps its own scroll
-        // offset private, but gpui-component implements `ScrollbarHandle` for
-        // exactly this handle — so the bar reads a real position and, because
-        // the trait can also set it, dragging the thumb scrolls the list.
-        root.child(Scrollbar::vertical(&self.scroll))
+        // grabbable where the two meet.
+        root.child(self.render_scrollbar(cx))
     }
 }
 

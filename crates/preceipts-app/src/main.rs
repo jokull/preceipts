@@ -138,4 +138,13 @@ fn paint_shell_to_match_the_surface(cx: &mut gpui::App) {
     theme.success_foreground = ours.text;
     theme.danger = ours.removed_emphasis;
     theme.danger_foreground = ours.text;
+
+    // The scrollbar's own colours fall back to the theme's background, and we
+    // have just moved the background out from under them — leaving a thumb
+    // painted in the colour of the thing behind it. Stated outright: the track
+    // sinks into the page, the thumb is the gutter grey, and hovering lifts it
+    // to the colour of dimmed text.
+    theme.scrollbar = ours.background;
+    theme.scrollbar_thumb = ours.gutter;
+    theme.scrollbar_thumb_hover = ours.text_dim;
 }

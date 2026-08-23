@@ -66,6 +66,10 @@ impl Cockpit {
         );
         let code_font = crate::theme::code_font(cx);
         let surface = cx.new(|cx| SurfaceView::new(changeset, code_font, cx));
+        // The file list marks the file you are currently inside, so this view
+        // has to repaint when the surface scrolls. Child entities do not
+        // notify their parent on their own.
+        cx.observe(&surface, |_, _, cx| cx.notify()).detach();
         Self {
             workspaces,
             current,
@@ -86,7 +90,7 @@ impl Cockpit {
         )
     }
 
-    fn render_sidebar(&self) -> impl IntoElement {
+    fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let count = self.workspaces.len();
         let items = self.workspaces.iter().map(|workspace| {
             let branch = workspace
@@ -111,6 +115,50 @@ impl Cockpit {
             item
         });
 
+        // The file list. A 202-file changeset scrolled as one stream is a
+        // stream you get lost in: this says which file you are inside, and
+        // jumps to any other. The sidebar was mostly empty space before, which
+        // is a poor trade for 240 pixels.
+        let surface = self.surface.read(cx);
+        let current = surface.current_file();
+        let files: Vec<_> = surface
+            .file_entries()
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let handle = self.surface.clone();
+                // The tail of a path is what identifies it in a narrow column;
+                // the full path rides in the tooltip-free title attribute of
+                // the row's own text instead of wrapping.
+                let name = entry
+                    .path
+                    .rsplit_once('/')
+                    .map(|(_, name)| name.to_string())
+                    .unwrap_or_else(|| entry.path.to_string());
+                SidebarMenuItem::new(SharedString::from(name))
+                    .active(current == Some(index))
+                    .suffix(
+                        h_flex()
+                            .gap_1()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .text_color(cx.theme().success)
+                                    .child(SharedString::from(format!("+{}", entry.added))),
+                            )
+                            .child(
+                                div()
+                                    .text_color(cx.theme().danger)
+                                    .child(SharedString::from(format!("−{}", entry.removed))),
+                            ),
+                    )
+                    .on_click(move |_, _window, cx| {
+                        handle.update(cx, |surface, cx| surface.jump_to_file(index, cx));
+                    })
+            })
+            .collect();
+        let file_count = files.len();
+
         Sidebar::left()
             // The panel owns the width now; the sidebar's own fixed width and
             // right border would fight the resize handle for it.
@@ -125,6 +173,10 @@ impl Cockpit {
                     if count == 1 { "" } else { "s" }
                 )))
                 .child(SidebarMenu::new().children(items)),
+            )
+            .child(
+                SidebarGroup::new(SharedString::from(format!("{file_count} files")))
+                    .child(SidebarMenu::new().children(files)),
             )
     }
 
@@ -208,7 +260,7 @@ impl Render for Cockpit {
                             resizable_panel()
                                 .size(px(240.0))
                                 .size_range(px(180.0)..px(420.0))
-                                .child(self.render_sidebar()),
+                                .child(self.render_sidebar(cx)),
                         )
                         .child(resizable_panel().child(self.surface.clone())),
                 ),
