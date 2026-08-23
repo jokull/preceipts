@@ -1,5 +1,13 @@
 //! Keychain-backed secret storage. One service namespace per project.
 //!
+//! **Which mechanism is in use depends on how this build is signed**, and
+//! `signing::KeychainStrategy` is where that is decided. A build with a Team
+//! Identifier can use a shared access group: real ACLs, one item the app and
+//! the daemon both read, no prompts. Without one there is no group to share —
+//! the entitlement is prefixed by the team — so an unsigned build falls back
+//! to the open-ACL workaround below and `preceipts trust status` says so out
+//! loud rather than leaving it to be discovered.
+//!
 //! Each (service, account) pair maps to (`preceipts:<canonical-project-path>`,
 //! KEY) and stores the UTF-8 secret value. macOS-only for now; Linux returns
 //! "unsupported" until libsecret integration lands.
@@ -128,18 +136,26 @@ pub use unsupported::*;
 
 #[cfg(target_os = "macos")]
 mod mac {
-    //! All keychain operations route through `/usr/bin/security` instead of
-    //! the security-framework Rust crate.
+    //! Writes go out through `/usr/bin/security`; reads happen in-process.
     //!
-    //! Why: the Keychain ACL is evaluated against the *calling binary's*
-    //! codesign identity. `cargo install` rewrites the binary constantly during
-    //! development; each rebuild is a new identity, and every read prompts.
-    //! `/usr/bin/security` is a stable system binary that never moves — once
-    //! the user clicks "Always Allow" for it (once, ever), every future
-    //! build can read transparently.
+    //! The split is the whole design, because a keychain ACL is evaluated
+    //! against the *calling* binary. Shelling out to read would put
+    //! `/usr/bin/security` — a binary every process on the machine can run —
+    //! on the wrong side of that check, and any ACL we wrote would be
+    //! decoration. Reading through `SecKeychainFindGenericPassword` in this
+    //! process is what makes "only our code may read this" a claim the
+    //! system enforces rather than one we make.
     //!
-    //! The security-framework fallback is kept only for diagnostic warnings.
+    //! Writing is different: `-T` tells `security` which applications to
+    //! trust, and that is independent of who does the writing. The CLI is
+    //! kept there because it is the only ACL-setting interface that needs no
+    //! raw Security.framework FFI.
+    //!
+    //! Which ACL gets written depends on how this build is signed —
+    //! `signing::KeychainStrategy` decides, per binary, at runtime.
     use super::*;
+    use security_framework::os::macos::keychain::SecKeychain;
+    use security_framework::os::macos::passwords::find_generic_password;
     use security_framework::passwords::set_generic_password;
     use std::collections::BTreeSet;
     use std::process::{Command, Stdio};
@@ -166,26 +182,25 @@ mod mac {
         if account == INDEX_ACCOUNT {
             return Err(anyhow!("reserved key name"));
         }
-        set_with_open_acl(service, account, value, keychain)?;
+        write_item(service, account, value, keychain)?;
         index_add(service, account, keychain)
     }
 
-    /// Write a generic password with an "any-app-may-read" ACL.
+    /// Write a generic password with the strongest ACL this build can back.
     ///
-    /// The default `SecItemAdd` ACL ties an item to the codesign hash of the
-    /// app that wrote it. `cargo install` rewrites `procpane` constantly during
-    /// development, so every rebuild looks like "a new app" to the keychain
-    /// and re-prompts the user for permission on every read — extremely
-    /// annoying in practice.
+    /// Signed with a Team Identifier, that is a list of trusted applications —
+    /// our own binaries, named by the designated requirement `security` reads
+    /// off each path. Only they can read the item, and since the requirement
+    /// is an identifier plus a team anchor rather than a hash of the bytes, a
+    /// rebuild is still the same application and the grant holds.
     ///
-    /// Shelling out to `/usr/bin/security add-generic-password -A` writes the
-    /// item with an empty trusted-app list, which the keychain interprets as
-    /// "no auth required for any app". `-U` makes it idempotent (update if
-    /// exists). The trade-off is documented: anything running as this user
-    /// can read these values — the same threat model the rest of procpane
-    /// already operates under, since per-task `env_from` injection happens
-    /// in-process anyway.
-    fn set_with_open_acl(
+    /// Unsigned, there is no stable identity to name. The default ACL binds an
+    /// item to the codesign hash of whatever wrote it, so every `cargo build`
+    /// would read as a new application and re-prompt on every read. `-A`
+    /// writes an empty trusted-app list instead — "no auth required for any
+    /// app" — which is a real compromise for dev convenience: anything running
+    /// as this user can read the values. `trust status` says so out loud.
+    fn write_item(
         service: &str,
         account: &str,
         value: &str,
@@ -203,20 +218,27 @@ mod mac {
         delete_args.extend(kc_args(keychain));
         let _ = sec_run(&delete_args);
 
-        // Now add with the open ACL. `-A` writes an empty trusted-app list:
-        // "no auth required for any app on this user." The password value
-        // briefly appears on argv during the subprocess — local-dev secrets,
-        // single-user machine, accepted.
-        let mut add_args = vec![
-            "add-generic-password",
-            "-A",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-            value,
-        ];
+        // The password value briefly appears on argv during the subprocess —
+        // local-dev secrets, single-user machine, accepted.
+        let mut add_args = vec!["add-generic-password"];
+        // Held outside the vec so the borrowed &str args outlive the call.
+        let trusted: Vec<String> = match crate::signing::KeychainStrategy::detect() {
+            crate::signing::KeychainStrategy::TeamAcl(_) => crate::signing::trusted_binaries()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+            crate::signing::KeychainStrategy::OpenAcl => Vec::new(),
+        };
+        if trusted.is_empty() {
+            // No stable identity to name, so no ACL worth writing.
+            add_args.push("-A");
+        } else {
+            for path in &trusted {
+                add_args.push("-T");
+                add_args.push(path);
+            }
+        }
+        add_args.extend(["-s", service, "-a", account, "-w", value]);
         add_args.extend(kc_args(keychain));
         let output = sec_run(&add_args)?;
         if !output.status.success() {
@@ -269,37 +291,39 @@ mod mac {
         Ok(accts)
     }
 
-    /// `security find-generic-password -w` prints the password (and only the
-    /// password) on stdout. Captures it without ever passing through the
-    /// security-framework crate, so the ACL check is against `/usr/bin/security`
-    /// and the user's one-time "Always Allow" grant covers every procpane
-    /// build forever.
+    /// `errSecItemNotFound` — an absent secret, not a failure.
+    const NOT_FOUND: i32 = -25300;
+
+    /// Read a secret in this process, so the ACL is checked against *us*.
+    ///
+    /// This is the half that cannot be a subprocess. `security
+    /// find-generic-password` would present `/usr/bin/security` as the reader,
+    /// and an ACL that trusts a binary every process can exec protects
+    /// nothing. `SecKeychainFindGenericPassword` asks on behalf of the running
+    /// binary, whose designated requirement is what the item was written to
+    /// trust.
+    ///
+    /// A read the ACL denies surfaces as an error rather than as "no such
+    /// secret", because those two want opposite responses from the reader.
     fn sec_get(service: &str, account: &str, keychain: Option<&str>) -> Result<Option<String>> {
-        let mut args = vec!["find-generic-password", "-s", service, "-a", account, "-w"];
-        args.extend(kc_args(keychain));
-        let output = sec_run(&args)?;
-        if output.status.success() {
-            let mut s = String::from_utf8(output.stdout)
-                .map_err(|e| anyhow!("keychain value for {account} is not utf-8: {e}"))?;
-            // `-w` appends a newline; trim it without losing internal NLs.
-            if s.ends_with('\n') {
-                s.pop();
-                if s.ends_with('\r') {
-                    s.pop();
-                }
+        // `security` takes a keychain by path; the API takes an opened handle.
+        let opened = match keychain {
+            Some(path) => Some(
+                SecKeychain::open(path)
+                    .map_err(|e| anyhow!("cannot open keychain {path}: {e}"))?,
+            ),
+            None => None,
+        };
+        let search = opened.as_ref().map(std::slice::from_ref);
+        match find_generic_password(search, service, account) {
+            Ok((password, _item)) => {
+                let text = String::from_utf8(password.to_vec())
+                    .map_err(|e| anyhow!("keychain value for {account} is not utf-8: {e}"))?;
+                Ok(Some(text))
             }
-            return Ok(Some(s));
+            Err(e) if e.code() == NOT_FOUND => Ok(None),
+            Err(e) => Err(anyhow!("keychain read failed for {account}: {e}")),
         }
-        // exit 44 + "could not be found" → errSecItemNotFound. Anything
-        // else is a real error worth surfacing.
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("could not be found") || stderr.contains("-25300") {
-            return Ok(None);
-        }
-        Err(anyhow!(
-            "security find failed for {account}: {}",
-            stderr.trim()
-        ))
     }
 
     fn sec_delete(service: &str, account: &str, keychain: Option<&str>) -> Result<bool> {
@@ -375,31 +399,13 @@ mod mac {
         let mut set: BTreeSet<String> = accounts.iter().cloned().collect();
         set.remove(INDEX_ACCOUNT);
         let payload = set.into_iter().collect::<Vec<_>>().join("\n");
-        // Route through the CLI like the user-facing items, so the index
-        // inherits the same "Always Allow /usr/bin/security" trust grant
-        // and never re-prompts on rebuild. Delete+add to force a fresh ACL.
-        let _ = sec_delete(service, INDEX_ACCOUNT, keychain);
-        let mut add_args = vec![
-            "add-generic-password",
-            "-A",
-            "-s",
-            service,
-            "-a",
-            INDEX_ACCOUNT,
-            "-w",
-            &payload,
-        ];
-        add_args.extend(kc_args(keychain));
-        let output = sec_run(&add_args)?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Fallback to the Rust crate so a borked /usr/bin/security
-            // doesn't lose the index entirely.
-            tracing::warn!("security index write failed ({stderr}); falling back");
-            return set_generic_password(service, INDEX_ACCOUNT, payload.as_bytes())
-                .map_err(|e| anyhow!("index write failed: {e}"));
-        }
-        Ok(())
+        // The index is written exactly like the secrets it indexes — same
+        // ACL, same rules. It holds only key *names*, but a list of what a
+        // project keeps in the keychain is worth no less protection than the
+        // values, and two write paths that could drift apart is one too many.
+        // `write_item` drops the old item before adding, so the ACL is
+        // rewritten rather than inherited from whichever build wrote it first.
+        write_item(service, INDEX_ACCOUNT, &payload, keychain)
     }
 
     fn index_add(service: &str, account: &str, keychain: Option<&str>) -> Result<()> {

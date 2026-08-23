@@ -627,6 +627,24 @@ pub fn trust_cmd(op: TrustOp) -> Result<()> {
             if cert_path.is_file() {
                 let mut removed = false;
                 for name in [ca::CA_COMMON_NAME, ca::LEGACY_CA_COMMON_NAME] {
+                    // Look before deleting. We try two names and at most one
+                    // of them is ever present, so an unconditional delete
+                    // guarantees that `security` prints "Unable to delete
+                    // certificate matching ..." for the other — an error for
+                    // the ordinary case. Reading the System keychain needs no
+                    // sudo; the delete still does, and still owns the tty so
+                    // its password prompt is visible.
+                    let present = std::process::Command::new("security")
+                        .arg("find-certificate")
+                        .arg("-c")
+                        .arg(name)
+                        .arg("/Library/Keychains/System.keychain")
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if !present {
+                        continue;
+                    }
                     let status = std::process::Command::new("sudo")
                         .arg("security")
                         .arg("delete-certificate")
@@ -645,7 +663,7 @@ pub fn trust_cmd(op: TrustOp) -> Result<()> {
                     }
                 }
                 if !removed {
-                    eprintln!("(no entry in System keychain, or sudo declined)");
+                    println!("· no CA of ours in the System keychain");
                 }
             }
             if let Ok(dir) = ca::ca_dir() {
@@ -660,6 +678,27 @@ pub fn trust_cmd(op: TrustOp) -> Result<()> {
             } else {
                 println!("✗ CA not generated. Run `preceipts trust install` first.");
             }
+            // What this build can do, read from the binary rather than assumed.
+            // How secrets are protected hinges on the Team Identifier, and an
+            // unsigned build failing at the moment of use is a much worse way
+            // to find out.
+            println!("  {}", crate::signing::KeychainStrategy::detect().explain());
+            // The forwarder still goes in through sudo either way. A signed
+            // bundle is *eligible* for SMAppService, which is not the same as
+            // us calling it — that binding is not written yet, and a `✓` here
+            // would be describing something that does not run.
+            if crate::signing::can_register_daemon() {
+                println!(
+                    "· this bundle is eligible for SMAppService; the forwarder still \
+                     installs through sudo (registration is not implemented yet)"
+                );
+            } else {
+                println!(
+                    "  the forwarder installs through sudo — SMAppService would need a \
+                     signed bundle with a Team Identifier"
+                );
+            }
+
             if forwarder::is_installed() {
                 println!("✓ :443 forwarder present: {}", forwarder::PROXY_PLIST_PATH);
                 println!("  Portless URLs such as https://web.proj.localhost work.");

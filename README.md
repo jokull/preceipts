@@ -187,9 +187,18 @@ A service with an `image` runs as a foreground container, so the supervisor that
 owns your dev servers owns it too: same log buffer, same health gating, same
 stop signal. Delegated to whatever is installed — we do not write a VMM.
 
-Still ahead: the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
-Keychain access group that retires the open-ACL workaround — waits on a signed
-bundle. Service URLs are
+`packaging/package.sh` assembles `Preceipts.app`; `sign.sh` signs it with a
+Developer ID identity. Signed, a secret's ACL names our own binaries by their
+designated requirement, so nothing else on the machine can read it and a
+rebuild does not re-prompt — reads go through the Keychain API in-process,
+because shelling out would present `/usr/bin/security` as the reader and any
+ACL written against that protects nothing. Unsigned, there is no stable
+identity to name, so secrets fall back to an open ACL and `preceipts trust
+status` says so out loud: that trade is defensible, hiding it is not.
+
+Still ahead: the env panel and project tabs, and registering the forwarder
+through `SMAppService` instead of `sudo` — a signed bundle is eligible for it,
+but the call is not written yet. Service URLs are
 `<service>.<workspace>.<project>.localhost` — the system resolves `*.localhost` to
 loopback at any depth, so there is no DNS to install (decision 13).
 

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for Preceipts.app's main executable.
+
+  This file is deliberately empty, and both absences are decisions.
+
+  No com.apple.security.app-sandbox. The app ships a daemon that supervises
+  arbitrary user processes in arbitrary worktrees and binds listening sockets;
+  the sandbox forbids both, and there is no temporary exception that grants
+  "run whatever the developer's project runs". A sandboxed build would be a
+  build that cannot boot an environment, which is the product. That rules out
+  the Mac App Store and makes Developer ID plus notarization the only
+  distribution path.
+
+  No keychain-access-groups either — and this one we learned by trying it.
+  Signing the bundle with that key produced a binary the kernel SIGKILLs at
+  the first page fault: `CODESIGNING / Invalid Page`, with an empty
+  codeSigningTeamID on the dead process. It is a *restricted* entitlement, so
+  outside the App Store it is authorised by an embedded provisioning profile,
+  not by a certificate. Two further facts make the whole idea wrong rather
+  than merely blocked: the key governs the data-protection keychain, while our
+  secrets live in the file-based one; and `preceipts` is installed standalone
+  as a bare Mach-O, which cannot carry a provisioning profile at all, so the
+  entitlement would kill the CLI on every non-bundle install.
+
+  Sharing is done instead by the ACL on each keychain item, which names a code
+  requirement — the same Team ID, and nothing else on the machine. See
+  secrets.rs. That needs no entitlement, works for the standalone CLI, and is
+  the thing the open-ACL workaround was standing in for.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

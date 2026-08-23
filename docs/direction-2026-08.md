@@ -1105,6 +1105,69 @@ What steps 9–13 leave for the next pass, in the order they block things:
     Verified with a real postgres:17: healthy, accepting connections, and
     `preceipts down` left nothing behind.
 
-22. **The signed bundle**: `SMAppService` registration, the shared Keychain
-    access group, notarization — and with them the retirement of the
-    open-ACL secrets workaround.
+22. **The signed bundle.** *Done, and it changed the design.*
+
+    `packaging/` assembles `Preceipts.app` — the three binaries as siblings in
+    `Contents/MacOS`, because `daemon_exe` finds the daemon beside whatever is
+    running; the forwarder's plist, whose filename must equal its `Label` (the
+    Rust constant moved to match); and signing scripts that fail with an
+    instruction rather than a stack trace when no identity is set.
+
+    Three things only assembling it could have taught. The main executable
+    cannot be called `Preceipts` when a CLI called `preceipts` sits beside it —
+    APFS is case-insensitive by default and one silently overwrote the other.
+    `install_name_tool` invalidates a signature, and arm64 SIGKILLs a binary
+    whose signature is invalid, so the bundle must be re-signed even ad-hoc.
+    And the release build links Homebrew's OpenSSL, so without vendoring the
+    chain the bundle runs on exactly one machine.
+
+    **The shared Keychain access group was the wrong mechanism, and signing is
+    how we found out.** The first Developer ID build was SIGKILLed at its
+    first page fault — `CODESIGNING / Invalid Page`, empty team on the corpse.
+    Bisected in place inside the bundle, one signing option at a time, the
+    cause was the `keychain-access-groups` entitlement itself. It is a
+    *restricted* entitlement: outside the App Store it is authorised by an
+    embedded provisioning profile, not by a certificate. Two further facts
+    make it wrong rather than merely blocked — it governs the data-protection
+    keychain while these items live in the file-based one, and `preceipts` is
+    installed standalone as a bare Mach-O, which cannot carry a profile at
+    all, so the entitlement would have killed the CLI on every non-bundle
+    install. Both entitlements files are empty now, and say why.
+
+    **What retires the open ACL instead is the ACL.** A keychain item names
+    the code allowed to read it by *designated requirement*, and a Developer
+    ID requirement is an identifier plus a team anchor — it does not change
+    when the binary is rebuilt. That is precisely what the open ACL was
+    standing in for: the workaround existed because an ad-hoc signature is a
+    different application on every `cargo build`. So `write_item` passes `-T`
+    for each of our binaries when a Team Identifier is present, and `-A` when
+    it is not.
+
+    That only means anything because **reads moved in-process**. Shelling out
+    to `security find-generic-password` presents `/usr/bin/security` as the
+    reader — a binary every process on the machine can exec — so an ACL
+    written against it protects nothing. `SecKeychainFindGenericPassword`
+    asks on behalf of the running binary. Writes still shell out, because `-T`
+    is the only ACL-setting interface that needs no raw FFI and who *writes*
+    is not who the ACL is checked against.
+
+    Measured, in a throwaway keychain, rather than asserted:
+
+    - The item's decrypt entry names three applications, each with
+      `certificate leaf[subject.OU] = RDC8539AWM`.
+    - The signed CLI reads it with no prompt.
+    - Rebuilt and re-signed — new CDHash — it still reads with no prompt.
+      This is the durability claim, and it is the one the open ACL could not
+      make.
+    - `/usr/bin/security` asking for the same value blocks on an
+      authorization dialog and never gets it.
+    - An unsigned `cargo build` still takes the `-A` branch and still works,
+      so the dev loop is intact. It says so in `trust status`.
+
+    What is still not done, now stated as what it is rather than as a
+    certificate problem: **`SMAppService` registration is not implemented.**
+    A signed bundle is *eligible* — `can_register_daemon` answers "would this
+    be allowed", not "does this happen" — and the `:443` forwarder still goes
+    in through `sudo` in every build. Calling the API needs ObjC bindings to
+    ServiceManagement that this crate does not have. Notarization is likewise
+    untouched: it needs an App Store Connect key, not a certificate.

@@ -29,6 +29,7 @@ pub mod routes;
 pub mod secrets;
 pub mod services;
 pub mod share;
+pub mod signing;
 pub mod transcript;
 
 use std::path::PathBuf;

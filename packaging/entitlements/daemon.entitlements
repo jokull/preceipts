@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the embedded preceiptsd and the preceipts CLI.
+
+  Empty, for the reasons in app.entitlements. The sandbox one is not a
+  preference here: this binary forks the project's own dev servers, execs
+  containers, and binds ports — including :443 when launchd runs it as the
+  forwarder. Every one of those is outside what the sandbox can express.
+
+  The CLI in particular must never carry a restricted entitlement: it is
+  installed as a bare executable on PATH, where there is no bundle to hold a
+  provisioning profile, and AMFI kills an unauthorised claim on sight.
+-->
+<plist version="1.0">
+<dict/>
+</plist>

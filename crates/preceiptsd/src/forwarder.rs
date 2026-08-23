@@ -25,7 +25,17 @@ use tokio::net::{TcpListener, TcpStream};
 
 use crate::proxy::PROXY_PORT;
 
-pub const PROXY_PLIST_PATH: &str = "/Library/LaunchDaemons/com.preceipts.forwarder.plist";
+/// The label, and therefore the filename.
+///
+/// `SMAppService` requires a daemon's plist filename to match its `Label`
+/// exactly, and the bundle ships this plist under the same name. They are one
+/// string in two places by necessity, so they are written next to each other
+/// and the packaging script says the same thing in a comment. It is also why
+/// the label is bundle-namespaced rather than the shorter `com.preceipts.*`
+/// it started as — a Team Identifier prefixes the bundle id, not a name we
+/// invented.
+pub const LABEL: &str = "is.solberg.preceipts.forwarder";
+pub const PROXY_PLIST_PATH: &str = "/Library/LaunchDaemons/is.solberg.preceipts.forwarder.plist";
 
 /// Where procpane installed the same helper. `uninstall` still knows about it
 /// so a machine that ran the old tool ends up clean rather than with a root
@@ -161,7 +171,7 @@ fn proxy_plist_contents(daemon_path: &Path) -> String {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.preceipts.forwarder</string>
+  <key>Label</key><string>{LABEL}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{daemon_path}</string>
@@ -274,7 +284,11 @@ mod tests {
     #[test]
     fn proxy_plist_runs_current_binary_helper() {
         let plist = proxy_plist_contents(Path::new("/tmp/pre & post/preceiptsd"));
-        assert!(plist.contains("com.preceipts.forwarder"));
+        assert!(plist.contains(LABEL));
+        assert!(
+            PROXY_PLIST_PATH.ends_with(&format!("{LABEL}.plist")),
+            "SMAppService requires the filename to match the label"
+        );
         assert!(plist.contains("<string>/tmp/pre &amp; post/preceiptsd</string>"));
         assert!(plist.contains("<string>forward</string>"));
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
