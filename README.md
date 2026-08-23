@@ -183,8 +183,11 @@ certificate and its own transcript.
 and what answered it, with nothing instrumented in your app, because the proxy
 is already in the path. Heads only — a recorded body is a recorded password.
 
-Still ahead: the container runtime (`image = …` parses and validates but cannot start yet —
-`doctor` says so), and the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
+A service with an `image` runs as a foreground container, so the supervisor that
+owns your dev servers owns it too: same log buffer, same health gating, same
+stop signal. Delegated to whatever is installed — we do not write a VMM.
+
+Still ahead: the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
 Keychain access group that retires the open-ACL workaround — waits on a signed
 bundle. Service URLs are
 `<service>.<workspace>.<project>.localhost` — the system resolves `*.localhost` to

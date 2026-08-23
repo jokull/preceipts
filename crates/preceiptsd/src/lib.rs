@@ -14,6 +14,7 @@ pub mod cli;
 pub mod client;
 pub mod commands;
 pub mod config;
+pub mod container;
 pub mod daemon;
 pub mod forwarder;
 pub mod graph;

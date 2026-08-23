@@ -233,6 +233,18 @@ pub struct EnvRule {
     pub key: String,
     /// The value must start with this, or the workspace refuses to boot.
     pub require_prefix: Option<String>,
+    /// The value itself, for `from = "literal"` only.
+    ///
+    /// A dev container usually needs one or two settings that are not secret
+    /// and not worth a Keychain round trip — `POSTGRES_PASSWORD` for a
+    /// throwaway database is the canonical case. Refusing to hold those would
+    /// mean either a Keychain entry per developer for a value everyone knows,
+    /// or a `.env` file nobody declared.
+    ///
+    /// Only ever read for literals. A value written next to `from =
+    /// "keychain"` is a secret in a tracked file, and the manifest refuses it
+    /// rather than quietly using it.
+    pub value: Option<String>,
     pub source: EnvSource,
     /// Does changing this value change the answer?
     ///
@@ -563,8 +575,21 @@ pub fn parse(text: &str) -> Result<Manifest> {
                             err(format!("[env.{name}].hash must be true or false"))
                         })?),
                     };
+                let value = entry
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                if value.is_some() && source != EnvSource::Literal {
+                    return Err(err(format!(
+                        "[env.{name}] has a value but comes from {}; a value written in \
+                         the manifest is only meaningful for from = \"literal\", and \
+                         next to a secret it is a secret in a tracked file",
+                        source.as_str()
+                    )));
+                }
                 manifest.env_rules.push(EnvRule {
                     key: name.clone(),
+                    value,
                     require_prefix: entry
                         .get("require_prefix")
                         .and_then(|v| v.as_str())
@@ -1264,20 +1289,14 @@ impl Manifest {
     /// Deliberately not part of `problems`. "Your manifest is wrong" and "we
     /// cannot do that yet" are different sentences with different audiences:
     /// the first is the author's to fix, the second is ours. Merging them
-    /// would also make a perfectly valid manifest — trip's, which declares
-    /// containers — report as invalid, which is a lie about the file.
+    /// would also make a perfectly valid manifest report as invalid, which is
+    /// a lie about the file.
+    ///
+    /// Currently empty. It stays because the distinction it draws is the
+    /// point, and the next capability gap should land here rather than be
+    /// dressed up as a problem with someone's file.
     pub fn unsupported(&self) -> Vec<String> {
-        self.services
-            .iter()
-            .filter(|service| service.image.is_some())
-            .map(|service| {
-                format!(
-                    "service \"{}\" declares an image, and container runtimes are not \
-                     built yet — it will not start. Give it a run or task in the meantime.",
-                    service.name
-                )
-            })
-            .collect()
+        Vec::new()
     }
 }
 

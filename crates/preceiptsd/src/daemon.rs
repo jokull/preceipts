@@ -39,6 +39,8 @@ pub struct Daemon {
     /// can read it: the instrument is only worth building if something can
     /// ask it a question.
     pub transcript: Arc<crate::transcript::Transcript>,
+    /// Slugged `<project>/<workspace>`, for resources named per workspace.
+    pub workspace_key: String,
     /// Where this workspace's TLS proxy listens. Not a constant: linked
     /// workspaces take theirs from their own port block.
     pub proxy_port: u16,
@@ -73,7 +75,9 @@ impl Daemon {
             return Err(anyhow!("no tasks resolved"));
         }
 
-        // Pre-flight: every secret in env_from must be present in Keychain.
+        // Pre-flight: every env value must be resolvable — declared in the
+        // manifest, or already in the Keychain.
+        let literals = declared_literals(&project.root);
         let service = secrets::service_name(&project.root);
         let mut missing: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for idx in graph.graph.node_indices() {
@@ -82,6 +86,9 @@ impl Daemon {
                 continue;
             }
             for key in &n.service.env_from {
+                if literals.contains_key(key) {
+                    continue;
+                }
                 match secrets::get(&service, key, None) {
                     Ok(Some(_)) => {}
                     Ok(None) => missing.entry(n.id()).or_default().push(key.clone()),
@@ -213,6 +220,28 @@ impl Daemon {
         // else named a port, which was an arbitrary rule dressed as a default.
         let proxy_port = block.and_then(|b| b.port(0)).unwrap_or(PROXY_PORT);
 
+        // Preflight the container runtime, once, before anything is spawned.
+        //
+        // A stopped backend does not fail — it *hangs*: OrbStack boots its VM
+        // when something touches the docker socket, so the first `docker run`
+        // blocks for seconds and the service simply never comes healthy. One
+        // bounded probe up front turns that into a sentence.
+        let wants_containers = project
+            .services
+            .tasks
+            .keys()
+            .any(|id| graph.by_id.contains_key(id))
+            && preceipts_core::manifest::load(&project.root)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.services.iter().any(|s| s.image.is_some()));
+        if wants_containers {
+            let availability = crate::container::availability();
+            if !availability.is_ready() {
+                eprintln!("preceipts: {}", availability.explain());
+            }
+        }
+
         let manifest_tasks: std::collections::HashSet<String> =
             project.services.tasks.keys().cloned().collect();
 
@@ -228,6 +257,15 @@ impl Daemon {
             allocated_ports: allocated_ports.clone(),
             proxy_port,
             transcript: crate::transcript::Transcript::new(),
+            workspace_key: workspace
+                .as_ref()
+                .map(|ws| {
+                    ws.key()
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                        .collect()
+                })
+                .unwrap_or_else(|| "local".to_string()),
             stop_signals,
             stop_grace,
             notes,
@@ -572,6 +610,12 @@ async fn run_scheduler(
                 path.push_str(&cur_path);
             }
             let mut env: Vec<(String, String)> = vec![("PATH".into(), path)];
+            // Container names are namespaced by workspace for the same reason
+            // ports and hostnames are: two worktrees must not fight over one.
+            env.push((
+                "PRECEIPTS_WORKSPACE_KEY".into(),
+                daemon.workspace_key.clone(),
+            ));
 
             // If this task has a hostname, hand it the allocated port via PORT
             // and a public URL via the canonical-cased hostname env var.
@@ -609,8 +653,16 @@ async fn run_scheduler(
             // Inject env_from secrets from Keychain. Pre-flight verified
             // presence; if a value disappeared between then and now we warn
             // and let the task start without it (rare race).
+            // Literals come from the manifest, secrets from the Keychain. The
+            // manifest is consulted first because a literal is declared, not
+            // stored, and asking the Keychain for one would fail every time.
+            let literals = declared_literals(&root);
             let service = secrets::service_name(&root);
             for key in &node.service.env_from {
+                if let Some(value) = literals.get(key) {
+                    env.push((key.clone(), value.clone()));
+                    continue;
+                }
                 match secrets::get(&service, key, None) {
                     Ok(Some(val)) => env.push((key.clone(), val)),
                     Ok(None) => {
@@ -659,12 +711,23 @@ async fn run_scheduler(
             // Kick off the healthcheck loop for this task.
             let hc_cfg = node.service.healthcheck.clone();
             let hostname = node.service.hostname.clone();
+            let is_container = node.service.container;
             let buffer = match daemon.buffers.get(&id) {
                 Some(b) => b.clone(),
                 None => continue,
             };
             let kind = match &hc_cfg {
                 Some(hc) => match HealthcheckKind::from_sidecar(hc, hostname.as_deref()) {
+                    // A container's declared tcp port is where it listens
+                    // *inside*. Probing that on the host asks a question about
+                    // somebody else's service, so the probe goes to the port we
+                    // published instead.
+                    Ok(HealthcheckKind::Tcp(_)) if is_container => {
+                        match daemon.allocated_ports.get(&id) {
+                            Some(port) => HealthcheckKind::Tcp(*port),
+                            None => HealthcheckKind::None,
+                        }
+                    }
                     Ok(k) => k,
                     Err(e) => {
                         tracing::warn!(task = %id, error = ?e, "invalid healthcheck; treating as none");
@@ -1153,6 +1216,27 @@ mod workspace_host_tests {
         );
         assert_eq!(workspace_host("api", &dir), "api.proj.localhost");
     }
+}
+
+/// Env values the manifest declares outright, rather than storing.
+///
+/// One function because two call sites need the same answer: the pre-flight
+/// that refuses to boot over a missing secret, and the injection that hands
+/// values to a process. When those disagreed, a declared literal passed
+/// injection and failed pre-flight — the service could run, but was never
+/// allowed to start.
+fn declared_literals(root: &Path) -> BTreeMap<String, String> {
+    preceipts_core::manifest::load(root)
+        .ok()
+        .flatten()
+        .map(|manifest| {
+            manifest
+                .env_rules
+                .iter()
+                .filter_map(|rule| rule.value.clone().map(|value| (rule.key.clone(), value)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Start the router if nothing is serving the well-known port yet.

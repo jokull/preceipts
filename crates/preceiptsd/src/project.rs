@@ -291,6 +291,47 @@ fn read_package(dir: &Path) -> Result<Package> {
     })
 }
 
+/// The command that runs a container in the foreground.
+///
+/// Foreground, not `-d`, and that is the whole trick: the process supervisor
+/// already knows how to own a long-running process — stream its output into a
+/// queryable ring buffer, gate dependents on a health check, stop it with a
+/// signal and a grace period. A detached container would need every one of
+/// those rebuilt against `docker logs` and `docker stop`. Attached, a
+/// container is just another service.
+///
+/// `--rm` for the same reason: the supervisor's lifetime is the container's,
+/// so a stopped workspace leaves nothing behind holding its own name.
+///
+/// The published port is the one the daemon allocated for this service, bound
+/// to loopback only — a dev database should not be reachable from the network
+/// because someone started a workspace.
+fn container_command(service: &preceipts_core::manifest::Service, image: &str) -> String {
+    use preceipts_core::manifest::Health;
+
+    // What the container listens on inside itself. A TCP health check names
+    // it exactly; otherwise assume the service speaks on the port it was
+    // given, which is the convention every 12-factor image follows.
+    let inside = match &service.health {
+        Health::Tcp(port) => port.to_string(),
+        _ => "${PORT}".to_string(),
+    };
+    let name = crate::container::container_name_env(&service.name);
+
+    // `-e KEY` with no value tells docker to take it from *our* environment,
+    // which the daemon has already populated from the manifest's env policy.
+    // Writing the values into the command line would put secrets in the
+    // process table, where `ps` shows them to everyone on the machine.
+    let passed: String = service
+        .env
+        .iter()
+        .filter(|entry| !entry.starts_with('@'))
+        .map(|key| format!(" -e {key}"))
+        .collect();
+
+    format!("exec docker run --rm --name {name}{passed} -p 127.0.0.1:${{PORT}}:{inside} {image}")
+}
+
 /// A package whose "scripts" are the manifest's non-task services.
 ///
 /// Returns `None` when the manifest declares nothing that needs one — every
@@ -313,10 +354,12 @@ fn synthetic_package(root: &Path) -> Result<Option<Package>> {
         .iter()
         .filter(|service| service.task.is_none())
         .filter_map(|service| {
-            service
-                .run
-                .as_ref()
-                .map(|run| (service.name.clone(), run.clone()))
+            let command = match (&service.run, &service.image) {
+                (Some(run), _) => run.clone(),
+                (None, Some(image)) => container_command(service, image),
+                _ => return None,
+            };
+            Some((service.name.clone(), command))
         })
         .collect();
     if scripts.is_empty() {
@@ -421,18 +464,24 @@ mod discovery_tests {
         assert!(synthetic_package(root).unwrap().is_none());
     }
 
-    /// Containers have no runtime here yet. A script that pretended to start
-    /// one would turn a missing feature into a confusing failure.
+    /// A container is a service like any other now: a script the supervisor
+    /// owns, which is what lets it stream logs, gate dependents on a health
+    /// check, and stop with a signal without any of that being rebuilt
+    /// against `docker logs` and `docker stop`.
     #[test]
-    fn a_container_service_is_absent_rather_than_faked() {
+    fn a_container_service_becomes_a_script_the_supervisor_owns() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         write(
             root,
             "preceipts.toml",
-            "[services.db]\nimage = \"postgres:17\"\n",
+            "[services.db]\nimage = \"postgres:17\"\nhealth.tcp = 5432\n",
         );
-        assert!(synthetic_package(root).unwrap().is_none());
+        let package = synthetic_package(root).unwrap().expect("a package");
+        let script = package.scripts.get("db").expect("a db script");
+        assert!(script.contains("docker run"), "{script}");
+        let def = package.turbo.as_ref().unwrap().task("db").unwrap();
+        assert!(def.persistent, "a database does not exit");
     }
 
     #[test]
@@ -530,5 +579,75 @@ mod offset_tests {
         assert_eq!(one, another, "the request order must not move a port");
         assert_eq!(one[0], ("preceipts#api".to_string(), 21001));
         assert_eq!(one[2], ("preceipts#web".to_string(), 21003));
+    }
+}
+
+#[cfg(test)]
+mod container_command_tests {
+    use super::container_command;
+    use preceipts_core::manifest;
+
+    fn service(toml: &str) -> manifest::Service {
+        manifest::parse(toml).unwrap().services.remove(0)
+    }
+
+    /// Foreground and `--rm`: the supervisor's lifetime is the container's, so
+    /// stopping a workspace leaves nothing holding its own name.
+    #[test]
+    fn a_container_runs_in_the_foreground_and_removes_itself() {
+        let service = service("[services.db]\nimage = \"postgres:17\"\nhealth.tcp = 5432\n");
+        let command = container_command(&service, "postgres:17");
+        assert!(command.starts_with("exec docker run --rm"), "{command}");
+        assert!(
+            !command.contains(" -d "),
+            "detached would need a second supervisor"
+        );
+    }
+
+    /// The declared port is where the container listens *inside*; the
+    /// published one is whatever this workspace was allocated.
+    #[test]
+    fn the_health_port_is_published_from_the_workspaces_own_port() {
+        let service = service("[services.db]\nimage = \"postgres:17\"\nhealth.tcp = 5432\n");
+        let command = container_command(&service, "postgres:17");
+        assert!(command.contains("-p 127.0.0.1:${PORT}:5432"), "{command}");
+    }
+
+    /// Loopback only. A dev database should not become reachable from the
+    /// network because somebody started a workspace.
+    #[test]
+    fn a_container_is_published_to_loopback_only() {
+        let service = service("[services.db]\nimage = \"redis\"\nhealth.tcp = 6379\n");
+        assert!(container_command(&service, "redis").contains("-p 127.0.0.1:"));
+    }
+
+    /// `-e KEY` with no value: docker takes it from our environment, so a
+    /// secret never appears in the process table where `ps` shows it to
+    /// everyone on the machine.
+    #[test]
+    fn env_is_passed_by_name_never_by_value() {
+        let service = service(
+            "[services.db]\nimage = \"postgres:17\"\nhealth.tcp = 5432\n\
+             env = [\"POSTGRES_PASSWORD\", \"@shared\"]\n",
+        );
+        let command = container_command(&service, "postgres:17");
+        assert!(command.contains("-e POSTGRES_PASSWORD"), "{command}");
+        assert!(
+            !command.contains("POSTGRES_PASSWORD="),
+            "no values on the command line"
+        );
+        assert!(
+            !command.contains("@shared"),
+            "groups are expanded elsewhere, not passed raw"
+        );
+    }
+
+    /// Without a tcp health check there is no declared inside port, so the
+    /// container is assumed to speak on the port it was handed — the
+    /// convention every 12-factor image follows.
+    #[test]
+    fn a_container_with_no_tcp_check_is_published_straight_through() {
+        let service = service("[services.app]\nimage = \"someapp\"\nhealth.log = \"ready\"\n");
+        assert!(container_command(&service, "someapp").contains("${PORT}:${PORT}"));
     }
 }

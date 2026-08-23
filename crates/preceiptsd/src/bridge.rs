@@ -96,6 +96,7 @@ pub fn to_services(manifest: &Manifest) -> Services {
                 // resolution; what reaches here is the flat list of keys this
                 // service may see.
                 env_from: expand_env(manifest, service),
+                container: service.image.is_some(),
             },
         );
     }

@@ -23,6 +23,15 @@ pub struct ServiceFacts {
     pub stop_signal: Option<StopSignal>,
     pub stop_grace_period: Option<Duration>,
     pub env_from: Vec<String>,
+    /// True when this service is a container.
+    ///
+    /// It changes what a `health.tcp` port means. For a process, the number is
+    /// where it listens and where we probe. For a container it is where it
+    /// listens *inside*, which nothing outside can reach — the probe has to go
+    /// to the published port instead. Without this distinction a perfectly
+    /// healthy postgres stays "starting" forever, because 5432 on the host is
+    /// somebody else's business.
+    pub container: bool,
 }
 
 /// Healthcheck — at most one kind per task in this MVP.

@@ -1071,6 +1071,40 @@ What steps 9–13 leave for the next pass, in the order they block things:
     connection. The primary worktree's old claim on 8443 is gone with it: that
     was an arbitrary rule dressed as a default.
 
-21. **The signed bundle**: `SMAppService` registration, the shared Keychain
+21. ~~**Container services actually start.**~~ *Done, by delegating.* The doc
+    is emphatic that we do not write a VMM, and the reason holds: a
+    mini-OrbStack is a hypervisor *plus* OCI images, filesystem sharing,
+    networking and lifecycle — years of work and the least differentiated code
+    in the product.
+
+    The trick that made it small: a container runs in the **foreground**, so
+    the process supervisor already owns it. Logs stream into the same
+    queryable ring buffer, dependents gate on the same health check, and
+    stopping it is the same signal and grace period. A detached container
+    would have meant rebuilding every one of those against `docker logs` and
+    `docker stop`. `--rm` for the same reason — the supervisor's lifetime is
+    the container's.
+
+    Two things the adapter has to get right, both found by running it against
+    what is installed rather than what the docs describe. A stopped backend
+    does not fail, it *hangs* — OrbStack boots its VM when something touches
+    the socket — so every probe is bounded and the supervisor (`orbctl
+    status`, a documented 0/1/2 contract) is asked before the socket ever is.
+    And a container's `health.tcp` names the port it listens on *inside*;
+    probing that on the host asks a question about somebody else's service,
+    which left a perfectly healthy postgres "starting" forever until the probe
+    was pointed at the published port instead.
+
+    Env is passed as `-e KEY` with no value, so docker takes it from the
+    daemon's environment and a secret never appears in the process table.
+    `[env.X] from = "literal"` grew a `value`, because a throwaway
+    `POSTGRES_PASSWORD` is not worth a Keychain entry per developer — and a
+    value written next to `from = "keychain"` is refused, since that would be
+    a secret in a tracked file.
+
+    Verified with a real postgres:17: healthy, accepting connections, and
+    `preceipts down` left nothing behind.
+
+22. **The signed bundle**: `SMAppService` registration, the shared Keychain
     access group, notarization — and with them the retirement of the
     open-ACL secrets workaround.
