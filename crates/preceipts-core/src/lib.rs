@@ -40,6 +40,7 @@ pub mod receipt;
 pub mod segments;
 pub mod surface;
 pub mod treehash;
+pub mod turbo;
 pub mod watch;
 pub mod workspace;
 

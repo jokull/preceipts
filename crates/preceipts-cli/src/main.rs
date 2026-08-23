@@ -680,6 +680,16 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
     };
 
     let problems = manifest.problems();
+    // The cache half. Read from wherever turbo.json lives — the project root,
+    // which is not the worktree when you are standing in one.
+    let project_root = workspace::locate(path)
+        .map(|ws| ws.path.clone())
+        .unwrap_or_else(|_| path.to_path_buf());
+    let cache = match preceipts_core::turbo::load(&project_root)? {
+        Some(turbo) => manifest.cache_findings(&turbo),
+        None => Vec::new(),
+    };
+
     if json {
         println!(
             "{}",
@@ -695,6 +705,11 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
                 "actions": manifest.actions.iter().map(|a| &a.name).collect::<Vec<_>>(),
                 "drains": manifest.drains.iter().map(|d| &d.name).collect::<Vec<_>>(),
                 "problems": problems,
+                "cache": cache.iter().map(|f| json!({
+                    "key": f.key,
+                    "message": f.message,
+                    "silent": f.silent,
+                })).collect::<Vec<_>>(),
             }))?
         );
         if !problems.is_empty() {
@@ -728,13 +743,26 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
         println!("  drains:  {}", names.join(", "));
     }
 
-    if problems.is_empty() {
+    if problems.is_empty() && cache.is_empty() {
         println!("no problems");
         return Ok(());
     }
     println!();
     for problem in &problems {
         println!("✗ {problem}");
+    }
+    // Cache findings are warnings, not errors: they are about turbo.json,
+    // which this tool does not own. Saying so and exiting 0 is the difference
+    // between a useful neighbour and one that fails your build over its
+    // opinion. The silent ones lead, because a wrong cache hit costs more
+    // than a miss.
+    let mut cache = cache;
+    cache.sort_by_key(|f| !f.silent);
+    for finding in &cache {
+        println!("! {}", finding.message);
+    }
+    if problems.is_empty() {
+        return Ok(());
     }
     std::process::exit(1);
 }

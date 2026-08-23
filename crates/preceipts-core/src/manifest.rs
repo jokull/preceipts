@@ -150,11 +150,75 @@ pub struct EnvGroup {
 /// A constraint on an env value. Not an allowlist — a policy with assertions,
 /// because trip learned that "only copy these keys" is not enough when one of
 /// them might be a live Stripe key.
+/// Where a value comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EnvSource {
+    /// The macOS Keychain, by reference. The default, because a value worth
+    /// declaring is usually a value worth not writing down.
+    #[default]
+    Keychain,
+    /// A dotenv file in the worktree.
+    Dotenv,
+    /// Minted at boot by a service that exports it (Rung 3b).
+    Captured,
+    /// Written in the manifest itself. Fine for a URL, never for a secret.
+    Literal,
+}
+
+impl EnvSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EnvSource::Keychain => "keychain",
+            EnvSource::Dotenv => "dotenv",
+            EnvSource::Captured => "captured",
+            EnvSource::Literal => "literal",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "keychain" => EnvSource::Keychain,
+            "dotenv" => EnvSource::Dotenv,
+            "captured" => EnvSource::Captured,
+            "literal" => EnvSource::Literal,
+            _ => return None,
+        })
+    }
+
+    /// True when the value is a secret by construction.
+    ///
+    /// A secret in a build-cache key is two problems at once: every machine
+    /// misses cache forever because every machine's value differs, and the
+    /// value itself becomes part of a key that travels to a shared remote.
+    pub fn is_secret(self) -> bool {
+        matches!(self, EnvSource::Keychain)
+    }
+}
+
+/// A constraint on an env value, plus the two facts about it that matter
+/// outside the boot: where it comes from, and whether it belongs in a hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvRule {
     pub key: String,
     /// The value must start with this, or the workspace refuses to boot.
     pub require_prefix: Option<String>,
+    pub source: EnvSource,
+    /// Does changing this value change the answer?
+    ///
+    /// `Some(true)` means it belongs in turbo's `env`/`globalEnv`, where a
+    /// change busts the cache. `Some(false)` means `passThroughEnv` — reaches
+    /// the process, never touches the hash. `None` means the author has not
+    /// said, and a secret's default is `false` because the alternative is
+    /// actively harmful.
+    pub hash: Option<bool>,
+}
+
+impl EnvRule {
+    /// Whether this value should contribute to a build-cache key, falling back
+    /// to what its source implies when the author has not said.
+    pub fn hashed(&self) -> bool {
+        self.hash.unwrap_or(!self.source.is_secret())
+    }
 }
 
 /// A side-effect sink. What turns "the screenshot looks right" into evidence.
@@ -444,12 +508,30 @@ pub fn parse(text: &str) -> Result<Manifest> {
                         .collect(),
                 });
             } else {
+                let source = match entry.get("from").and_then(|v| v.as_str()) {
+                    None => EnvSource::default(),
+                    Some(text) => EnvSource::parse(text).ok_or_else(|| {
+                        err(format!(
+                            "[env.{name}].from is \"{text}\" — use keychain, dotenv, \
+                             captured, or literal"
+                        ))
+                    })?,
+                };
+                let hash =
+                    match entry.get("hash") {
+                        None => None,
+                        Some(value) => Some(value.as_bool().ok_or_else(|| {
+                            err(format!("[env.{name}].hash must be true or false"))
+                        })?),
+                    };
                 manifest.env_rules.push(EnvRule {
                     key: name.clone(),
                     require_prefix: entry
                         .get("require_prefix")
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
+                    source,
+                    hash,
                 });
             }
         }
@@ -1030,5 +1112,168 @@ fidelity = "local-simulated"
         assert!(detect(temp.path()).is_none());
         std::fs::write(temp.path().join("package.json"), r#"{"name":"x"}"#).unwrap();
         assert!(detect(temp.path()).is_none(), "no dev script, no guess");
+    }
+}
+
+/// A disagreement between what the manifest says a value *is* and how
+/// `turbo.json` says it is *treated*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheFinding {
+    pub key: String,
+    pub message: String,
+    /// True when the consequence is a wrong cache *hit* rather than a miss.
+    /// A miss is slow; a hit is wrong, and wrong is worse.
+    pub silent: bool,
+}
+
+impl Manifest {
+    /// Where the env catalog and `turbo.json` disagree about the cache.
+    ///
+    /// Neither file can answer this alone, which is the whole reason to hold
+    /// both. `turbo.json` knows a key is hashed but not that it is a secret;
+    /// the manifest knows it is a secret but not that turbo hashes it. Only
+    /// something holding both can say the sentence that matters.
+    pub fn cache_findings(&self, turbo: &crate::turbo::Turbo) -> Vec<CacheFinding> {
+        use crate::turbo::covers;
+
+        let hashed = turbo.hashed_patterns();
+        let passthrough = turbo.passthrough_patterns();
+        let strict = turbo.env_mode.as_deref() != Some("loose");
+        let mut findings = Vec::new();
+
+        for rule in &self.env_rules {
+            let key = &rule.key;
+            let in_hash = covers(&hashed, key);
+            let in_passthrough = covers(&passthrough, key);
+
+            if rule.source.is_secret() && in_hash {
+                findings.push(CacheFinding {
+                    key: key.clone(),
+                    message: format!(
+                        "{key} is a {} secret but turbo.json hashes it — every machine's \
+                         value differs, so this misses cache everywhere, and the value \
+                         itself becomes part of a key that travels to your remote cache. \
+                         Move it to passThroughEnv.",
+                        rule.source.as_str()
+                    ),
+                    silent: false,
+                });
+                continue;
+            }
+
+            if rule.hashed() && !in_hash {
+                let where_it_is = if in_passthrough {
+                    "turbo.json only passes it through"
+                } else if strict {
+                    "turbo.json does not declare it at all, and strict mode will not even \
+                     pass it to the task"
+                } else {
+                    "turbo.json does not declare it at all"
+                };
+                findings.push(CacheFinding {
+                    key: key.clone(),
+                    message: format!(
+                        "{key} changes behaviour but {where_it_is}, so changing it does not \
+                         bust the cache — a build with the old value will be reused and \
+                         look green. Add it to env or globalEnv.",
+                    ),
+                    // The dangerous direction: this one is silent.
+                    silent: true,
+                });
+            }
+        }
+
+        findings
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::turbo;
+
+    fn manifest(text: &str) -> Manifest {
+        parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_keychain_secret_in_the_hash_is_reported() {
+        let m = manifest("[env.STRIPE_SECRET_KEY]\nfrom = \"keychain\"\n");
+        let t = turbo::parse(r#"{"globalEnv": ["STRIPE_SECRET_KEY"]}"#).unwrap();
+        let findings = m.cache_findings(&t);
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].message.contains("passThroughEnv"),
+            "{:?}",
+            findings[0]
+        );
+        assert!(!findings[0].silent, "a cache miss is loud, just wasteful");
+    }
+
+    /// A wildcard is the common way this happens: nobody writes the secret's
+    /// name into `globalEnv`, they write `STRIPE_*` and forget what it covers.
+    #[test]
+    fn a_wildcard_catches_the_secret_too() {
+        let m = manifest("[env.STRIPE_SECRET_KEY]\nfrom = \"keychain\"\n");
+        let t = turbo::parse(r#"{"globalEnv": ["STRIPE_*"]}"#).unwrap();
+        assert_eq!(m.cache_findings(&t).len(), 1);
+    }
+
+    #[test]
+    fn a_secret_in_passthrough_is_exactly_right() {
+        let m = manifest("[env.STRIPE_SECRET_KEY]\nfrom = \"keychain\"\n");
+        let t = turbo::parse(r#"{"globalPassThroughEnv": ["STRIPE_*"]}"#).unwrap();
+        assert!(m.cache_findings(&t).is_empty());
+    }
+
+    /// The worse failure: config that changes behaviour, outside the hash.
+    /// It does not cost you a rebuild — it hands you the wrong build.
+    #[test]
+    fn behaviour_changing_config_outside_the_hash_is_flagged_as_silent() {
+        let m = manifest("[env.NEXT_PUBLIC_API_URL]\nfrom = \"literal\"\nhash = true\n");
+        let t = turbo::parse(r#"{"globalPassThroughEnv": ["NEXT_PUBLIC_*"]}"#).unwrap();
+        let findings = m.cache_findings(&t);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].silent, "a wrong cache hit is the quiet one");
+        assert!(findings[0].message.contains("only passes it through"));
+    }
+
+    #[test]
+    fn strict_mode_is_named_when_a_key_is_declared_nowhere() {
+        let m = manifest("[env.API_URL]\nfrom = \"literal\"\nhash = true\n");
+        let t = turbo::parse(r#"{"envMode": "strict"}"#).unwrap();
+        let findings = m.cache_findings(&t);
+        assert!(
+            findings[0].message.contains("strict mode"),
+            "{:?}",
+            findings[0]
+        );
+    }
+
+    #[test]
+    fn a_correctly_hashed_value_is_not_a_finding() {
+        let m = manifest("[env.API_URL]\nfrom = \"literal\"\nhash = true\n");
+        let t = turbo::parse(r#"{"globalEnv": ["API_URL"]}"#).unwrap();
+        assert!(m.cache_findings(&t).is_empty());
+    }
+
+    /// The default exists so the common case needs no annotation: a value
+    /// from the Keychain is a secret, and a secret is never hashed.
+    #[test]
+    fn defaults_follow_the_source_when_the_author_says_nothing() {
+        let m = manifest("[env.SOME_TOKEN]\nrequire_prefix = \"sk_test_\"\n");
+        assert_eq!(m.env_rules[0].source, EnvSource::Keychain);
+        assert!(!m.env_rules[0].hashed());
+
+        let m = manifest("[env.PUBLIC_URL]\nfrom = \"literal\"\n");
+        assert!(
+            m.env_rules[0].hashed(),
+            "a literal is config, so it is hashed"
+        );
+    }
+
+    #[test]
+    fn an_unknown_source_is_refused_rather_than_defaulted() {
+        assert!(parse("[env.X]\nfrom = \"somewhere\"\n").is_err());
     }
 }

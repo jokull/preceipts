@@ -193,3 +193,49 @@ fn health_checks_are_declared_for_everything_that_publishes_a_url() {
         }
     }
 }
+
+/// trip's real `turbo.json`, reduced to its env declarations.
+///
+/// A synthetic fixture would not have caught the thing that actually breaks a
+/// JSON parser here: turbo names its root tasks `//#format`, which is
+/// indistinguishable from a comment to anything that is not string-aware.
+const TRIP_TURBO: &str = include_str!("fixtures/trip-turbo.json");
+
+#[test]
+fn trips_turbo_json_reads_including_its_comment_shaped_task_names() {
+    let turbo = preceipts_core::turbo::parse(TRIP_TURBO).expect("trip's turbo.json parses");
+    let passthrough = turbo.passthrough_patterns();
+    assert!(
+        passthrough.contains("DATABASE_*"),
+        "the wildcards trip actually uses survive"
+    );
+    assert!(
+        turbo.hashed_patterns().is_empty(),
+        "trip hashes nothing globally, which is a real and correct state"
+    );
+}
+
+/// The sentence no other tool can say, checked against a real repository's
+/// configuration rather than a fixture written to make it true.
+#[test]
+fn a_secret_trip_passes_through_is_correct_and_reported_as_such() {
+    let turbo = preceipts_core::turbo::parse(TRIP_TURBO).unwrap();
+    // trip passes DATABASE_* through, never hashes it — exactly right.
+    let manifest = preceipts_core::manifest::parse("[env.DATABASE_URL]\nfrom = \"keychain\"\n")
+        .expect("a manifest");
+    assert!(
+        manifest.cache_findings(&turbo).is_empty(),
+        "a secret in passThroughEnv is the correct arrangement"
+    );
+
+    // And config that changes behaviour, declared nowhere, is the silent bug.
+    let manifest =
+        preceipts_core::manifest::parse("[env.NEXT_PUBLIC_SITE_URL]\nfrom = \"literal\"\n")
+            .expect("a manifest");
+    let findings = manifest.cache_findings(&turbo);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0].silent,
+        "a wrong cache hit is the one that costs you"
+    );
+}

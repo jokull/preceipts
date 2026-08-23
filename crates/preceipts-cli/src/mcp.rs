@@ -344,6 +344,20 @@ fn environment(path: &Path) -> Result<Value> {
             "needs": s.needs,
         })).collect::<Vec<_>>(),
         "ready": manifest.ready,
+        // Both facts about each value, because an agent editing turbo.json
+        // needs to know which half of the split a key belongs on.
+        "env": manifest.env_rules.iter().map(|rule| json!({
+            "key": rule.key,
+            "from": rule.source.as_str(),
+            "hashed": rule.hashed(),
+            "require_prefix": rule.require_prefix,
+        })).collect::<Vec<_>>(),
+        "cache": match preceipts_core::turbo::load(path) {
+            Ok(Some(turbo)) => manifest.cache_findings(&turbo).iter().map(|f| json!({
+                "key": f.key, "message": f.message, "silent": f.silent,
+            })).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        },
         "drains": manifest.drains.iter().map(|d| json!({
             "name": d.name, "kind": d.kind,
         })).collect::<Vec<_>>(),

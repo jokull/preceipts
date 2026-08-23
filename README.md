@@ -88,8 +88,30 @@ host = "api"                   # a label; the fabric composes the FQDN
 env = ["@shared", "STRIPE_SECRET_KEY"]
 
 [env.STRIPE_SECRET_KEY]
+from = "keychain"              # so never hashed into a build-cache key
 require_prefix = "sk_test_"    # a live key refuses to boot
+
+[env.NEXT_PUBLIC_SITE_URL]
+from = "literal"
+hash = true                    # changes behaviour, so it must bust the cache
 ```
+
+Every value carries two facts: **where it comes from**, and **whether it
+belongs in a hash** — turbo's `env` versus `passThroughEnv`, in the same file
+that already knows the services. That lets `preceipts doctor` say a sentence
+neither file can say alone:
+
+```
+! STRIPE_SECRET_KEY is a keychain secret but turbo.json hashes it — every
+  machine's value differs, so this misses cache everywhere, and the value
+  itself becomes part of a key that travels to your remote cache.
+! NEXT_PUBLIC_SITE_URL changes behaviour but turbo.json does not declare it at
+  all — changing it does not bust the cache, so a build with the old value
+  will be reused and look green.
+```
+
+The second one is the dangerous direction: a cache *miss* is slow, a wrong
+cache *hit* is green.
 
 The rule: **if the app or a receipt must understand it, it is schema; if only
 the project understands it, it is an action.** So services, env policy,
@@ -97,7 +119,9 @@ readiness, mocks, drains, and fidelity are modelled — and everything
 domain-specific is a declared verb. `preceipts doctor` validates and explains.
 
 `crates/preceipts-core/tests/trip_benchmark.rs` holds trip's real stack as the
-design's own acceptance test.
+design's own acceptance test, including its actual `turbo.json` — which is how
+we learned that turbo names root tasks `//#format`, indistinguishable from a
+comment to any JSONC parser that is not string-aware.
 
 ## Layout
 
