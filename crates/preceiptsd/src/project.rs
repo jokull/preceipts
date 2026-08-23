@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::TurboJson;
-use crate::sidecar::Sidecar;
+use crate::services::Services;
 
 #[derive(Debug, Clone)]
 pub struct Package {
@@ -20,14 +20,14 @@ pub struct Package {
     pub turbo: Option<TurboJson>,
     /// True when this is the project's root package (lives at `Project::root`).
     /// Root scripts tend to be aggregators (`turbo run dev -F …`) that would
-    /// nest turbo inside procpane, so bare-name task expansion skips them by
+    /// nest turbo inside this daemon, so bare-name task expansion skips them by
     /// convention — mirrors turbo's own rule that root tasks must be
     /// addressed as `//#task` in turbo.json.
     pub is_root: bool,
 }
 
 /// A registered repository: the thing that gets a tab, and the thing whose
-/// worktrees become workspaces. Named `Workspace` in procpane, where it meant
+/// worktrees become workspaces. This was called `Workspace` before, when it meant
 /// "the turborepo root"; that name now belongs to a worktree and its
 /// environment, so the repo-level concept is a `Project`.
 ///
@@ -38,7 +38,7 @@ pub struct Package {
 pub struct Project {
     pub root: PathBuf,
     pub turbo: TurboJson,
-    pub sidecar: Sidecar,
+    pub services: Services,
     pub packages: Vec<Package>,
     /// Detected package manager command: "pnpm" | "npm" | "yarn" | "bun"
     pub pkg_manager: String,
@@ -97,7 +97,7 @@ impl Project {
         } else {
             TurboJson::default()
         };
-        let sidecar = Sidecar::load(&root)?;
+        let services = Services::load(&root)?;
 
         let patterns = discover_workspace_patterns(&root)?;
         let pkg_manager = detect_package_manager(&root);
@@ -105,7 +105,7 @@ impl Project {
 
         // Root package is its own "package" for root-level tasks. Mark it
         // explicitly so bare-name task expansion can skip it (its scripts
-        // are usually aggregators that nest turbo inside procpane).
+        // are usually aggregators that would nest turbo inside this daemon).
         if let Ok(mut root_pkg) = read_package(&root) {
             root_pkg.is_root = true;
             packages.push(root_pkg);
@@ -160,7 +160,7 @@ impl Project {
         Ok(Self {
             root,
             turbo,
-            sidecar,
+            services,
             packages,
             pkg_manager,
         })
@@ -175,7 +175,7 @@ impl Project {
 
 /// Either marker roots a project.
 ///
-/// `turbo.json` was the only one procpane accepted, which made the daemon
+/// `turbo.json` was the only marker accepted before, which made the daemon
 /// unusable for the very case rung 1 of the schema exists for: a single Vite
 /// app with four lines of `preceipts.toml` and no monorepo tooling at all.
 pub const ROOT_MARKERS: [&str; 2] = ["preceipts.toml", "turbo.json"];
@@ -384,9 +384,9 @@ mod discovery_tests {
         let project = Project::discover(root).expect("no turbo.json needed");
         assert!(project.turbo.tasks.is_empty(), "nothing came from turbo");
         assert!(
-            project.sidecar.tasks.contains_key("preceipts#web"),
+            project.services.tasks.contains_key("preceipts#web"),
             "the service is there: {:?}",
-            project.sidecar.tasks.keys().collect::<Vec<_>>()
+            project.services.tasks.keys().collect::<Vec<_>>()
         );
     }
 

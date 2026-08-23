@@ -74,7 +74,7 @@ pub enum EnvOp {
     Receive,
     /// Send selected secrets to a teammate who is waiting with a code.
     Send {
-        /// The code printed by `procpane env receive` (e.g. "12-circus-domino").
+        /// The code printed by `preceipts secrets receive` (e.g. "12-circus-domino").
         code: String,
         /// Keys to send. Default: every stored key.
         keys: Vec<String>,

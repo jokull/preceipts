@@ -52,8 +52,9 @@ Why this is load-bearing:
   JSON line per receipt. Concurrent minting from multiple machines merges
   losslessly with the `cat_sort_uniq` notes-merge strategy.
 - **Logs** are content-addressed blobs kept reachable via `refs/receipts/logs/
-  <blob-sha>` refs. Receipts reference their log blob. `preceipts gc --keep 30d`
-  prunes old log refs; receipt lines outlive their logs gracefully.
+  <blob-sha>` refs. Receipts reference their log blob. `preceipts gc
+  --keep-success 30d --keep-failure 90d` prunes old log refs; receipt lines
+  outlive their logs gracefully.
 - **Sync** is `git push`/`fetch` of those refs. `preceipts sync` wraps
   fetch + `notes merge` (cat_sort_uniq) + push; `preceipts init` offers to add
   the refspecs to the remote config so normal pushes carry receipts.
@@ -170,26 +171,48 @@ check: an unnormalizable worktree has no honest tree to mint against. A
 half-configured `[prepare]` (listed name without a table, or a table not
 listed in `commands`) is an error, never a silent skip.
 
-## CLI surface (phase 1)
+## CLI surface
 
 ```
 preceipts run [check…]        # run in current worktree; mint against working-tree hash;
-                             # warn (not fail) on dirty worktree; stream output live
-preceipts status [ref]        # receipt table for ref's tree vs required set; exit code
+                             # warn (not fail) on dirty worktree
+preceipts watch [check…]      # run them again whenever the worktree goes quiet
+preceipts status [--ref R]    # receipt table for a tree vs the required set; exit code
                              # reflects greenness (scriptable) but nothing enforces it
-preceipts log <check> [ref]   # stored log for that check/tree (tail of failures first)
-preceipts hud [--base main]   # one JSON payload of branch situational awareness —
-                             # conflicts vs base, ahead/behind, land freshness,
-                             # fetch age, unsynced receipts, worktree greenness
-preceipts land <branch> [--onto main] [--no-push]
+preceipts log                 # every receipt recorded in this repository
+preceipts land [branch] [--onto main] [--no-push]
                              # squash via commit-tree, embed receipt trailers in the
                              # message, ff base ref, push. If base moved: state it,
                              # offer rebase-first or land-anyway. Never blocks.
 preceipts sync                # fetch + cat_sort_uniq merge + push of receipt refs
-preceipts gc [--keep 30d]     # prune log refs
+preceipts gc [--keep-success 30d] [--keep-failure 90d]
+                             # prune log refs
 preceipts init                # write .preceipts/ stub, offer refspec config
---json everywhere            # agents and the future TUI consume the same output
+preceipts doctor              # validate preceipts.toml and say what is wrong with it
+preceipts migrate             # convert procpane.toml, move its secrets, clean up
+preceipts mcp                 # serve the same instruments over MCP on stdio
+
+preceipts new <intent…>       # worktree + branch named from the intent + the intent kept
+preceipts list | ls           # every workspace of this project
+preceipts where               # which workspace this directory stands in
+preceipts diff [--uncommitted]
+                             # files, lines, base for the changeset
+preceipts remove [id]         # drop a workspace's worktree and its registration
+
+preceipts up [task…]          # bring the project's services up, healthcheck-gated
+preceipts down                # stop this project's daemon
+preceipts services            # what is running, and is it healthy
+preceipts wait-for <task>     # block until healthy; 0 healthy, 1 failed, 2 timeout
+preceipts proc <name> …       # per-service tail, grep, since, signal
+preceipts grep <pattern>      # search every service's output at once
+preceipts secrets …           # project secrets in the Keychain (never printed by list)
+preceipts trust …             # the local CA, and the :443 forwarder
+--json on the read commands  # agents and the app consume the same output
 ```
+
+The environment verbs live on the same binary as the receipt verbs on purpose:
+the lab has one door, and an agent should not have to learn which tool owns
+which verb.
 
 Merge-commit trailers make receipts legible in plain `git log`:
 
@@ -202,115 +225,96 @@ Receipts-Runner: jokull@mbp.local (claude-code)
 ## Agent workflow (the point of all this)
 
 Agent edits → `preceipts run` → commits (tree now matches, receipts valid) →
-pushes branch + receipts refs. Human opens the cockpit (phase 2) or runs
-`preceipts status branch`: green table, logs one keystroke away, `land` when
+pushes branch + receipts refs. Human opens the cockpit or runs `preceipts
+status --ref branch`: green table, logs one keystroke away, `land` when
 satisfied. "Queue-merge" is the agent looping: rebase → `run` → `land`.
 
-## The cockpit (phase 2 — the product)
+## The cockpit (the product)
 
-The end state is a TUI that feels like a flight deck: the diff is the main
-stream, checks run live beside it, and greenlight-to-land is one motion.
+A desktop app that feels like a flight deck: the diff is the main stream,
+checks answer beside it, and the receipt verdict is always on screen.
 
-**Built as a lumen fork** (this repo; upstream jnsahaj/lumen, MIT, Rust +
-ratatui). Decided 2026-07-06 after hands-on evaluation: lumen already ships
-the commodity half of the cockpit — GitHub-PR-style split view with file tree,
-tree-sitter highlighting, `/` search with n/N, watch mode, stacked commits,
-PR integration, and an annotate-with-`i` → export-to-stdout agent loop — and
-its ratatui immediate-mode rendering is the same architecture class the
-DiffSurface prototype validated (opened a 166-file/41k-line diff instantly).
-What we add is the moat: the receipts rail, live check runs, the HUD footer,
-and one-motion land — all speaking to `preceipts-engine` via `--json` and
-`--events`. The earlier plan (own OpenTUI/DiffSurface pane; before that, a
-hunk fork) is superseded; hunk and the DiffSurface prototype remain reference
-material for perf work if lumen's rendering ever needs it.
+**Built as a GPUI app** — `crates/preceipts-app`, gpui + gpui-component,
+linking `preceipts-core` directly. Nothing is shelled out to: loading a
+changeset, building the row surface, and reading receipts are function calls,
+so no process boundary sits on the scroll path. The three binaries are
+`preceipts` (the CLI), `preceipts-app` (this), and `preceiptsd` (processes,
+health, proxy, secrets) — none of them a check engine.
+
+Two earlier plans are retired and recorded in the decisions log rather than
+here: a lumen fork (Rust + ratatui) speaking to a `preceipts-engine` binary
+over `--json`/`--events` (decisions 7 and 9), and the all-Swift app that
+replaced it (decision 11). Decision 12 settled on GPUI and deleted the engine.
+The hunk fork and the DiffSurface prototype survive only as perf reference.
 
 ### Hard requirements
 
 - **100k+ line changesets, smooth.** Scroll ticks < 2ms at any scroll distance
-  and any stream size; first frame < 500ms regardless of changeset size.
-  Immediate-mode rendering (ratatui) satisfies the architecture mandate the
-  DiffSurface prototype established (0.26–0.43ms/tick on a 58k-row stream,
-  scroll-distance- and size-invariant — hunk fork
-  `benchmarks/diff-surface-proto/NOTES.md`); verified on a real 41k-line
-  changeset at adoption time. If lumen's load path ever turns O(changeset),
-  the lazy per-file parse design (heights up front, parse near the viewport
-  halo) is the fix to port.
-- **Live CI, inline.** Checks running in the engine stream into the checks
-  rail: per-check spinner, elapsed time, last output line inline; full log one
-  keystroke away (follow mode while running). Greenlight state = required set
-  green for the current tree, recomputed as receipts mint and as the worktree
-  changes.
+  and any stream size; first frame < 500ms regardless of changeset size. The
+  surface is one virtualized list (`uniform_list`): fixed-height rows, only
+  the visible window built per frame, so a tick costs the viewport rather than
+  the changeset. The mandate comes from the DiffSurface prototype
+  (0.26–0.43ms/tick on a 58k-row stream, scroll-distance- and size-invariant
+  — hunk fork `benchmarks/diff-surface-proto/NOTES.md`); `preceipts-app
+  --stats` is how the load path is timed against it without opening a window.
+- **Live CI, inline.** Checks run in `preceipts-core`, so the app watches the
+  same runs an agent starts from the CLI: per-check state, elapsed time, full
+  log one keystroke away. Greenlight state = required set green for the
+  current tree, recomputed as receipts mint and as the worktree changes.
+  Built today: the verdict in the HUD. The per-check rail is not.
 - **View + monitor, never mutate** (revised 2026-07-06, superseding
   "one-motion land"). The cockpit is the coding agent's companion: the human
   reviews the diff and watches receipts; the *agent* lands via
-  `preceipts land` (engine CLI). No land keybinding, no AI commands in the
-  TUI or `--help` — scope is scroll, search, monitor, run checks.
-- **Always current.** Watch mode is the default (`--no-watch` to opt out):
-  the diff reloads on file changes — off-thread, so a multi-second reload of
-  a big changeset never freezes the UI while an agent is editing. HUD and
-  receipt snapshots also refresh on a timer (status ~5s, HUD ~15s), because
-  receipts change with no worktree event at all (an agent minting in another
-  terminal, a sync, the base moving).
-- **PR diff by default, one key to switch.** Bare `preceipts` opens the PR
-  view — merge-base(origin/main | main | …/master, HEAD) → working tree —
-  because the unit of review is the branch, not the last save. `t` toggles
-  to uncommitted-only ("what did the agent just do?") and back.
-- **Vim-grammar navigation, `/` search first.** `/` opens incremental content
-  search over the *entire* changeset (all files, not just mounted rows —
-  search runs against the row plan, so it works with virtualized/lazy-parsed
-  content); smartcase; literal substring v1; `n`/`N` next/prev with wrap
-  indicator; match count ("3/47") in the status bar; all matches highlighted,
-  current match distinct; Esc restores the pre-search scroll position.
-  Searching a 100k-line changeset must stay under ~50ms per keystroke.
+  `preceipts land`. No land keybinding — the app's scope is scroll, search,
+  monitor, and watch checks run.
+- **Always current.** The diff reloads on file changes, off-thread, so a
+  multi-second reload of a big changeset never freezes the UI while an agent
+  is editing — `preceipts-core`'s watcher is the same quiet detector
+  `preceipts watch` fires checks from. Receipt snapshots also refresh on a
+  timer, because receipts change with no worktree event at all (an agent
+  minting in another terminal, a sync, the base moving). The CLI watches
+  today; the app does not wire the watcher yet.
+- **Branch diff by default, one key to switch.** The app opens the branch view
+  — merge-base(origin/main | main | …/master, HEAD) → working tree — because
+  the unit of review is the branch, not the last save. A toggle to
+  uncommitted-only ("what did the agent just do?") and back; the CLI spells
+  the same two scopes `preceipts diff` and `preceipts diff --uncommitted`.
+- **⌘F search over the whole changeset**, not just mounted rows: the index in
+  `preceipts-core` folds case once per changeset, off the UI thread, and each
+  keystroke is one sweep over a contiguous buffer. Literal substring,
+  next/prev with a wrap indicator, match count, all matches highlighted with
+  the current one distinct. Under ~50ms per keystroke on a 100k-line
+  changeset. The index is ported; the app does not bind ⌘F to it yet.
+  Vim-grammar navigation was dropped with the TUI (decision 10): the app
+  follows macOS conventions.
 
-### Engine ↔ cockpit interface
+### App ↔ core interface
 
-`preceipts run --events` emits NDJSON on stdout as checks execute:
+There is no engine process to talk to. Receipts, status, and check runs all
+live in `preceipts-core`; the app links it and reads in-process, the CLI links
+it and prints. Agents get the same truth out of `preceipts run --json` and
+`preceipts status --json`, which is what keeps the two front-ends honest about
+each other. (The NDJSON
+`--events` stream and the `preceipts-engine` pass-through this section once
+specified went out with the TS/Bun engine — decision 12.)
 
-```
-{"event":"check-started","check":"test","tree":"8f3a…","ts":…}
-{"event":"output","check":"test","chunk":"PASS src/core/…\n"}
-{"event":"check-finished","check":"test","ok":true,"exit":0,"duration_ms":…}
-{"event":"receipt-minted","check":"test","tree":"8f3a…","log":"blob:…"}
-```
+### The status HUD
 
-The cockpit (Rust) shells out to `preceipts-engine` and consumes these events
-over stdout; `--events` and `--json` are the whole contract, so *any*
-front-end — including an agent tailing progress — gets identical truth. The
-`preceipts` binary also passes engine subcommands straight through
-(`preceipts run` == `preceipts-engine run`), so there is one entry point.
+A one-line footer answering "where does this workspace stand?" It is app
+chrome (decision 10), not a verb: `render_hud` in the cockpit draws the base
+ref, the file and line counts of the changeset, and the receipt verdict —
+green, or the required checks that are not.
 
-### The footer HUD
+Still design intent, none of it built: merge cleanliness vs the base
+(`git merge-tree --write-tree`, conflicted file list), ahead/behind, land
+freshness (is the base head still the merge-base?), fetch age, and the count
+of local receipts origin has never seen. Each is a question you otherwise
+answer by leaving the app.
 
-A persistent one-line (expandable) footer answering "what happens if I land
-right now?" — the situational awareness GitHub's PR page spreads across five
-widgets. Engine side it is `preceipts hud [--base main] --json`: one payload,
-consumed identically by the TUI footer, shell prompts, and agents.
+Whatever it grows into, the HUD stays read-only, never networks of its own
+accord, and blocks nothing (philosophy: inform, don't gate).
 
-Fields (all computed read-only; nothing touches the worktree or index):
-
-- **Merge cleanliness** vs the base — `git merge-tree --write-tree` (in-memory
-  merge, git ≥ 2.38): clean / conflicted, with the conflicted file list.
-  The base is the *remote-tracking* ref when it exists (`origin/main`), local
-  branch otherwise — conflicts with where main actually is, not a stale local.
-- **Ahead/behind** the base (`rev-list --left-right --count`).
-- **Land freshness** — would the squash commit's tree be the proven tree?
-  True iff the base head *is* the merge-base (same predicate `land` uses).
-- **Fetch age** — how stale is our picture of the remote (FETCH_HEAD mtime;
-  null = never fetched). A "clean merge" verdict against a week-old
-  origin/main is worth flagging.
-- **Unsynced receipts** — count of local receipt lines origin doesn't have
-  yet (local notes vs the remote-tracking notes ref). Receipts that never
-  synced are receipts teammates can't see.
-- **Worktree coherence** — the working-tree hash, dirty flag, and the full
-  status table (rows + green) for that tree: do receipts speak to what's on
-  disk *right now*?
-
-The HUD never blocks anything (philosophy: inform, don't gate). The TUI
-recomputes it on filesystem/ref changes; the fetch itself stays a deliberate
-user/agent action — `hud` reports staleness, it doesn't network.
-
-## Out of scope (phase 1)
+## Out of scope
 
 - Minting receipts for refs other than the current worktree (needs temp
   worktrees; revisit when agents want to prove branches they haven't checked out)
@@ -319,15 +323,23 @@ user/agent action — `hud` reports staleness, it doesn't network.
 
 ## Phasing
 
-1. **Engine + CLI** (done): Bun + TypeScript in `engine/`, `bun build
-   --compile` single binary `preceipts-engine`. The `--json`/`--events`
-   surface is the cockpit contract.
-2. **Dogfood** in trip with agents minting receipts for a couple of weeks; the
-   trust/workflow model is the real bet, validate it in parallel with cockpit
-   work.
-3. **Cockpit** (see above): lumen fork at the repo root — add the receipts
-   rail, live check runs (`run --events`), log pager, HUD footer, and `land`,
-   all via `preceipts-engine`.
+1. **Engine + CLI** (done, then retired): the first `preceipts-engine` was Bun
+   + TypeScript in `engine/`, and its `--json` surface is what the CLI's read
+   commands still owe their shape to. Decision 12 deleted it; receipts,
+   checks, and diff live in `preceipts-core`, spoken to by the `preceipts`
+   binary.
+2. **Dogfood** in trip with agents minting receipts; the trust/workflow model
+   is the real bet, validated in parallel with cockpit work.
+3. **Cockpit** (see above): the GPUI app over the same core — diff surface
+   first (the riskiest port), then the workspace list and HUD, then the
+   per-check rail and log pager.
+4. **The lab's agent face**: CLI parity, `preceipts mcp`, and the environment
+   verbs, so anything an agent needs is reachable without the app.
+5. **Quiet-triggered runs** (`preceipts watch`, and the same detector in the
+   app): the north-star feature, last because it needs everything above.
+
+Step-by-step sequencing, and what remains of it, is in
+docs/direction-2026-08.md.
 
 ## Decisions log
 
@@ -343,7 +355,9 @@ user/agent action — `hud` reports staleness, it doesn't network.
    for scripts that want failure.
 5. **Sync**: explicit (`preceipts sync`); `run --sync` opts into push-after-
    mint; `init` offers to add receipt refspecs to the remote so ordinary
-   `git push` carries receipts.
+   `git push` carries receipts. *(The `--sync` flag never shipped: pushing
+   after minting stayed the standalone `sync` verb. The rest of the decision
+   holds.)*
 6. **HUD**: read-only and network-free — it reports fetch staleness rather
    than fetching; the base for conflict/freshness questions is the
    remote-tracking ref when present, the local branch otherwise.
@@ -356,7 +370,9 @@ user/agent action — `hud` reports staleness, it doesn't network.
    PATH or via `PRECEIPTS_ENGINE`). The Cargo *package* keeps upstream's name
    to minimize merge friction; only the `[[bin]]` is renamed. Earlier plans —
    hunk fork, then an own OpenTUI DiffSurface pane — are superseded (prototype
-   evidence retained in the hunk fork as reference).
+   evidence retained in the hunk fork as reference). *(Superseded whole by
+   decisions 10-12: no fork, no TUI, no second binary. The app links the
+   core.)*
 
 8. **Prepare phase** (2026-07-06, from trip dogfooding): format/codegen is
    `[prepare]` — serial commands run before the receipt tree is computed,
@@ -368,7 +384,11 @@ user/agent action — `hud` reports staleness, it doesn't network.
    agent's job through the engine CLI. Lumen's AI commands and flags are
    hidden from `--help` (still compiled, minimizing upstream divergence).
    Defaults: PR diff scope, watch on, async reloads, timer-refreshed
-   HUD/status. `t` toggles PR ⇄ uncommitted scope.10. **Desktop app, macOS-native, GPUI** (2026-07-07, user decision). The
+   HUD/status. `t` toggles PR ⇄ uncommitted scope. *(The scope rule and the
+   view-only stance survive into the app; the TUI and the engine CLI it
+   landed through do not — decisions 10-12.)*
+
+10. **Desktop app, macOS-native, GPUI** (2026-07-07, user decision). The
     cockpit moves out of the TUI into a macOS desktop app: GPUI shell over a
     UI-agnostic `preceipts-core` crate (gix, imara-diff, tree-sitter, watch);
     engine boundary unchanged. One scroll surface (Zed-style multibuffer, not
@@ -527,10 +547,11 @@ user/agent action — `hud` reports staleness, it doesn't network.
 
     Implemented on branch `rust`: hostnames, the deleted DNS layer, the
     dissolution, the env split with turbo reconciliation, and the fidelity
-    field. Still ahead of the decision: converging `procpane.toml` into
-    `preceipts.toml`, booting a workspace's environment through the daemon,
-    and the signed bundle that `SMAppService` registration and the shared
-    Keychain access group both wait on.
+    field. Since then `preceipts migrate` converts `procpane.toml` into
+    `preceipts.toml` and `preceipts up` boots a workspace's environment
+    through the daemon. Still ahead of the decision: the signed bundle that
+    `SMAppService` registration and the shared Keychain access group both
+    wait on.
 
     Surveyed alongside: **ABox** (libkrun microVM per agent session on
     Hypervisor.framework). Adopted from it — libkrun as the rail that

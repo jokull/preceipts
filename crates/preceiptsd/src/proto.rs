@@ -82,7 +82,7 @@ pub struct ProcStatus {
     /// detected → CLOUDFLARE_INCLUDE_PROCESS_ENV=true").
     #[serde(default)]
     pub notes: Vec<String>,
-    /// True if the task is explicitly declared in `procpane.toml`. Used by
+    /// True if the service is explicitly declared in `preceipts.toml`. Used by
     /// renderers to distinguish "services the user cares about" from
     /// implicit workspace `dev` tasks (typically `tsc --watch` builders).
     #[serde(default)]

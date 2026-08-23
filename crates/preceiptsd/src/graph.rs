@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{parse_dep, DepRef, TaskDef, TurboJson};
 use crate::project::Project;
-use crate::sidecar::TaskOverlay;
+use crate::services::ServiceFacts;
 
 #[derive(Debug, Clone)]
 pub struct TaskNode {
@@ -15,8 +15,9 @@ pub struct TaskNode {
     pub cwd: std::path::PathBuf,
     /// Sibling co-launches (`with`): launch alongside, no edge in DAG.
     pub with: Vec<String>, // resolved "pkg#task" ids
-    /// procpane.toml overlay (healthcheck, hostname, etc.). Empty when absent.
-    pub overlay: TaskOverlay,
+    /// Service facts from the manifest (healthcheck, hostname, …). Empty for
+    /// a task the manifest says nothing about.
+    pub service: ServiceFacts,
 }
 
 impl TaskNode {
@@ -53,7 +54,7 @@ impl TaskGraph {
                     // Skip the workspace-root package on bare-name expansion.
                     // Root scripts in a Turborepo are typically aggregators
                     // (`turbo run dev -F @trip/next`) that would nest turbo
-                    // inside procpane; turbo's own rule is that root tasks
+                    // inside this daemon; turbo's own rule is that root tasks
                     // must be addressed explicitly as `//#task`, so we mirror
                     // that. Qualified requests (`<root>#dev`) still work — they
                     // hit the explicit branch above and bypass this filter.
@@ -147,10 +148,10 @@ impl TaskGraph {
             }
 
             let canonical_id = format!("{}#{}", package.name, task);
-            let short_overlay_id = format!("{}#{}", package.short, task);
-            let overlay = project
-                .sidecar
-                .overlay(&canonical_id, Some(&short_overlay_id))
+            let short_service_id = format!("{}#{}", package.short, task);
+            let service = project
+                .services
+                .service(&canonical_id, Some(&short_service_id))
                 .cloned()
                 .unwrap_or_default();
 
@@ -161,7 +162,7 @@ impl TaskGraph {
                 script,
                 cwd: package.path.clone(),
                 with: with_ids,
-                overlay,
+                service,
             };
             let idx = graph.add_node(node);
             by_id.insert(id.clone(), idx);

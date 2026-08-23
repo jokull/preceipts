@@ -130,6 +130,12 @@ enum Command {
     Mcp,
     /// Scaffold .preceipts/ in a repository that has none.
     Init,
+    /// Retire procpane: convert its manifest, move its secrets, clean up.
+    Migrate {
+        /// Show what would change without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Share receipts with origin: fetch, merge losslessly, push.
     Sync {
         #[arg(long)]
@@ -154,7 +160,8 @@ enum Command {
     },
 
     // ---- the environment -------------------------------------------------
-    // These were `procpane`'s. They are here rather than on a second binary
+    // These came from the absorbed daemon. They are here rather than on a
+    // second binary
     // because the lab has one door: anything the app can do, `preceipts` can
     // do, and an agent should not have to learn which tool owns which verb.
     /// Bring the project's services up, healthcheck-gated, in the background.
@@ -292,6 +299,7 @@ fn run() -> Result<()> {
         Command::Watch { quiet, checks } => watch(&path, quiet, checks),
         Command::Mcp => mcp::serve(&path),
         Command::Init => init(&path),
+        Command::Migrate { dry_run } => migrate(&path, dry_run, keychain.as_deref()),
         Command::Sync { json } => sync(&path, json),
         Command::Gc {
             keep_success,
@@ -797,6 +805,85 @@ fn doctor(path: &Path, json: bool) -> Result<()> {
         return Ok(());
     }
     std::process::exit(1);
+}
+
+/// One-time migration off procpane. **Scaffolding — delete this verb once the
+/// machines that need it have run it.**
+///
+/// This project has no users to keep compatible, so nothing here is a
+/// compatibility layer: it is a one-shot tool for the handful of repositories
+/// and keychains that predate the rename. Everything it does is something a
+/// person would otherwise do by hand and get subtly wrong — the manifest is a
+/// different *shape*, not a different spelling, and the secrets are real
+/// values that exist nowhere else. It earns its place by being the reason the
+/// old name could be removed everywhere else, rather than read forever.
+fn migrate(path: &Path, dry_run: bool, keychain: Option<&str>) -> Result<()> {
+    use preceipts_core::migrate as convert;
+
+    let root = workspace::locate(path)
+        .map(|ws| ws.project_root)
+        .unwrap_or_else(|_| path.to_path_buf());
+    let mut did_something = false;
+
+    match convert::from_procpane(&root)? {
+        None => println!("no procpane.toml here"),
+        Some(conversion) => {
+            let target = root.join("preceipts.toml");
+            if target.exists() {
+                println!("preceipts.toml already exists — leaving both files alone");
+                println!("  delete procpane.toml when you are satisfied the new one is right");
+            } else if dry_run {
+                println!("would write {}:\n", target.display());
+                println!("{}", conversion.manifest);
+            } else {
+                std::fs::write(&target, &conversion.manifest)
+                    .with_context(|| format!("writing {}", target.display()))?;
+                // The old file is left on disk rather than deleted. It is
+                // still in git, it costs nothing, and a conversion a person
+                // has not read yet is not one they have accepted.
+                println!("wrote {}", target.display());
+                println!("  procpane.toml is untouched; delete it once you have read the new one");
+                did_something = true;
+            }
+            for note in &conversion.notes {
+                println!("  ! {note}");
+            }
+        }
+    }
+
+    if dry_run {
+        let legacy = preceiptsd::secrets::legacy_service_name(&root);
+        match preceiptsd::secrets::list_accounts(&legacy, keychain) {
+            Ok(accounts) if !accounts.is_empty() => {
+                println!(
+                    "would move {} secret(s) to the new namespace:",
+                    accounts.len()
+                );
+                for account in accounts {
+                    println!("  {account}");
+                }
+            }
+            _ => println!("no secrets under the old namespace"),
+        }
+        return Ok(());
+    }
+
+    match preceiptsd::secrets::migrate_namespace(&root, keychain) {
+        Ok(moved) if moved.is_empty() => {}
+        Ok(moved) => {
+            println!(
+                "moved {} secret(s) into the preceipts namespace",
+                moved.len()
+            );
+            did_something = true;
+        }
+        Err(error) => eprintln!("could not move secrets: {error:#}"),
+    }
+
+    if !did_something {
+        println!("nothing left to migrate");
+    }
+    Ok(())
 }
 
 fn sync(path: &Path, json: bool) -> Result<()> {

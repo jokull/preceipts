@@ -985,9 +985,8 @@ same sequence:
 What steps 9–13 leave for the next pass, in the order they block things:
 
 14. ~~**One manifest.**~~ *Done.* `preceipts.toml` is the only file anyone
-    authors; `procpane.toml` still loads so an existing repository does not
-    break on upgrade, but the two are never merged — having both would mean
-    two answers to "what runs here". The manifest describes a service graph
+    authors. (`procpane.toml` was still readable when this step landed; step
+    17 removed that.) The manifest describes a service graph
     and is translated into the overlay shape the daemon's internals are built
     on, rather than rewriting working machinery to make a point. Two things
     the convergence forced: `turbo.json` is no longer required to root a
@@ -1015,6 +1014,32 @@ What steps 9–13 leave for the next pass, in the order they block things:
     `notes merge --strategy=cat_sort_uniq`, which has no libgit2 equivalent
     and is the whole reason sharing receipts is safe: two people minting for
     one tree keep both lines instead of one winning.
-17. **The signed bundle**: `SMAppService` registration, the shared Keychain
+17. ~~**Retire the name.**~~ *Done, on user direction.* Absorbing procpane
+    left the word alive in four places for compatibility, which is how a shim
+    outlives its reason. `preceipts migrate` converts the manifest, moves the
+    Keychain items — the one thing here that is *data* rather than
+    configuration — and the CA migrates on read. Nothing loads `procpane.toml`
+    any more; a project that still has one is told to migrate rather than
+    quietly translated at every boot, because translation means the old model
+    never leaves. Verified against trip's real 112-line file: four services,
+    the dependency graph, health timing, and per-service env allowlists all
+    intact, and 42 secrets identified for the move.
+
+    With no users to keep compatible, the internal shape went too. The daemon
+    used to hold procpane's model — amendments to turbo tasks — with the
+    service graph translated into it at every boot. That is how a bad model
+    survives a rewrite. `Sidecar`/`TaskOverlay` are `Services`/`ServiceFacts`,
+    the word "overlay" is gone, and with no file parsed into them the `serde`
+    derives went with it: keeping a deserializer would have left the old file
+    readable by accident. `preceipts migrate` is the one piece of scaffolding
+    left, and it is marked for deletion rather than kept as a feature.
+
+18. **The run lock is pid-based**, which leaves a window: a lock whose
+    holder died and whose pid was reused reads as live, and only a manual
+    delete clears it. `flock` closes that window — the kernel releases an
+    advisory lock when the holder dies, with no pid to reuse. Noted rather
+    than built, because the engine lived with these semantics and swapping
+    them is a change worth making deliberately rather than mid-verification.
+19. **The signed bundle**: `SMAppService` registration, the shared Keychain
     access group, notarization — and with them the retirement of the
     open-ACL secrets workaround.

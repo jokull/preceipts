@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::buffer::SharedBuffer;
 
-/// Env vars carried over from procpane's parent shell even when the task has
+/// Env vars carried over from the daemon's parent shell even when the task has
 /// opted into `env_from` (and therefore wants a scrubbed env). These are the
 /// vars a Unix process generally expects to find — locale, terminal, user
 /// identity, temp directory. *No* third-party-credentials-shaped names.
@@ -104,10 +104,10 @@ impl Proc {
     /// Spawn under a PTY, in its own process group. Returns once the child is
     /// spawned; reader thread streams into the ring buffer.
     ///
-    /// `inherit_parent_env` controls whether the spawned process sees procpane's
+    /// `inherit_parent_env` controls whether the spawned process sees the daemon's
     /// full parent environment. When `false`, only a minimal "safe" set
     /// (HOME, USER, LANG, etc.) is inherited and everything else is dropped —
-    /// the caller's overlay (`env`) is the only source of project-specific
+    /// the caller's service (`env`) is the only source of project-specific
     /// values. This is the right mode for tasks that have declared an
     /// `env_from` allowlist; it makes the allowlist actually load-bearing
     /// instead of "allowlist on top of full bleed".

@@ -1,7 +1,7 @@
-//! Keychain-backed secret storage. One service namespace per repo.
+//! Keychain-backed secret storage. One service namespace per project.
 //!
-//! Each (service, account) pair maps to (`procpane:<canonical-repo-path>`, KEY)
-//! and stores the UTF-8 secret value. macOS-only for now; Linux returns
+//! Each (service, account) pair maps to (`preceipts:<canonical-project-path>`,
+//! KEY) and stores the UTF-8 secret value. macOS-only for now; Linux returns
 //! "unsupported" until libsecret integration lands.
 
 use anyhow::{anyhow, Result};
@@ -16,16 +16,57 @@ use std::path::Path;
 /// your Stripe key per branch. Secrets belong to the repository; workspaces
 /// borrow them.
 ///
-/// The prefix stays `procpane:` so existing Keychain entries keep working
-/// across the dissolution — renaming it would silently orphan every secret a
-/// user has already stored, in exchange for tidiness nobody can see
-/// through the rename.
+/// The namespace secrets are stored under.
+pub const PREFIX: &str = "preceipts:";
+
+/// What procpane stored them under. Only `migrate` looks here — see
+/// [`legacy_service_name`].
+pub const LEGACY_PREFIX: &str = "procpane:";
+
 pub fn service_name(repo_root: &Path) -> String {
+    format!("{PREFIX}{}", project_path(repo_root))
+}
+
+/// The same project's old namespace.
+///
+/// Secrets are the one thing in this dissolution that is *data* rather than
+/// configuration: a renamed constant orphans values a person typed in and
+/// cannot get back from anywhere else. So the old name survives here, used by
+/// exactly one thing — `preceipts migrate`, which copies items across and
+/// deletes the originals. After that runs, nothing reads it.
+pub fn legacy_service_name(repo_root: &Path) -> String {
+    format!("{LEGACY_PREFIX}{}", project_path(repo_root))
+}
+
+fn project_path(repo_root: &Path) -> String {
     let root = preceipts_core::workspace::locate(repo_root)
         .map(|workspace| workspace.project_root)
         .unwrap_or_else(|_| repo_root.to_path_buf());
     let canon = root.canonicalize().unwrap_or(root);
-    format!("procpane:{}", canon.display())
+    canon.display().to_string()
+}
+
+/// Move every secret from the old namespace into the new one.
+///
+/// Copy-then-delete, in that order and per item: a crash between the two
+/// leaves a duplicate, which is recoverable, rather than a hole, which is not.
+/// An item already present in the new namespace is left alone — re-running the
+/// migration must not overwrite a value someone has since changed.
+pub fn migrate_namespace(repo_root: &Path, keychain: Option<&str>) -> Result<Vec<String>> {
+    let legacy = legacy_service_name(repo_root);
+    let current = service_name(repo_root);
+    let mut moved = Vec::new();
+    for account in list_accounts(&legacy, keychain)? {
+        let Some(value) = get(&legacy, &account, keychain)? else {
+            continue;
+        };
+        if get(&current, &account, keychain)?.is_none() {
+            set(&current, &account, &value, keychain)?;
+            moved.push(account.clone());
+        }
+        delete(&legacy, &account, keychain)?;
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]
@@ -91,11 +132,11 @@ mod mac {
     //! the security-framework Rust crate.
     //!
     //! Why: the Keychain ACL is evaluated against the *calling binary's*
-    //! codesign identity. `cargo install` rewrites procpane constantly during
+    //! codesign identity. `cargo install` rewrites the binary constantly during
     //! development; each rebuild is a new identity, and every read prompts.
     //! `/usr/bin/security` is a stable system binary that never moves — once
     //! the user clicks "Always Allow" for it (once, ever), every future
-    //! procpane build can read transparently.
+    //! build can read transparently.
     //!
     //! The security-framework fallback is kept only for diagnostic warnings.
     use super::*;
@@ -106,7 +147,12 @@ mod mac {
     // Magic account name for the per-service index. Listed accounts are
     // tracked here so we don't have to walk every keychain item. The index
     // is hidden from `list_accounts`.
-    const INDEX_ACCOUNT: &str = "__procpane_index__";
+    const INDEX_ACCOUNT: &str = "__preceipts_index__";
+
+    /// procpane's name for the same index. Read when the current one is
+    /// absent, so `migrate` can enumerate what the old tool stored — and so a
+    /// namespace written by procpane is not simply invisible.
+    const LEGACY_INDEX_ACCOUNT: &str = "__procpane_index__";
 
     /// Keychain database path(s) appended as trailing positional args to
     /// `/usr/bin/security` (add/find/delete all take `[keychain...]` at the
@@ -274,7 +320,10 @@ mod mac {
     }
 
     fn index_read(service: &str, keychain: Option<&str>) -> Result<Vec<String>> {
-        match sec_get(service, INDEX_ACCOUNT, keychain)? {
+        if let Some(s) = sec_get(service, INDEX_ACCOUNT, keychain)? {
+            return Ok(index_payload_lines(&s));
+        }
+        match sec_get(service, LEGACY_INDEX_ACCOUNT, keychain)? {
             Some(s) => Ok(index_payload_lines(&s)),
             None => Ok(Vec::new()),
         }

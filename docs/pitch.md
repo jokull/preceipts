@@ -36,10 +36,10 @@ is identical, the proof still stands.
 **Your environment is a laboratory, and your agent knows it's inside one.**
 
 ```bash
-preceipts tail api --since $cursor      # logs, cursor-addressable
-preceipts requests --since 2m           # every HTTP request its code just served
-preceipts signal api HUP --wait 5s      # restart, block until healthy again
-preceipts status                        # services, health, URLs, receipts
+preceipts proc api tail -n 200          # logs, cursor-addressable
+preceipts proc api signal HUP --wait 5s # restart, block until healthy again
+preceipts services                      # what is up, healthy, and on which URL
+preceipts status                        # the receipt table for this tree
 ```
 
 Everything the app shows you, an agent can query — same socket, same
@@ -48,9 +48,11 @@ speaks MCP picks it up natively — no plugin, no vendor. A worktree
 identifies itself through the environment, so any agent started in that
 directory finds its lab without being configured.
 
-The HTTP transcript is the one to notice. The local TLS proxy already sees
-every request into every service, so your agent can read exactly what its
-code served and answered — with nothing instrumented in your app.
+The HTTP transcript is the one to notice, and it is the next thing being
+built rather than a thing that works today. The local TLS proxy is already
+in the path of every request into every service, which is why recording
+them costs nothing to instrument: your agent will be able to read exactly
+what its code served and answered, with nothing added to your app.
 
 ## What it isn't
 
@@ -63,13 +65,16 @@ happening and telling you whether it's safe to land.
 
 ## How it works
 
-macOS-native where it counts: secrets in the Keychain under a real access
-group, Touch ID to reveal them, the daemon as a LaunchAgent so your dev
-servers outlive the window, a local CA so `https://` just works, FSEvents
-for the watching. One Rust workspace: an in-process core for git, diff,
-and highlighting (no IPC on the scroll path), a daemon for processes,
-health, proxying, and check runs, and a CLI that's a first-class client
-rather than an afterthought.
+macOS-native where it counts: secrets in the Keychain, a local CA so
+`https://` just works, FSEvents for the watching, and `*.localhost`
+hostnames the system resolves on its own — no DNS to install and none to
+leave behind. Signing brings the rest: a shared Keychain access group,
+Touch ID to reveal a secret, and the daemon registered so your dev servers
+outlive the window.
+
+One Rust workspace: an in-process core for git, diff, and highlighting (no
+IPC on the scroll path), a daemon for processes, health, and proxying, and
+a CLI that's a first-class client rather than an afterthought.
 
 Local-first and offline. Your code, your machine, your keychain.
 

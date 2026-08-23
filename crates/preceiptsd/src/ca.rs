@@ -155,7 +155,7 @@ pub fn sign_leaf(dns_names: &[String]) -> Result<(String, String)> {
         CertificateParams::new(dns_names.to_vec()).context("build leaf params")?;
     leaf_params.distinguished_name = {
         let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, "procpane leaf");
+        dn.push(DnType::CommonName, "preceipts leaf");
         dn
     };
     leaf_params.key_usages = vec![
@@ -211,7 +211,7 @@ mod tests {
 
     fn tempdir_like() -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("procpane-ca-test-{}", std::process::id()));
+        p.push(format!("preceipts-ca-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p

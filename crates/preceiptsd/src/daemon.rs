@@ -15,7 +15,7 @@ use crate::process::{Proc, ProcState};
 use crate::proto::{GrepMatch, LineRecord, ProcStatus, Request, Response};
 use crate::proxy::{self, PortRegistry, PROXY_PORT};
 use crate::secrets;
-use crate::sidecar::DependsOnCondition;
+use crate::services::DependsOnCondition;
 use crate::{ca, forwarder, project::Project};
 use preceipts_core::ports;
 
@@ -28,7 +28,7 @@ pub struct Daemon {
     pub buffers: BTreeMap<String, SharedBuffer>,
     pub stop_tx: Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     pub started_at: Instant,
-    /// Per-task hostname declared in `procpane.toml` (for status output).
+    /// Per-service hostname, composed from the manifest label.
     pub hostnames: BTreeMap<String, String>,
     /// Per-task allocated TCP port (when hostname is set; PORT env injected).
     pub allocated_ports: BTreeMap<String, u16>,
@@ -42,7 +42,8 @@ pub struct Daemon {
     /// Per-task one-line diagnostic notes (e.g. "wrangler detected → ..."),
     /// rendered as indented sub-lines under the task in the up-table.
     pub notes: BTreeMap<String, Mutex<Vec<String>>>,
-    /// Task ids that have an explicit entry in `procpane.toml` (`[tasks.*]`).
+    /// Task ids the manifest declares as services, as opposed to workspace
+    /// builders that turbo pulled in transitively.
     /// Lets renderers distinguish user-declared services from implicit
     /// workspace `dev` tasks.
     pub manifest_tasks: std::collections::HashSet<String>,
@@ -73,7 +74,7 @@ impl Daemon {
             if !n.def.persistent {
                 continue;
             }
-            for key in &n.overlay.env_from {
+            for key in &n.service.env_from {
                 match secrets::get(&service, key, None) {
                     Ok(Some(_)) => {}
                     Ok(None) => missing.entry(n.id()).or_default().push(key.clone()),
@@ -98,7 +99,8 @@ impl Daemon {
             return Err(anyhow!("missing required secrets"));
         }
 
-        // Partition graph nodes: persistent (procpane runs) vs non-persistent (turbo prebuild).
+        // Partition graph nodes: persistent (we supervise) vs non-persistent
+        // (turbo prebuild).
         let mut prebuild_ids: Vec<String> = Vec::new();
         let mut persistent_indices: Vec<NodeIndex> = Vec::new();
         for idx in graph.graph.node_indices() {
@@ -150,7 +152,7 @@ impl Daemon {
             procs.insert(PREBUILD_ID.to_string(), proc);
         }
 
-        // Collect per-task overlay-derived metadata for daemon-side use.
+        // Collect per-task service-derived metadata for daemon-side use.
         let mut hostnames: BTreeMap<String, String> = BTreeMap::new();
         let mut stop_signals: BTreeMap<String, i32> = BTreeMap::new();
         let mut stop_grace: BTreeMap<String, Duration> = BTreeMap::new();
@@ -171,11 +173,11 @@ impl Daemon {
         for idx in &persistent_indices {
             let n = &graph.graph[*idx];
             let id = n.id();
-            if let Some(h) = &n.overlay.hostname {
+            if let Some(h) = &n.service.hostname {
                 hostnames.insert(id.clone(), workspace_host(h, &project.root));
             }
-            stop_signals.insert(id.clone(), n.overlay.stop_signal());
-            stop_grace.insert(id.clone(), n.overlay.stop_grace());
+            stop_signals.insert(id.clone(), n.service.stop_signal());
+            stop_grace.insert(id.clone(), n.service.stop_grace());
             notes.insert(id, Mutex::new(Vec::new()));
         }
 
@@ -209,7 +211,7 @@ impl Daemon {
         };
 
         let manifest_tasks: std::collections::HashSet<String> =
-            project.sidecar.tasks.keys().cloned().collect();
+            project.services.tasks.keys().cloned().collect();
 
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let daemon = Arc::new(Daemon {
@@ -258,7 +260,7 @@ impl Daemon {
                         });
                     }
                     Err(e) => {
-                        eprintln!("procpane: skipping HTTPS proxy ({e})");
+                        eprintln!("preceipts: skipping HTTPS proxy ({e})");
                     }
                 }
             } else {
@@ -305,7 +307,7 @@ impl Daemon {
             .with_context(|| format!("bind {}", socket_path.display()))?;
 
         eprintln!(
-            "procpane daemon listening at {} (pid {})",
+            "preceipts daemon listening at {} (pid {})",
             socket_path.display(),
             std::process::id()
         );
@@ -337,7 +339,7 @@ impl Daemon {
         }
 
         // Shutdown all procs, honoring per-task stop signal & grace.
-        eprintln!("procpane shutting down…");
+        eprintln!("preceipts shutting down…");
         for (id, p) in &daemon.procs {
             let signal = daemon.stop_signals.get(id).copied().unwrap_or(libc::SIGINT);
             let grace = daemon
@@ -434,7 +436,7 @@ async fn run_scheduler(
                 let st = *proc.state.lock();
                 if st.is_terminal() {
                     if matches!(st, ProcState::Crashed | ProcState::Killed) {
-                        eprintln!("procpane: turbo prebuild failed; aborting run");
+                        eprintln!("preceipts: turbo prebuild failed; aborting run");
                         if let Some(tx) = daemon.stop_tx.lock().as_ref() {
                             let _ = tx.send(true);
                         }
@@ -481,10 +483,10 @@ async fn run_scheduler(
                 .neighbors_directed(idx, petgraph::Direction::Incoming)
             {
                 let dep_id = graph.graph[dep].id();
-                // Look up per-task override from the dependent's overlay, by both
-                // canonical id and short id (overlay map keys can use either).
+                // Look up per-task override from the dependent's service, by both
+                // canonical id and short id (service map keys can use either).
                 let cond = node
-                    .overlay
+                    .service
                     .depends_on
                     .get(&dep_id)
                     .or_else(|| {
@@ -494,7 +496,7 @@ async fn run_scheduler(
                             .split_once('/')
                             .and_then(|(_, tail)| {
                                 let short_id = format!("{}#{}", tail, graph.graph[dep].task);
-                                node.overlay.depends_on.get(&short_id)
+                                node.service.depends_on.get(&short_id)
                             })
                     })
                     .copied()
@@ -556,13 +558,10 @@ async fn run_scheduler(
             if let Some(host) = daemon.hostnames.get(&id) {
                 if let Some(port) = daemon.allocated_ports.get(&id) {
                     env.push(("PORT".into(), port.to_string()));
-                    // Both names for one value: a project may already read
-                    // the procpane one, and a rename that silently stops
-                    // injecting an env var is the kind of breakage that shows
-                    // up as a confusing 404 rather than an error.
-                    let url = public_url(host, daemon.proxy_port);
-                    env.push(("PRECEIPTS_PUBLIC_URL".into(), url.clone()));
-                    env.push(("PROCPANE_PUBLIC_URL".into(), url));
+                    env.push((
+                        "PRECEIPTS_PUBLIC_URL".into(),
+                        public_url(host, daemon.proxy_port),
+                    ));
                 }
             }
             // Inject every *other* task's public URL too, so apps that talk to
@@ -591,7 +590,7 @@ async fn run_scheduler(
             // presence; if a value disappeared between then and now we warn
             // and let the task start without it (rare race).
             let service = secrets::service_name(&root);
-            for key in &node.overlay.env_from {
+            for key in &node.service.env_from {
                 match secrets::get(&service, key, None) {
                     Ok(Some(val)) => env.push((key.clone(), val)),
                     Ok(None) => {
@@ -615,7 +614,7 @@ async fn run_scheduler(
             // allowlist: spawn with a scrubbed env so the parent shell's other
             // exports don't bleed in (and, transitively, don't bleed into the
             // Worker when CLOUDFLARE_INCLUDE_PROCESS_ENV is on).
-            let scrubbed = !node.overlay.env_from.is_empty();
+            let scrubbed = !node.service.env_from.is_empty();
 
             // Record a one-line note for the up-table when we auto-flip the
             // Wrangler flag — the user opted into env_from, and we're telling
@@ -638,8 +637,8 @@ async fn run_scheduler(
             spawned.insert(*idx);
 
             // Kick off the healthcheck loop for this task.
-            let hc_cfg = node.overlay.healthcheck.clone();
-            let hostname = node.overlay.hostname.clone();
+            let hc_cfg = node.service.healthcheck.clone();
+            let hostname = node.service.hostname.clone();
             let buffer = match daemon.buffers.get(&id) {
                 Some(b) => b.clone(),
                 None => continue,

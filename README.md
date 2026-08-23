@@ -149,9 +149,13 @@ One cargo workspace:
   diff surface, status HUD.
 - **`crates/preceiptsd`** — the daemon: healthcheck-gated orchestration, PTY
   supervision with queryable ring buffers, a local CA and TLS proxy, Keychain
-  secrets scoped per project. This was `procpane`; it is dissolved rather than
-  vendored, so there is no second product and no dependency edge between two
-  halves of one system.
+  secrets scoped per project.
+
+Coming from `procpane`? `preceipts migrate` converts its manifest into a
+`preceipts.toml`, moves its Keychain secrets into the new namespace, and
+migrates its CA — `--dry-run` first if you want to read the result before
+anything is written. Nothing reads the old file after that; the name survives
+only in the code that retires it.
 
 Every verb lives on `preceipts` — `up`, `down`, `services`, `proc`, `grep`,
 `secrets`, `trust` came across with the daemon — because the lab has one door
@@ -208,8 +212,8 @@ July 2026*. They pinned those implementations and now pin this one, which is the
 only reason rewriting tested code is safe to attempt.
 
 The performance contract came across too. The Swift cockpit loaded a 181-file
-changeset in ~0.7s release; this branch against origin/main is also 181 files,
-52,608 surface rows, in **366ms** — reads, diff, highlighting, surface build,
+changeset in ~0.7s release; this branch against origin/main is 189 files,
+57,015 surface rows, in **331ms** — reads, diff, highlighting, surface build,
 workspace discovery, and a receipt status read.
 
 ## History

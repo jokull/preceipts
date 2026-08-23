@@ -9,7 +9,7 @@ use tokio::time::timeout;
 use crate::buffer::SharedBuffer;
 use crate::process::{Proc, ProcState};
 use crate::proxy::PROXY_PORT;
-use crate::sidecar::Healthcheck;
+use crate::services::Healthcheck;
 
 #[derive(Debug, Clone)]
 pub enum HealthcheckKind {
@@ -35,7 +35,7 @@ pub enum HealthcheckKind {
 }
 
 impl HealthcheckKind {
-    /// Pick which kind to run from the sidecar. `hostname` (when set) maps the
+    /// Pick which kind to run from the services. `hostname` (when set) maps the
     /// HTTP healthcheck onto `http://<hostname>:<port>`. Without it, HTTP falls
     /// back to `127.0.0.1`. (TLS-aware variant comes with the reverse proxy.)
     pub fn from_sidecar(hc: &Healthcheck, hostname: Option<&str>) -> anyhow::Result<Self> {
@@ -189,7 +189,7 @@ async fn probe_tcp(port: u16, t: Duration) -> bool {
     matches!(timeout(t, TcpStream::connect(&addr)).await, Ok(Ok(_)))
 }
 
-/// Turn a sidecar `healthcheck.http` spec into a concrete probe target.
+/// Turn a services `healthcheck.http` spec into a concrete probe target.
 ///
 /// Accepted forms:
 /// * A path (`"/health"`) — requires the task to declare a `hostname`. The

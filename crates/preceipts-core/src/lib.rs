@@ -32,6 +32,7 @@ pub mod land;
 pub mod linediff;
 pub mod loader;
 pub mod manifest;
+pub mod migrate;
 pub mod model;
 pub mod notes;
 pub mod pairing;

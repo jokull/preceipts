@@ -239,3 +239,54 @@ fn a_secret_trip_passes_through_is_correct_and_reported_as_such() {
         "a wrong cache hit is the one that costs you"
     );
 }
+
+/// trip's real `procpane.toml`, the file the migration has to survive.
+const TRIP_PROCPANE: &str = include_str!("fixtures/trip-procpane.toml");
+
+/// The conversion is only worth anything if it works on the file that exists,
+/// not on one written to make it work.
+#[test]
+fn trips_procpane_manifest_converts_into_a_valid_preceipts_manifest() {
+    let converted = preceipts_core::migrate::convert(TRIP_PROCPANE).expect("trip's file converts");
+    let manifest =
+        preceipts_core::manifest::parse(&converted.manifest).expect("the output is valid TOML");
+
+    let names: Vec<&str> = manifest.services.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["admin", "api", "db", "web"],
+        "named for what a person calls them, not for their task ids"
+    );
+
+    // The dependency graph survives as service names, and still boots.
+    let api = manifest.services.iter().find(|s| s.name == "api").unwrap();
+    assert_eq!(api.needs, vec!["db"]);
+    assert!(
+        manifest.boot_order().is_ok(),
+        "the converted stack still has a workable order"
+    );
+
+    // The field the schema grew for this conversion.
+    assert_eq!(
+        api.health_start_period,
+        Some(std::time::Duration::from_secs(5)),
+        "start_period survives, or three health checks quietly start lying"
+    );
+
+    // Hostnames become labels, and the change is reported rather than silent.
+    assert_eq!(api.host.as_deref(), Some("api"));
+    assert!(
+        converted.notes.iter().any(|n| n.contains("api.trip.test")),
+        "{:?}",
+        converted.notes
+    );
+
+    // Per-service env allowlists are the whole point of env_from — a stray
+    // postinstall in one package must not see another's Stripe key.
+    let web = manifest.services.iter().find(|s| s.name == "web").unwrap();
+    assert!(web.env.contains(&"STRIPE_SECRET_KEY".to_string()));
+    assert!(
+        !api.env.contains(&"STRIPE_SECRET_KEY".to_string()),
+        "the api never had it, and still does not"
+    );
+}

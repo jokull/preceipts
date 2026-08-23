@@ -1,24 +1,16 @@
-//! One manifest, two consumers.
+//! The manifest, in the shape the daemon addresses things by.
 //!
-//! `preceipts.toml` describes a **service graph**: named services with a way
-//! to start, a health check, and dependencies. `procpane.toml` described an
-//! **overlay on turbo tasks**: the same facts, keyed by `pkg#task`, expressed
-//! as amendments to something turbo already knew about.
+//! `preceipts.toml` names services. The daemon addresses processes as
+//! `pkg#task`, because a monorepo's runner does and a service may *be* one of
+//! its tasks. This module is the join between the two, and it is the only
+//! place that knows both.
 //!
-//! Both survive here only because the daemon's internals — the graph, the
-//! healthcheck probes, the port allocator — are built on the overlay shape and
-//! are not worth rewriting to make a point. So the manifest is translated into
-//! that shape at load, and `preceipts.toml` becomes the only file anyone
-//! authors. `procpane.toml` still loads, because a repository that has one
-//! should not break on the day it upgrades.
-//!
-//! What the translation cannot invent is a task id. A service declared with
-//! `run = "…"` is a command, not a turbo task, and the daemon addresses
-//! processes by `pkg#task`. Such a service is given a synthetic id under a
-//! reserved package name — visible in `preceipts services`, and unambiguous
-//! against anything turbo produces.
+//! What it cannot invent is a task id. A service declared with `run = "…"` is
+//! a command, not a task, so it gets a synthetic id under a reserved package
+//! name — visible in `preceipts services`, and unambiguous against anything
+//! turbo produces.
 
-use crate::sidecar::{DependsOnCondition, Healthcheck, Sidecar, StopSignal, TaskOverlay};
+use crate::services::{DependsOnCondition, Healthcheck, ServiceFacts, Services, StopSignal};
 use preceipts_core::manifest::{Health, Manifest, Service};
 use std::collections::BTreeMap;
 
@@ -37,11 +29,11 @@ pub fn task_id(service: &Service) -> String {
     }
 }
 
-/// Translate a service graph into the overlay shape the daemon consumes.
-pub fn to_sidecar(manifest: &Manifest) -> Sidecar {
-    let mut tasks: BTreeMap<String, TaskOverlay> = BTreeMap::new();
+/// Everything the daemon needs to know about a project's services.
+pub fn to_services(manifest: &Manifest) -> Services {
+    let mut tasks: BTreeMap<String, ServiceFacts> = BTreeMap::new();
 
-    // `needs` names services; the overlay's `depends_on` names task ids. The
+    // `needs` names services; `depends_on` names task ids. The
     // lookup has to go through the manifest, because a service's id is not
     // derivable from its name once `task` is in play.
     let id_of: BTreeMap<&str, String> = manifest
@@ -93,7 +85,7 @@ pub fn to_sidecar(manifest: &Manifest) -> Sidecar {
 
         tasks.insert(
             task_id(service),
-            TaskOverlay {
+            ServiceFacts {
                 hostname: service.host.clone(),
                 healthcheck,
                 depends_on,
@@ -108,7 +100,7 @@ pub fn to_sidecar(manifest: &Manifest) -> Sidecar {
         );
     }
 
-    Sidecar { tasks }
+    Services { tasks }
 }
 
 fn parse_signal(text: &str) -> Option<StopSignal> {
@@ -151,10 +143,10 @@ mod tests {
     #[test]
     fn a_service_bound_to_a_turbo_task_keeps_that_id() {
         let manifest = parse("[services.api]\ntask = \"api#dev\"\nhost = \"api\"\n").unwrap();
-        let sidecar = to_sidecar(&manifest);
-        assert!(sidecar.tasks.contains_key("api#dev"));
+        let services = to_services(&manifest);
+        assert!(services.tasks.contains_key("api#dev"));
         assert_eq!(
-            sidecar.tasks["api#dev"].hostname.as_deref(),
+            services.tasks["api#dev"].hostname.as_deref(),
             Some("api"),
             "the hostname is a label; the fabric composes the rest"
         );
@@ -165,8 +157,8 @@ mod tests {
     #[test]
     fn a_plain_command_gets_a_synthetic_id() {
         let manifest = parse("[services.db]\nimage = \"postgres:17\"\n").unwrap();
-        let sidecar = to_sidecar(&manifest);
-        assert!(sidecar.tasks.contains_key("preceipts#db"));
+        let services = to_services(&manifest);
+        assert!(services.tasks.contains_key("preceipts#db"));
     }
 
     #[test]
@@ -176,8 +168,8 @@ mod tests {
              [services.api]\ntask = \"api#dev\"\nneeds = [\"db\"]\n",
         )
         .unwrap();
-        let sidecar = to_sidecar(&manifest);
-        let api = &sidecar.tasks["api#dev"];
+        let services = to_services(&manifest);
+        let api = &services.tasks["api#dev"];
         assert_eq!(
             api.depends_on.get("preceipts#db"),
             Some(&DependsOnCondition::Healthy),
@@ -195,9 +187,9 @@ mod tests {
              [services.d]\nrun = \"d\"\n",
         )
         .unwrap();
-        let sidecar = to_sidecar(&manifest);
+        let services = to_services(&manifest);
         assert_eq!(
-            sidecar.tasks["preceipts#a"]
+            services.tasks["preceipts#a"]
                 .healthcheck
                 .as_ref()
                 .unwrap()
@@ -205,7 +197,7 @@ mod tests {
             Some(5432)
         );
         assert_eq!(
-            sidecar.tasks["preceipts#b"]
+            services.tasks["preceipts#b"]
                 .healthcheck
                 .as_ref()
                 .unwrap()
@@ -214,7 +206,7 @@ mod tests {
             Some("/health")
         );
         assert_eq!(
-            sidecar.tasks["preceipts#c"]
+            services.tasks["preceipts#c"]
                 .healthcheck
                 .as_ref()
                 .unwrap()
@@ -223,7 +215,7 @@ mod tests {
             Some("ready")
         );
         assert!(
-            sidecar.tasks["preceipts#d"].healthcheck.is_none(),
+            services.tasks["preceipts#d"].healthcheck.is_none(),
             "nothing declared stays nothing declared"
         );
     }
@@ -236,13 +228,13 @@ mod tests {
              [services.worker]\nrun = \"w\"\nenv = [\"ENV\"]\n",
         )
         .unwrap();
-        let sidecar = to_sidecar(&manifest);
+        let services = to_services(&manifest);
         assert_eq!(
-            sidecar.tasks["preceipts#api"].env_from,
+            services.tasks["preceipts#api"].env_from,
             vec!["ENV", "SENTRY_DSN", "STRIPE_SECRET_KEY"]
         );
         assert_eq!(
-            sidecar.tasks["preceipts#worker"].env_from,
+            services.tasks["preceipts#worker"].env_from,
             vec!["ENV"],
             "the worker cannot see the api's Stripe key"
         );
@@ -253,10 +245,10 @@ mod tests {
         let manifest =
             parse("[services.api]\nrun = \"a\"\nstop_signal = \"SIGTERM\"\nstop_grace = \"30s\"\n")
                 .unwrap();
-        let overlay = &to_sidecar(&manifest).tasks["preceipts#api"];
-        assert_eq!(overlay.stop_signal, Some(StopSignal::Term));
+        let service = &to_services(&manifest).tasks["preceipts#api"];
+        assert_eq!(service.stop_signal, Some(StopSignal::Term));
         assert_eq!(
-            overlay.stop_grace_period,
+            service.stop_grace_period,
             Some(std::time::Duration::from_secs(30))
         );
     }
@@ -267,7 +259,7 @@ mod tests {
     #[test]
     fn a_dangling_need_is_dropped_rather_than_invented() {
         let manifest = parse("[services.api]\nrun = \"a\"\nneeds = [\"ghost\"]\n").unwrap();
-        assert!(to_sidecar(&manifest).tasks["preceipts#api"]
+        assert!(to_services(&manifest).tasks["preceipts#api"]
             .depends_on
             .is_empty());
         assert!(

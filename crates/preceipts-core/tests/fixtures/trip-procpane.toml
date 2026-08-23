@@ -1,0 +1,112 @@
+# procpane sidecar for the trip monorepo — the service manifest for
+# local dev.
+#
+#   procpane up        bring everything below up (recommended)
+#   procpane stop      take it back down
+#   procpane status    see the table any time
+#
+# After `procpane trust install --pretty-urls` (one-time sudo), the
+# hostnames below resolve via https without typing :8443. Keychain values
+# (set via `procpane env set …`) are injected into each task's process
+# according to its env_from allowlist — nothing else bleeds through.
+#
+# Only the four declared tasks below get surfaced in the up-table.
+# Workspace `tsc --watch` builders still run silently in the background
+# when they're transitive deps of these services; see `procpane status --all`.
+
+# ----- Postgres (docker compose) -------------------------------------------
+# Brings up the trip-db compose project. The tcp healthcheck blocks
+# downstream services until postgres is accepting connections.
+[tasks."@trip/db#db:up"]
+healthcheck.tcp = 5432
+healthcheck.start_period = "2s"
+
+# ----- API (cloudflare worker via @cloudflare/vite-plugin) -----------------
+# Runs `vite dev` (cloudflare-vite-plugin embeds workerd). Secrets come
+# from the Keychain; dotenvx is not in the picture for this variant.
+[tasks."@trip/api#dev:pp"]
+hostname = "api.trip.test"
+healthcheck.log = "VITE .* ready in"
+healthcheck.start_period = "5s"
+depends_on."@trip/db#db:up" = "healthy"
+env_from = [
+  "ENV",
+  "CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE",
+  "WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE",
+  "DATOCMS_API_TOKEN",
+  "SECRET",
+  "SENTRY_AUTH_TOKEN",
+  "SENTRY_ORG",
+  "SENTRY_PROJECT",
+  "EXPEDIA_API_KEY",
+  "EXPEDIA_SHARED_SECRET",
+  "KLING_SECRET_KEY",
+]
+
+# ----- Next.js -------------------------------------------------------------
+# Waits for the api to be healthy so SSR fetches don't race against a
+# half-booted worker. Keep apps/next/.env NEXT_PUBLIC_WORKER_URL matched
+# to the api.trip.test hostname so Next rewrites and browser clients agree.
+[tasks."@trip/next#dev:pp"]
+hostname = "web.trip.test"
+healthcheck.log = "Ready in|started server on|✓ Compiled"
+healthcheck.start_period = "5s"
+depends_on."@trip/api#dev:pp" = "healthy"
+env_from = [
+  "BOKUN_ACCESS_TOKEN",
+  "BOKUN_API_KEY",
+  "BOKUN_SECRET_KEY",
+  "DATABASE_URL",
+  "DATOCMS_WEBHOOK_TOKEN",
+  "DATO_PREVIEW_TOKEN",
+  "FLAGS_SECRET",
+  "GOOGLE_AUTH_CLIENT_SECRET",
+  "LINKTIVITY_API_KEY",
+  "LINKTIVITY_API_KEY_ID",
+  "MAILSAC_API_KEY",
+  "OPENAI_MIA_API_KEY",
+  "PACKAGE_REVALIDATION_TOKEN",
+  "POSTHOG_PERSONAL_API_KEY",
+  "SECRET",
+  "SENTRY_AUTH_TOKEN",
+  "STRIPE_ENDPOINT_SECRET",
+  "STRIPE_SECRET_KEY",
+]
+
+# ----- Admin (vite + tanstack-start + cloudflare-vite-plugin) -------------
+[tasks."@trip/admin#dev:pp"]
+hostname = "admin.trip.test"
+healthcheck.log = "VITE .* ready in|Local:.*localhost"
+healthcheck.start_period = "5s"
+depends_on."@trip/db#db:up" = "healthy"
+env_from = [
+  "BOKUN_ACCESS_TOKEN",
+  "BOKUN_HOST",
+  "BUSINESS_CENTRAL_PASSWORD",
+  "CLOUDFLARE_ADMIN_API_TOKEN",
+  "CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE",
+  "CLOUDFLARE_IMAGES_ACCOUNT_ID",
+  "DATOCMS_API_TOKEN",
+  "DATOCMS_ENVIRONMENT",
+  "DATOCMS_INCLUDE_DRAFT",
+  "ENV",
+  "EXPEDIA_BASE_URL",
+  "EXPEDIA_API_KEY",
+  "EXPEDIA_SHARED_SECRET",
+  "EXTERNAL_HOST",
+  "LINKTIVITY_API_HOST",
+  "LINKTIVITY_API_KEY",
+  "LINKTIVITY_API_KEY_ID",
+  "LINKTIVITY_GROUP_ID",
+  "LINKTIVITY_OTA_ID",
+  "NEXT_PUBLIC_POSTHOG_HOST",
+  "PACKAGE_REVALIDATION_TOKEN",
+  "POSTHOG_PERSONAL_API_KEY",
+  "SECRET",
+  "SENTRY_DSN",
+  "STRIPE_SECRET_KEY",
+  "VITE_ADMIN_SITE_HOST",
+  "VITE_API_URL",
+  "VITE_EXTERNAL_SITE_HOST",
+  "WRANGLER_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE",
+]

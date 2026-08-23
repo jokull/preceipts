@@ -39,9 +39,9 @@ use crate::proxy;
 #[allow(unused_imports)]
 use crate::secrets;
 #[allow(unused_imports)]
-use crate::share;
+use crate::services;
 #[allow(unused_imports)]
-use crate::sidecar;
+use crate::share;
 
 use crate::client as cli_client;
 use crate::project::Project;
@@ -90,16 +90,16 @@ pub fn run_cmd(
     }
 
     // Bare `preceipts up` (no args) → service-manifest mode: bring up every
-    // task declared in `procpane.toml`. This is the canonical incantation
+    // service declared in `preceipts.toml`. This is the canonical incantation
     // for a fully-wired repo and avoids the fan-out of bare-name expansion.
     let tasks = if tasks.is_empty() {
         let project = Project::discover(&root)?;
-        let manifest: Vec<String> = project.sidecar.tasks.keys().cloned().collect();
+        let manifest: Vec<String> = project.services.tasks.keys().cloned().collect();
         if manifest.is_empty() {
             return Err(anyhow!(
-                "no tasks given and procpane.toml has no [tasks.*] entries. \
+                "no services given and preceipts.toml declares none. \
                  Either pass task names (`preceipts up dev`) or declare your \
-                 services in procpane.toml."
+                 services in preceipts.toml."
             ));
         }
         manifest
@@ -166,7 +166,7 @@ async fn wait_and_print_status(socket: &std::path::Path, budget: Duration) {
         // doing?" In a real Turborepo, requesting `dev` pulls in 20+ silent
         // `tsc --watch` builders that the user never wants to read. Surface
         // only the things they actually care about — services with a
-        // hostname, tasks they explicitly declared in `procpane.toml`,
+        // hostname, services they explicitly declared in `preceipts.toml`,
         // anything that crashed (so failures aren't hidden), and the
         // turbo prebuild proc (slow + relevant). The rest get a single
         // count line so they don't disappear entirely.
@@ -813,8 +813,8 @@ fn discover_env_keys(
         .map(|project| {
             let mut m: std::collections::BTreeMap<String, Vec<String>> =
                 std::collections::BTreeMap::new();
-            for (task_id, overlay) in &project.sidecar.tasks {
-                for key in &overlay.env_from {
+            for (task_id, service) in &project.services.tasks {
+                for key in &service.env_from {
                     m.entry(key.clone()).or_default().push(task_id.clone());
                 }
             }

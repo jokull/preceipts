@@ -24,8 +24,8 @@ pub mod project;
 pub mod proto;
 pub mod proxy;
 pub mod secrets;
+pub mod services;
 pub mod share;
-pub mod sidecar;
 
 use std::path::PathBuf;
 

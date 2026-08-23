@@ -144,6 +144,18 @@ pub struct Service {
     /// `stripe listen` printing a `whsec_…` is the motivating case.
     pub capture: BTreeMap<String, String>,
     pub fidelity: Fidelity,
+    /// How long to wait before the first health probe.
+    ///
+    /// Not a nicety: a service that logs its readiness line during startup
+    /// can be probed before it means it, and a TCP check can catch a port
+    /// that is bound but not yet serving. trip sets 5s on three services for
+    /// exactly this reason, and a schema that could not express it would lose
+    /// that on conversion.
+    pub health_start_period: Option<std::time::Duration>,
+    /// Seconds between probes.
+    pub health_interval: Option<std::time::Duration>,
+    /// How long one probe may take.
+    pub health_timeout: Option<std::time::Duration>,
     /// Signal sent to stop this service. `SIGINT` by default, because dev
     /// servers overwhelmingly treat it as "shut down cleanly".
     pub stop_signal: Option<String>,
@@ -692,12 +704,32 @@ fn parse_service(name: &str, value: &toml::Value) -> Result<Service> {
             } else if let Some(pattern) = health.get("log").and_then(|v| v.as_str()) {
                 Health::Log(pattern.to_string())
             } else {
+                // Timing keys alone are not a check. Saying so explicitly
+                // beats a service that declares `health.start_period` and
+                // silently gets no health check at all.
                 return Err(err(format!(
                     "service \"{name}\": health needs one of tcp, http, or log"
                 )));
             }
         }
     };
+
+    let duration_field = |key: &str| -> Result<Option<std::time::Duration>> {
+        let Some(value) = table.get("health").and_then(|h| h.get(key)) else {
+            return Ok(None);
+        };
+        let text = value.as_str().ok_or_else(|| {
+            err(format!(
+                "service \"{name}\": health.{key} must be a string like \"5s\""
+            ))
+        })?;
+        crate::checks::parse_duration(text)
+            .map(Some)
+            .map_err(|e| err(format!("service \"{name}\": health.{key} {e}")))
+    };
+    let health_start_period = duration_field("start_period")?;
+    let health_interval = duration_field("interval")?;
+    let health_timeout = duration_field("timeout")?;
 
     let fidelity = match table.get("fidelity").and_then(|v| v.as_str()) {
         Some(text) => Fidelity::parse(text).ok_or_else(|| {
@@ -770,6 +802,9 @@ fn parse_service(name: &str, value: &toml::Value) -> Result<Service> {
             .unwrap_or_default(),
         capture,
         fidelity,
+        health_start_period,
+        health_interval,
+        health_timeout,
         stop_signal: table
             .get("stop_signal")
             .and_then(|v| v.as_str())
@@ -839,6 +874,9 @@ pub fn detect(root: &Path) -> Option<Manifest> {
             env: Vec::new(),
             capture: BTreeMap::new(),
             fidelity: Fidelity::LocalReal,
+            health_start_period: None,
+            health_interval: None,
+            health_timeout: None,
             stop_signal: None,
             stop_grace: None,
         }],

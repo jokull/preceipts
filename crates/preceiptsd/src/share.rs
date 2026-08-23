@@ -13,7 +13,10 @@ use crate::secrets;
 
 /// Application identifier — this isolates our protocol from other magic-
 /// wormhole tools. Bumping the version segment is a breaking protocol change.
-const APP_ID: &str = "procpane.dev/secrets-v1";
+// The wormhole app id. Changing it would make an in-flight code from an
+// older build fail to connect, which is the correct behaviour for a
+// rename — but it also means both ends must be on the same version.
+const APP_ID: &str = "preceipts.dev/secrets-v1";
 
 /// We use 2-word codes (e.g. `12-circus-domino`); the nameplate makes 3.
 const CODE_WORD_COUNT: usize = 2;
@@ -42,7 +45,7 @@ pub async fn receive(service: &str, keychain: Option<&str>) -> Result<()> {
     let code = mailbox.code().clone();
     println!("Share this code with the teammate sending secrets:");
     println!();
-    println!("    procpane env send {code}");
+    println!("    preceipts secrets send {code}");
     println!();
     println!("Waiting for sender... (Ctrl-C to abort)");
 
@@ -77,7 +80,7 @@ pub async fn send(
 ) -> Result<()> {
     if keys.is_empty() {
         return Err(anyhow!(
-            "no secrets to send; store some with `procpane env set <KEY>` first"
+            "no secrets to send; store some with `preceipts secrets set <KEY>` first"
         ));
     }
     let mut payload = SecretsPayload {

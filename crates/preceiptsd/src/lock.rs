@@ -21,7 +21,7 @@ impl PidLock {
             if let Ok(pid) = existing.trim().parse::<i32>() {
                 if is_alive(pid) {
                     return Err(anyhow!(
-                        "procpane already running (pid {pid}); lock at {}",
+                        "preceipts is already running (pid {pid}); lock at {}",
                         path.display()
                     ));
                 }
