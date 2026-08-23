@@ -17,6 +17,7 @@ use crate::proxy::{self, PortRegistry, PROXY_PORT};
 use crate::secrets;
 use crate::sidecar::DependsOnCondition;
 use crate::{ca, forwarder, project::Project};
+use preceipts_core::ports;
 
 pub const PREBUILD_ID: &str = "preceipts#prebuild";
 
@@ -31,6 +32,9 @@ pub struct Daemon {
     pub hostnames: BTreeMap<String, String>,
     /// Per-task allocated TCP port (when hostname is set; PORT env injected).
     pub allocated_ports: BTreeMap<String, u16>,
+    /// Where this workspace's TLS proxy listens. Not a constant: linked
+    /// workspaces take theirs from their own port block.
+    pub proxy_port: u16,
     /// Per-task shutdown signal (libc::SIG*). Default SIGINT.
     pub stop_signals: BTreeMap<String, i32>,
     /// Per-task grace period before SIGKILL. Default 5s.
@@ -151,21 +155,49 @@ impl Daemon {
         let mut stop_signals: BTreeMap<String, i32> = BTreeMap::new();
         let mut stop_grace: BTreeMap<String, Duration> = BTreeMap::new();
         let mut notes: BTreeMap<String, Mutex<Vec<String>>> = BTreeMap::new();
-        // Pre-allocate a port per hostnamed task. Tasks read PORT from env at
-        // spawn time; proxy routes by SNI.
+        // Ports come from this workspace's reserved block, not from the
+        // kernel's ephemeral range. Two properties follow, and trip learned
+        // both the hard way: a worktree keeps its addresses across restarts,
+        // so a bookmark still works; and two worktrees of one project can run
+        // at the same time without fighting over 3000.
+        //
+        // A workspace that outgrows its block falls back to an ephemeral port
+        // rather than refusing to start. An address that moves is worse than
+        // one that does not, but it is much better than a service that will
+        // not come up.
+        let workspace = preceipts_core::workspace::locate(&project.root).ok();
+        let block = reserve_block(workspace.as_ref());
         let mut allocated_ports: BTreeMap<String, u16> = BTreeMap::new();
+        let mut next_offset: u16 = 1;
         for idx in &persistent_indices {
             let n = &graph.graph[*idx];
             let id = n.id();
             if let Some(h) = &n.overlay.hostname {
                 hostnames.insert(id.clone(), workspace_host(h, &project.root));
-                let port = proxy::allocate_port()?;
+                let port = match block.and_then(|b| b.port(next_offset)) {
+                    Some(port) => {
+                        next_offset += 1;
+                        port
+                    }
+                    None => proxy::allocate_port()?,
+                };
                 allocated_ports.insert(id.clone(), port);
             }
             stop_signals.insert(id.clone(), n.overlay.stop_signal());
             stop_grace.insert(id.clone(), n.overlay.stop_grace());
             notes.insert(id, Mutex::new(Vec::new()));
         }
+
+        // Offset 0 of the block is the workspace's own TLS proxy, so two
+        // worktrees do not fight over one listener. The primary working
+        // directory keeps the well-known port instead, because that is the
+        // one the `:443` forwarder points at and the one a person browses
+        // without thinking — a linked workspace uses its own port until the
+        // proxy becomes machine-wide.
+        let proxy_port = match (&workspace, block) {
+            (Some(ws), Some(block)) if !ws.is_primary => block.port(0).unwrap_or(PROXY_PORT),
+            _ => PROXY_PORT,
+        };
 
         let manifest_tasks: std::collections::HashSet<String> =
             project.sidecar.tasks.keys().cloned().collect();
@@ -180,6 +212,7 @@ impl Daemon {
             started_at: Instant::now(),
             hostnames: hostnames.clone(),
             allocated_ports: allocated_ports.clone(),
+            proxy_port,
             stop_signals,
             stop_grace,
             notes,
@@ -195,7 +228,7 @@ impl Daemon {
                 let host_list: Vec<String> = hostnames.values().cloned().collect();
                 match proxy::build_tls_config(&host_list) {
                     Ok(tls_cfg) => {
-                        let bind: std::net::SocketAddr = ([127, 0, 0, 1], PROXY_PORT).into();
+                        let bind: std::net::SocketAddr = ([127, 0, 0, 1], proxy_port).into();
                         let reg = Arc::clone(&port_registry);
                         let mut prx_stop = stop_rx.clone();
                         // Pre-register hostnames → allocated backend ports so
@@ -518,8 +551,9 @@ async fn run_scheduler(
                     // the procpane one, and a rename that silently stops
                     // injecting an env var is the kind of breakage that shows
                     // up as a confusing 404 rather than an error.
-                    env.push(("PRECEIPTS_PUBLIC_URL".into(), public_url(host)));
-                    env.push(("PROCPANE_PUBLIC_URL".into(), public_url(host)));
+                    let url = public_url(host, daemon.proxy_port);
+                    env.push(("PRECEIPTS_PUBLIC_URL".into(), url.clone()));
+                    env.push(("PROCPANE_PUBLIC_URL".into(), url));
                 }
             }
             // Inject every *other* task's public URL too, so apps that talk to
@@ -541,7 +575,7 @@ async fn run_scheduler(
                     .to_uppercase()
                     .replace(['-', '.'], "_");
                 let var_name = format!("{pkg_short}_URL");
-                env.push((var_name, public_url(other_host)));
+                env.push((var_name, public_url(other_host, daemon.proxy_port)));
             }
 
             // Inject env_from secrets from Keychain. Pre-flight verified
@@ -913,11 +947,17 @@ fn is_wrangler_invocation(shell_cmd: &str) -> bool {
         .any(|tok| tok == "wrangler" || tok.ends_with("/wrangler"))
 }
 
-fn public_url(host: &str) -> String {
-    if forwarder::is_installed() {
+/// The URL to hand a person or a sibling service.
+///
+/// `proxy_port` rather than the constant: a linked workspace runs its own TLS
+/// proxy on its own block, so a URL naming 8443 would point at whichever
+/// workspace happens to hold the well-known port. Portless only when the
+/// forwarder is installed *and* this workspace is the one it points at.
+fn public_url(host: &str, proxy_port: u16) -> String {
+    if forwarder::is_installed() && proxy_port == PROXY_PORT {
         format!("https://{host}")
     } else {
-        format!("https://{host}:{PROXY_PORT}")
+        format!("https://{host}:{proxy_port}")
     }
 }
 
@@ -973,7 +1013,20 @@ mod tests {
         } else {
             "https://api.proj.localhost:8443"
         };
-        assert_eq!(public_url("api.proj.localhost"), expected);
+        assert_eq!(
+            public_url("api.proj.localhost", super::PROXY_PORT),
+            expected
+        );
+    }
+
+    /// A linked workspace is never portless, whatever the forwarder's state:
+    /// the forwarder points at 8443, and this workspace is not there.
+    #[test]
+    fn a_workspace_on_its_own_proxy_always_names_its_port() {
+        assert_eq!(
+            public_url("api.feat.proj.localhost", 21000),
+            "https://api.feat.proj.localhost:21000"
+        );
     }
 
     #[test]
@@ -1008,7 +1061,10 @@ fn build_proc_status(daemon: &Daemon, id: &str, p: &Proc) -> ProcStatus {
         persistent: p.persistent,
         hostname: daemon.hostnames.get(id).cloned(),
         port: daemon.allocated_ports.get(id).copied(),
-        url: daemon.hostnames.get(id).map(|host| public_url(host)),
+        url: daemon
+            .hostnames
+            .get(id)
+            .map(|host| public_url(host, daemon.proxy_port)),
         notes,
         in_manifest: daemon.manifest_tasks.contains(id),
     }
@@ -1061,4 +1117,33 @@ mod workspace_host_tests {
         );
         assert_eq!(workspace_host("api", &dir), "api.proj.localhost");
     }
+}
+
+/// This workspace's reserved port block, taken once and kept.
+///
+/// The reservation file is machine-global and shared by every project, so it
+/// is read, updated, and written on each boot rather than held open — a daemon
+/// that crashed must not leave the file locked, and the write is small enough
+/// that the race window is narrower than the human it would inconvenience.
+///
+/// `None` when there is no workspace to key on (a directory that is not a git
+/// repository) or the range is full. Callers fall back to ephemeral ports.
+fn reserve_block(workspace: Option<&preceipts_core::workspace::Workspace>) -> Option<ports::Block> {
+    let workspace = workspace?;
+    let path = reservations_path()?;
+    let mut reservations = ports::Reservations::load(&path);
+    let block = reservations.reserve(&workspace.key())?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = reservations.save(&path) {
+        // A block that could not be written is still usable now; it just may
+        // not survive a restart. Worth a line, not worth refusing to boot.
+        tracing::warn!(?e, "could not persist the port reservation");
+    }
+    Some(block)
+}
+
+fn reservations_path() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".preceipts").join("ports.toml"))
 }

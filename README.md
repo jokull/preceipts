@@ -158,7 +158,17 @@ Every verb lives on `preceipts` — `up`, `down`, `services`, `proc`, `grep`,
 and an agent should not have to learn which tool owns which verb. `preceiptsd`
 answers only to launchd and to `preceipts up`.
 
-Still ahead: per-workspace ports and certs so two worktrees can run at once,
+Two worktrees of one project run at the same time without knowing about each
+other. Each workspace holds a reserved block of 16 ports — stable across
+restarts, so a bookmark keeps working — and its own TLS proxy and leaf cert,
+under its own hostname:
+
+```
+web.trip.localhost:8443                  ← the primary worktree
+web.add-checkout-flow.trip.localhost:27800
+```
+
+Still ahead: one machine-wide proxy so linked workspaces get portless URLs too,
 the container runtime (`image = …` parses and validates but cannot start yet —
 `doctor` says so), the HTTP transcript, and the env panel and project tabs. Registering the forwarder through `SMAppService` — and with it the shared
 Keychain access group that retires the open-ACL workaround — waits on a signed

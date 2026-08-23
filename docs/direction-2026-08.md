@@ -994,9 +994,20 @@ What steps 9–13 leave for the next pass, in the order they block things:
     project (rung 1 — one Vite service, no monorepo tooling — could not boot
     before), and a service declared with `run` becomes a script on a synthetic
     package so the graph builder finds it the ordinary way.
-15. **Boot a workspace's environment through the daemon**: per-workspace
-    ports, certs, and the URL registry, which is where the fabric stops
-    being a naming scheme and starts being a thing you can open.
+15. ~~**Boot a workspace's environment through the daemon**~~ *Mostly done.*
+    Each workspace reserves a block of 16 ports, taken once and kept, so
+    addresses survive restarts and two worktrees never fight; its services
+    take ports from that block, and its TLS proxy takes offset 0 while the
+    primary keeps the well-known 8443. Certs already followed, since the
+    daemon signs a leaf for exactly the hostnames it knows and hostnames now
+    carry the workspace. Verified with two worktrees of one project serving
+    HTTPS simultaneously.
+
+    What is left is the reason a linked workspace's URL still names a port:
+    the `:443` forwarder points at one listener, so portless URLs serve the
+    primary worktree only. The fix is one machine-wide proxy that every
+    daemon registers with, which is a real architecture change and not a
+    detail to slip into this step.
 16. ~~**The run lock and `sync`/`gc`**, the last engine behaviour not yet
     carried across.~~ *Done.* The lock lives in the worktree's own git dir, so
     parallel workspaces stay independent, and a lock left by a dead process is

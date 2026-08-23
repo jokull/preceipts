@@ -452,3 +452,49 @@ mod discovery_tests {
         assert!(Project::discover(root).is_ok());
     }
 }
+
+#[cfg(test)]
+mod block_tests {
+    use preceipts_core::ports::{Block, Reservations, BLOCK_SIZE};
+
+    /// The property two worktrees depend on: their blocks do not overlap, so
+    /// neither has to know the other exists.
+    #[test]
+    fn two_workspaces_of_one_project_get_disjoint_blocks() {
+        let mut reservations = Reservations::default();
+        let a = reservations.reserve("proj/main").unwrap();
+        let b = reservations.reserve("proj/add-checkout-flow").unwrap();
+        assert_ne!(a.start, b.start);
+        for offset in 0..BLOCK_SIZE {
+            assert!(!b.contains(a.port(offset).unwrap()));
+            assert!(!a.contains(b.port(offset).unwrap()));
+        }
+    }
+
+    /// And the property a bookmark depends on: the same workspace comes back
+    /// to the same addresses, across restarts and across machines.
+    #[test]
+    fn a_workspace_returns_to_its_own_block() {
+        let mut first = Reservations::default();
+        let block = first.reserve("proj/main").unwrap();
+        assert_eq!(first.reserve("proj/main"), Some(block), "within one run");
+
+        let mut second = Reservations::default();
+        assert_eq!(
+            second.reserve("proj/main"),
+            Some(block),
+            "and on a machine that has never seen this workspace"
+        );
+    }
+
+    /// Offset 0 is the workspace's TLS proxy; services start at 1. A service
+    /// landing on the proxy's port would be a listener collision inside one
+    /// workspace, which is the bug the blocks exist to prevent between them.
+    #[test]
+    fn the_proxy_port_is_not_handed_to_a_service() {
+        let block = Block { start: 21000 };
+        assert_eq!(block.port(0), Some(21000));
+        assert_eq!(block.port(1), Some(21001));
+        assert_eq!(block.port(BLOCK_SIZE), None, "the block has an end");
+    }
+}

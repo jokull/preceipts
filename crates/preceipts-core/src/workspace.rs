@@ -108,6 +108,15 @@ impl Workspace {
         }
     }
 
+    /// A machine-unique key for this workspace.
+    ///
+    /// `id` alone is not enough for anything shared across projects: two
+    /// repositories both have a workspace called `main`, and a port
+    /// reservation keyed on that would hand them the same block.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.project_name(), self.id)
+    }
+
     pub fn project_name(&self) -> String {
         self.project_root
             .file_name()
@@ -507,6 +516,16 @@ mod tests {
         let primary = discover(&dir).unwrap().remove(0);
         assert!(remove(&primary).is_err());
         assert!(dir.is_dir(), "the project is still there");
+    }
+
+    #[test]
+    fn keys_are_unique_across_projects_that_share_a_workspace_name() {
+        let (_a, dir_a) = project();
+        let primary = locate(&dir_a).unwrap();
+        assert_eq!(primary.key(), "proj/main");
+        let feature = create(&dir_a, "feature", None, None).unwrap();
+        assert_ne!(feature.key(), primary.key());
+        assert!(feature.key().starts_with("proj/"));
     }
 
     #[test]
