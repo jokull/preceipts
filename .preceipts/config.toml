@@ -1,5 +1,5 @@
 [required]
-checks = ["fmt", "test"]
+checks = ["clippy", "fmt", "test"]
 
 [prepare]
 commands = ["format"]

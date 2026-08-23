@@ -11,6 +11,7 @@ mod branch;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use preceipts_core::checks::{self, CheckState};
 use preceipts_core::workspace::{self, Workspace};
 use preceipts_core::{load, DiffScope};
 use serde_json::json;
@@ -63,6 +64,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the checks and mint receipts for the working tree.
+    Run {
+        /// Only these checks. Defaults to all of them.
+        checks: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Receipt table for a tree.
+    Status {
+        /// Ref to inspect. Defaults to the working tree — the same tree `run`
+        /// mints against.
+        #[arg(long)]
+        r#ref: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Scaffold .preceipts/ in a repository that has none.
+    Init,
     /// Remove a workspace's worktree and its registration.
     Remove {
         /// Workspace id. Defaults to the one you are standing in.
@@ -94,6 +113,9 @@ fn run() -> Result<()> {
         Command::List { json } => list(&path, json),
         Command::Where { json } => locate(&path, json),
         Command::Diff { uncommitted, json } => diff(&path, uncommitted, json),
+        Command::Run { checks, json } => run_checks(&path, &checks, json),
+        Command::Status { r#ref, json } => show_status(&path, r#ref.as_deref(), json),
+        Command::Init => init(&path),
         Command::Remove { id } => remove(&path, id),
     }
 }
@@ -226,6 +248,129 @@ fn remove(path: &Path, id: Option<String>) -> Result<()> {
     };
     workspace::remove(&target).with_context(|| format!("removing workspace {}", target.id))?;
     eprintln!("removed {}", target.id);
+    Ok(())
+}
+
+fn run_checks(path: &Path, only: &[String], json: bool) -> Result<()> {
+    let only = (!only.is_empty()).then_some(only);
+    let report = checks::run(path, only).context("running checks")?;
+
+    if json {
+        let rows: Vec<_> = report
+            .outcomes
+            .iter()
+            .map(|o| {
+                json!({
+                    "check": o.name,
+                    "ok": o.ok,
+                    "exit": o.exit,
+                    "duration_ms": o.duration.as_millis() as u64,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "tree": report.tree,
+                "dirty": report.dirty,
+                "checks": rows,
+            }))?
+        );
+        return Ok(());
+    }
+
+    for note in &report.prepared {
+        eprintln!("{note}");
+    }
+    for outcome in &report.outcomes {
+        println!(
+            "{} {:<20} {:>6}ms",
+            if outcome.ok { "✓" } else { "✗" },
+            outcome.name,
+            outcome.duration.as_millis()
+        );
+        if !outcome.ok {
+            for line in outcome.output.lines().take(20) {
+                println!("    {line}");
+            }
+        }
+    }
+    println!(
+        "tree {}{}",
+        &report.tree[..12],
+        if report.dirty { " (dirty)" } else { "" }
+    );
+    // A failing check is a failing command: scripts and agents should be able
+    // to gate on the exit code without parsing anything.
+    if report.outcomes.iter().any(|o| !o.ok) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn show_status(path: &Path, reference: Option<&str>, json: bool) -> Result<()> {
+    let status = checks::status(path, reference).context("computing status")?;
+
+    if json {
+        let rows: Vec<_> = status
+            .rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "check": row.check,
+                    "required": row.required,
+                    "state": row.state.as_str(),
+                    "ok": row.receipt.as_ref().map(|r| r.ok),
+                    "started": row.receipt.as_ref().map(|r| r.started.clone()),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ref": status.reference,
+                "tree": status.tree,
+                "green": status.green,
+                "checks": rows,
+            }))?
+        );
+        return Ok(());
+    }
+
+    for row in &status.rows {
+        let mark = match row.state {
+            CheckState::Ok => "✓",
+            CheckState::Fail => "✗",
+            CheckState::Missing => "·",
+            CheckState::StaleDefinition => "~",
+        };
+        let required = if row.required { "required" } else { "" };
+        println!(
+            "{mark} {:<20} {:<18} {required}",
+            row.check,
+            row.state.as_str()
+        );
+    }
+    println!(
+        "{} — tree {} — {}",
+        status.reference,
+        &status.tree[..12],
+        if status.green { "green" } else { "not green" }
+    );
+    if !status.green {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn init(path: &Path) -> Result<()> {
+    let created = checks::init(path).context("scaffolding .preceipts/")?;
+    if created.is_empty() {
+        eprintln!("already set up");
+    }
+    for path in created {
+        println!("{}", path.display());
+    }
     Ok(())
 }
 

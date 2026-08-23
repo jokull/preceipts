@@ -1,4 +1,9 @@
 #!/bin/bash
 # Lint tripwire. Warnings fail so drift never accumulates quietly.
+#
+# Scoped to our own crates: vendored procpane still carries dead-code
+# warnings from before the absorption, and a check that can never pass
+# teaches you to ignore it. Widen this to --workspace once procpane is
+# cleaned up.
 set -euo pipefail
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p preceipts-core -p preceipts-cli -p preceipts-app --all-targets -- -D warnings

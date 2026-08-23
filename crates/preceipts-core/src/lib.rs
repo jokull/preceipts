@@ -21,6 +21,7 @@
 //! included — those tests are the conformance suite for the rewrite, not new
 //! work. See decision 12 in PRD.md.
 
+pub mod checks;
 pub mod error;
 pub mod filetree;
 pub mod find;
@@ -30,15 +31,19 @@ pub mod intraline;
 pub mod linediff;
 pub mod loader;
 pub mod model;
+pub mod notes;
 pub mod pairing;
 pub mod ports;
+pub mod receipt;
 pub mod segments;
 pub mod surface;
+pub mod treehash;
 pub mod workspace;
 
 #[cfg(test)]
 mod testing;
 
+pub use checks::{run, status, CheckState, Config, RunReport, Status};
 pub use error::{Error, Result};
 pub use filetree::FileTreeNode;
 pub use find::FindIndex;
@@ -50,6 +55,7 @@ pub use loader::load;
 pub use model::{Changeset, DiffHunk, DiffRow, DiffScope, FileDiff, FileStatus, LineRef, RowKind};
 pub use pairing::{pair_block, similarity, Pairing};
 pub use ports::{Block, Reservations};
+pub use receipt::{Receipt, Runner};
 pub use segments::{line_segments, HighlightSpan, Segment};
 pub use surface::{Side, Surface, SurfaceRow};
 pub use workspace::Workspace;
