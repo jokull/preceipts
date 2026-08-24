@@ -1111,8 +1111,38 @@ mod parity {
         }
     }
 
-    /// One value per variant. It sits next to `face` on purpose: the match is
-    /// what forces the decision, and this is what makes the decision get run.
+    /// A distinct index per variant, so the list below can be checked rather
+    /// than trusted.
+    ///
+    /// Without this the exhaustive `match` in `face` forces a *decision* about
+    /// a new verb but not a *test* of it: the arm could exist while the list
+    /// missed the variant, and the assertions would quietly cover one verb
+    /// fewer. This match is exhaustive too, and the test asserts every index
+    /// appears exactly once — so a new variant fails to compile here, and a
+    /// variant left out of the list fails the test there.
+    /// How many variants `index` hands out. Fixed rather than derived from
+    /// the list, which is the whole point: a list missing a variant is exactly
+    /// what this is here to catch, so it cannot be allowed to shorten the
+    /// thing it is compared against.
+    const VARIANTS: usize = 11;
+
+    fn index(request: &Request) -> usize {
+        match request {
+            Request::Ping => 0,
+            Request::Status => 1,
+            Request::Stop => 2,
+            Request::GetTask { .. } => 3,
+            Request::Tail { .. } => 4,
+            Request::Since { .. } => 5,
+            Request::Grep { .. } => 6,
+            Request::Signal { .. } => 7,
+            Request::Transcript { .. } => 8,
+            Request::Run { .. } => 9,
+            Request::Checks => 10,
+        }
+    }
+
+    /// One value per variant, guarded by [`index`].
     fn every_request() -> Vec<Request> {
         vec![
             Request::Ping,
@@ -1146,6 +1176,18 @@ mod parity {
             Request::Run { checks: None },
             Request::Checks,
         ]
+    }
+
+    #[test]
+    fn the_list_covers_every_wire_verb() {
+        let mut seen: Vec<usize> = every_request().iter().map(index).collect();
+        seen.sort_unstable();
+        let expected: Vec<usize> = (0..VARIANTS).collect();
+        assert_eq!(
+            seen, expected,
+            "every_request() must hold each variant exactly once — a verb \
+             missing from it is a verb the parity assertions never see"
+        );
     }
 
     #[test]

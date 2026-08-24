@@ -1017,6 +1017,16 @@ The order that keeps a working app at every step:
    answer with no daemon at all, and step 8 wanted the observation path
    standing alone.
 
+   A run that finds the lock held **waits** rather than recording a
+   failure. That is not defensive coding: raced on purpose against a
+   six-second check held in a terminal, a one-shot retry lost twice and
+   left the tree permanently unchecked, because nothing tries again until
+   the next edit. After waiting it asks the settled question again, since
+   the run it waited for may have been about this very tree. And `running`
+   is cleared by a drop guard rather than on the success path, so a panic
+   inside somebody's check script cannot leave the daemon refusing every
+   later run as "already in progress".
+
    Three guards, each for a specific wrong answer. Checks fire only when
    every service is healthy or completed — the doc's own "already-warm"
    condition, and the difference between a signal and a service that had

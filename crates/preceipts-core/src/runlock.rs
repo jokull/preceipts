@@ -58,6 +58,22 @@ fn git_dir(root: &Path) -> Result<PathBuf> {
 }
 
 /// Take the run lock for `root`, or explain who has it.
+/// Whether the run lock is free right now.
+///
+/// Takes the lock and drops it immediately, which is the only honest way to
+/// ask a `flock` — the answer is a moment old by the time it is returned, so
+/// this is for a caller deciding whether to *wait*, never for one deciding
+/// whether it is safe to proceed. That decision stays with [`acquire`].
+pub fn is_free(root: &Path) -> bool {
+    match acquire(root) {
+        Ok(lock) => {
+            drop(lock);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 pub fn acquire(root: &Path) -> Result<RunLock> {
     let path = git_dir(root)?.join(LOCK_FILE);
 

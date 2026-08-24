@@ -887,19 +887,11 @@ fn quiet_reached(daemon: &Arc<Daemon>) {
     if !warm {
         return;
     }
-    // Nothing new to learn about this tree: every check already has a receipt
-    // whose definition still matches, pass or fail. This is also the guard
-    // that stops a run from triggering itself — `[prepare]` writes to the
-    // worktree, which is an edit, which would otherwise be another quiet.
-    if let Ok(status) = preceipts_core::checks::status(&daemon.root, None) {
-        use preceipts_core::checks::CheckState;
-        let settled = status
-            .rows
-            .iter()
-            .all(|row| !matches!(row.state, CheckState::Missing | CheckState::StaleDefinition));
-        if settled {
-            return;
-        }
+    // Nothing new to learn about this tree. This is also the guard that stops
+    // a run from triggering itself — `[prepare]` writes to the worktree, which
+    // is an edit, which would otherwise be another quiet.
+    if crate::checkrun::settled(&daemon.root) {
+        return;
     }
     if let Some(log) = daemon.buffers.get(preceipts_proto::CHECKS_LOG) {
         // An already-running run is not an error here — it is the ordinary
