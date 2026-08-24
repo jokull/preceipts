@@ -19,7 +19,7 @@ use gpui_component::divider::Divider;
 use gpui_component::label::Label;
 use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::tag::Tag;
-use gpui_component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
+use gpui_component::{h_flex, v_flex, ActiveTheme as _, Disableable as _, Sizable as _};
 use preceipts_core::checks::{CheckState, Status};
 use preceipts_core::workspace::Workspace;
 use preceipts_core::{load, Changeset, DiffScope};
@@ -430,6 +430,13 @@ impl WorkspacePane {
     fn render_hud(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (files, added, removed, base) = &self.changeset_summary;
         let (verdict, kind) = self.judge();
+        // Both read from the lab's poll rather than a second one of our own.
+        let lab = self.lab.read(cx);
+        let running = lab.checks().running;
+        // Without a daemon there is nothing to ask, and `preceipts run` in a
+        // terminal is the answer. A disabled button says that better than one
+        // that fails when pressed.
+        let daemon_up = lab.has_services();
 
         let chip = match kind {
             Verdict::Green => Tag::success(),
@@ -481,6 +488,22 @@ impl WorkspacePane {
             // Pushes the lab toggle to the right edge, where a panel switch
             // belongs and where it is not in the way of the verdict.
             .child(div().flex_1())
+            // The one action on this surface, and it is a request rather than
+            // a deed: the daemon runs the checks, the window asks. It is the
+            // same socket call `preceipts run --detach` makes — the human face
+            // was the only one that could not ask, which is "no UI-only
+            // features" enforced in one direction only.
+            .child(
+                Button::new("run")
+                    .ghost()
+                    .xsmall()
+                    .label(if running { "Running…" } else { "Run checks" })
+                    .disabled(running || !daemon_up)
+                    .when(running, |button| button.text_color(cx.theme().warning))
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.lab.update(cx, |lab, cx| lab.run_checks(cx));
+                    })),
+            )
             .child(
                 Button::new("lab")
                     .ghost()

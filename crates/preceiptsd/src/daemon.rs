@@ -66,6 +66,11 @@ pub struct Daemon {
     /// Lets renderers distinguish user-declared services from implicit
     /// workspace `dev` tasks.
     pub manifest_tasks: std::collections::HashSet<String>,
+    /// The worktree this daemon serves. A linked workspace roots its own
+    /// project, so this is the directory checks run in.
+    pub root: PathBuf,
+    /// Whether a check run is in flight here.
+    pub checks: crate::checkrun::SharedChecks,
 }
 
 impl Daemon {
@@ -76,6 +81,7 @@ impl Daemon {
         no_prebuild: bool,
     ) -> Result<()> {
         std::fs::create_dir_all(&state_dir)?;
+        let project_root = project.root.clone();
         let socket_path = socket_path(&project.root);
         // Remove stale socket if present.
         let _ = std::fs::remove_file(&socket_path);
@@ -169,6 +175,21 @@ impl Daemon {
             procs.insert(id.clone(), proc);
             node_to_id.insert(idx, id);
         }
+        // The reserved buffer a daemon-side check run streams into. Placed in
+        // `buffers` and not in `procs`, so `tail`/`since`/`grep` find it by
+        // name for free while the process table stays a table of processes.
+        if procs.contains_key(preceipts_proto::CHECKS_LOG) {
+            return Err(anyhow!(
+                "a service is named `{}`, which is the reserved id a check \
+                 run's output streams into — rename the service",
+                preceipts_proto::CHECKS_LOG
+            ));
+        }
+        buffers.insert(
+            preceipts_proto::CHECKS_LOG.to_string(),
+            buffer::new_shared(buffer::DEFAULT_CAPACITY),
+        );
+
         if do_prebuild {
             let buf = buffer::new_shared(buffer::DEFAULT_CAPACITY);
             let proc = Proc::new(PREBUILD_ID.to_string(), buf.clone(), false);
@@ -283,6 +304,8 @@ impl Daemon {
             stop_grace,
             notes,
             manifest_tasks,
+            root: project_root.clone(),
+            checks: crate::checkrun::new_shared(),
         });
 
         // Start the TLS reverse proxy if any task declared a hostname AND the
@@ -382,6 +405,8 @@ impl Daemon {
             socket_path.display(),
             std::process::id()
         );
+
+        watch_for_quiet(Arc::clone(&daemon));
 
         loop {
             tokio::select! {
@@ -818,6 +843,77 @@ async fn run_scheduler(
     }
 }
 
+/// The north star, made to happen rather than merely displayed.
+///
+/// The doc's promise is that checks fire when the agent stops typing. Until
+/// now that was true only if a human kept `preceipts watch` running in a
+/// terminal — so the feature depended on the one window it was supposed to
+/// replace. The daemon is the thing that is already always there, so it
+/// watches, and both the app and a closed laptop lid get the same behaviour.
+///
+/// The trigger condition is the doc's own: checks fire in a workspace's
+/// *already-warm, already-healthy* environment. Being up is what makes a
+/// workspace eligible, so there is no new opt-in concept and no checks
+/// running on workspaces nobody booted.
+fn watch_for_quiet(daemon: Arc<Daemon>) {
+    // Nothing to fire. A project with no checks gets no watcher rather than a
+    // thread that wakes on every keystroke to decide it has no opinion.
+    if preceipts_core::checks::list_checks(&daemon.root)
+        .map(|checks| checks.is_empty())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    std::thread::spawn(move || {
+        let root = daemon.root.clone();
+        let _ =
+            preceipts_core::watch::watch(&root, preceipts_core::watch::DEFAULT_QUIET, |event| {
+                if matches!(event, preceipts_core::watch::Event::Quiet) {
+                    quiet_reached(&daemon);
+                }
+                true
+            });
+    });
+}
+
+fn quiet_reached(daemon: &Arc<Daemon>) {
+    // A crashed or still-booting service means a check that touches it fails
+    // for a reason that has nothing to do with the code. Waiting is the
+    // difference between a signal and a false alarm.
+    let warm = daemon
+        .procs
+        .values()
+        .all(|p| matches!(*p.state.lock(), ProcState::Healthy | ProcState::Completed));
+    if !warm {
+        return;
+    }
+    // Nothing new to learn about this tree: every check already has a receipt
+    // whose definition still matches, pass or fail. This is also the guard
+    // that stops a run from triggering itself — `[prepare]` writes to the
+    // worktree, which is an edit, which would otherwise be another quiet.
+    if let Ok(status) = preceipts_core::checks::status(&daemon.root, None) {
+        use preceipts_core::checks::CheckState;
+        let settled = status
+            .rows
+            .iter()
+            .all(|row| !matches!(row.state, CheckState::Missing | CheckState::StaleDefinition));
+        if settled {
+            return;
+        }
+    }
+    if let Some(log) = daemon.buffers.get(preceipts_proto::CHECKS_LOG) {
+        // An already-running run is not an error here — it is the ordinary
+        // case of a second save arriving mid-run, and it is already handled by
+        // the run that is in flight.
+        let _ = crate::checkrun::start(
+            daemon.root.clone(),
+            None,
+            daemon.checks.clone(),
+            log.clone(),
+        );
+    }
+}
+
 async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut reader = BufReader::new(rd);
@@ -855,6 +951,27 @@ fn dispatch(daemon: &Daemon, req: Request) -> Response {
                 .collect();
             Response::Status { procs }
         }
+        Request::Run { checks } => {
+            let Some(log) = daemon.buffers.get(preceipts_proto::CHECKS_LOG) else {
+                return Response::Error {
+                    message: "no checks buffer".to_string(),
+                };
+            };
+            match crate::checkrun::start(
+                daemon.root.clone(),
+                checks,
+                daemon.checks.clone(),
+                log.clone(),
+            ) {
+                Ok(()) => Response::Checks {
+                    state: daemon.checks.lock().snapshot(),
+                },
+                Err(message) => Response::Error { message },
+            }
+        }
+        Request::Checks => Response::Checks {
+            state: daemon.checks.lock().snapshot(),
+        },
         Request::GetTask { name } => match daemon.procs.get(&name) {
             Some(p) => Response::Task {
                 task: build_proc_status(daemon, &name, p),

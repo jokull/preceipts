@@ -663,11 +663,35 @@ pub struct RunReport {
     pub prepared: Vec<String>,
 }
 
+/// What a run is doing, for a caller that has somewhere to show it.
+///
+/// A run takes minutes and a terminal shows that by printing as it goes. Any
+/// other surface needs the same thing said out loud, so the loop reports
+/// rather than only returning — one implementation, and the faces differ in
+/// presentation, which is the whole rule.
+#[derive(Debug, Clone)]
+pub enum Progress<'a> {
+    Prepare { step: &'a str },
+    CheckStarted { name: &'a str },
+    CheckFinished { outcome: &'a CheckOutcome },
+    Minted { tree: &'a str },
+}
+
 /// Run prepare, then every check, then mint receipts.
 ///
 /// The tree is computed after prepare and verified unchanged after the checks.
 /// If a check moved the worktree, nothing is minted and the error says so.
 pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
+    run_with(root, only, &mut |_| {})
+}
+
+/// The same run, reporting as it goes. [`run`] is this with a silent observer
+/// — there is deliberately no second implementation to drift from.
+pub fn run_with(
+    root: &Path,
+    only: Option<&[String]>,
+    on_progress: &mut dyn FnMut(Progress<'_>),
+) -> Result<RunReport> {
     // Held for the whole run, released on every exit path including the error
     // ones. Prepare writes to the worktree, so two runs at once corrupt each
     // other's evidence rather than merely wasting time.
@@ -676,6 +700,7 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
 
     let before_prepare = treehash::compute(root)?.tree;
     for step in &config.prepare {
+        on_progress(Progress::Prepare { step: &step.name });
         let result = shell(root, &step.cmd, step.timeout)?;
         if result.timed_out {
             // Prepare runs *before* the receipt tree is computed, so a step
@@ -722,6 +747,7 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
                 check.path.display()
             ))));
         }
+        on_progress(Progress::CheckStarted { name: &check.name });
         let started = Instant::now();
         let timeout = config.timeout_for(&check.name);
         let mut command = Command::new(&check.path);
@@ -745,7 +771,7 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
                 timeout.as_millis()
             ));
         }
-        outcomes.push(CheckOutcome {
+        let outcome = CheckOutcome {
             name: check.name.clone(),
             ok: !result.timed_out && result.output.status.success(),
             exit: if result.timed_out {
@@ -755,7 +781,9 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
             },
             duration: started.elapsed(),
             output: text,
-        });
+        };
+        on_progress(Progress::CheckFinished { outcome: &outcome });
+        outcomes.push(outcome);
     }
 
     // Decision 8: a check that mutates the worktree invalidates the run.
@@ -793,6 +821,9 @@ pub fn run(root: &Path, only: Option<&[String]>) -> Result<RunReport> {
         };
         notes::append_receipt(&repo, &settled.tree, &receipt.encode())?;
     }
+    on_progress(Progress::Minted {
+        tree: &settled.tree,
+    });
 
     Ok(RunReport {
         tree: settled.tree,

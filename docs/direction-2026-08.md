@@ -1007,6 +1007,26 @@ The order that keeps a working app at every step:
    for nothing. So the callback asks whether the path is under `refs/` or
    is `packed-refs`, and drops everything else.
 
+   *Amended, same day: the acting half.* The observation path above was
+   complete and the loop still was not, because the doc's promise — checks
+   fire when the agent stops typing — was true only while a human kept
+   `preceipts watch` running in a terminal. The feature depended on the
+   window it was meant to replace. **The daemon watches now**, since it is
+   the thing that is already always there, and both the app and a closed
+   laptop lid get the same behaviour. `preceipts watch` stays: it is the
+   answer with no daemon at all, and step 8 wanted the observation path
+   standing alone.
+
+   Three guards, each for a specific wrong answer. Checks fire only when
+   every service is healthy or completed — the doc's own "already-warm"
+   condition, and the difference between a signal and a service that had
+   not finished booting. They do not fire for a tree whose every check
+   already has a receipt, pass or fail, since there is nothing left to
+   learn; that is also what stops a run triggering itself, because
+   `[prepare]` writes to the worktree and a write is an edit. And a project
+   with no checks gets no watcher rather than a thread that wakes on every
+   keystroke to decide it has no opinion.
+
    Verified by doing it, and instrumented rather than assumed. Thirty
    seconds idle: zero reloads, 0.0% CPU. A six-second burst of edits: one
    reload, at the end, with the diff and counts moving and the window never

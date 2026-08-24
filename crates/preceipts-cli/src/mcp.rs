@@ -82,7 +82,7 @@ fn tool(name: &str, description: &str, properties: Value, required: Vec<&str>) -
     })
 }
 
-fn tools(root: &Path) -> Vec<Value> {
+pub(crate) fn tools(root: &Path) -> Vec<Value> {
     let mut tools = vec![
         tool(
             "workspaces",
@@ -120,6 +120,18 @@ fn tools(root: &Path) -> Vec<Value> {
             json!({
                 "path": {"type": "string"},
                 "checks": {"type": "array", "items": {"type": "string"}, "description": "Defaults to all."}
+            }),
+            vec![],
+        ),
+        tool(
+            "checks",
+            "Whether a check run is happening in this workspace's daemon right now, and on \
+             which check. The *result* of a run is receipts — ask `status` for those. Use \
+             this to tell \"not run yet\" apart from \"running as we speak\", and pass \
+             start=true to hand a run to the daemon instead of waiting for it here.",
+            json!({
+                "path": {"type": "string"},
+                "start": {"type": "boolean", "description": "Start a run and return at once, rather than only reporting."}
             }),
             vec![],
         ),
@@ -276,6 +288,10 @@ fn call(root: &Path, params: &Value) -> Result<Value> {
             receipts.sort_by(|a, b| b.started.cmp(&a.started));
             json!(receipts)
         }
+        "checks" => {
+            let start = args.get("start").and_then(Value::as_bool).unwrap_or(false);
+            checks_state(&path, start)?
+        }
         "requests" => {
             let host = args.get("host").and_then(Value::as_str).map(str::to_string);
             let since_secs = args.get("since_secs").and_then(Value::as_i64);
@@ -337,6 +353,37 @@ fn running_services(root: &Path) -> Value {
 /// A daemon that is not running is not an error — most of the time nothing is
 /// up, and an agent asking should be told that rather than handed an empty
 /// list it might read as "no traffic".
+/// The daemon's check-run state, and optionally a request to start one.
+///
+/// Deliberately the same socket call the CLI's `preceipts checks` makes and
+/// the app's Run button makes. An agent that starts a run this way is not
+/// holding it: it can go on reading the diff and come back to `status`, which
+/// is how a person uses it too.
+fn checks_state(path: &Path, start: bool) -> Result<Value> {
+    use preceiptsd::proto::{Request, Response};
+
+    let socket = preceiptsd::daemon::socket_path(path);
+    if !socket.exists() {
+        return Ok(json!({
+            "up": false,
+            "note": "no daemon here — `run` executes the checks in this process instead",
+        }));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let request = if start {
+        Request::Run { checks: None }
+    } else {
+        Request::Checks
+    };
+    match runtime.block_on(preceiptsd::client::call(&socket, request)) {
+        Ok(Response::Checks { state }) => Ok(json!({"up": true, "checks": state})),
+        Ok(Response::Error { message }) => Ok(json!({"up": true, "error": message})),
+        _ => Ok(json!({"up": false})),
+    }
+}
+
 fn requests(path: &Path, host: Option<String>, since_secs: Option<i64>) -> Result<Value> {
     use preceiptsd::proto::{Request, Response};
 

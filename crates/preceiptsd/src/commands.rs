@@ -45,7 +45,7 @@ use crate::share;
 
 use crate::client as cli_client;
 use crate::project::Project;
-use crate::proto::{Request, Response};
+use crate::proto::{Request, Response, CHECKS_LOG};
 
 pub fn resolve_root(start: PathBuf) -> Result<PathBuf> {
     let mut cur = start.canonicalize().with_context(|| "canonicalize cwd")?;
@@ -1023,6 +1023,68 @@ fn print_grep(resp: Response, json: bool) -> Result<()> {
             Ok(())
         }
         Response::Error { message } => Err(anyhow!(message)),
+        _ => Err(anyhow!("unexpected response")),
+    }
+}
+
+/// `preceipts checks` — is a run happening in the daemon, and on what.
+///
+/// The *result* of a run is not here and deliberately never will be: that is
+/// the receipts, which `preceipts status` already reads from git notes and
+/// every other surface reads the same way. This says only the thing receipts
+/// cannot — that one is happening right now.
+pub fn checks_cmd(start: PathBuf, json: bool) -> Result<()> {
+    let root = resolve_root(start)?;
+    let socket = daemon::socket_path(&root);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let response = rt.block_on(client::call(&socket, Request::Checks))?;
+    let Response::Checks { state } = response else {
+        return Err(anyhow!("unexpected response"));
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&state)?);
+        return Ok(());
+    }
+    if state.running {
+        match &state.current {
+            Some(current) => println!("running: {current} ({}s)", state.elapsed_secs),
+            None => println!("running ({}s)", state.elapsed_secs),
+        }
+        println!("  follow with:  preceipts proc {CHECKS_LOG} tail -f");
+    } else {
+        match &state.last {
+            Some(last) => println!("idle — last run {last}"),
+            None => println!("idle — no run since the daemon started"),
+        }
+    }
+    Ok(())
+}
+
+/// `preceipts run --detach` — hand the run to the daemon and come back.
+///
+/// Same `checks::run`, same lock, same receipts; what changes is whose
+/// lifetime it borrows. Useful from a terminal you want back, and it is the
+/// same call the app's Run button makes — one door each, one implementation.
+pub fn run_detached_cmd(start: PathBuf, only: Vec<String>) -> Result<()> {
+    let root = resolve_root(start)?;
+    let socket = daemon::socket_path(&root);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let checks = (!only.is_empty()).then_some(only);
+    let response = rt.block_on(client::call(&socket, Request::Run { checks }))?;
+    match response {
+        Response::Checks { .. } => {
+            println!("run started in the daemon");
+            println!("  watch it:     preceipts checks");
+            println!("  follow it:    preceipts proc {CHECKS_LOG} tail -f");
+            println!("  read it:      preceipts status");
+            Ok(())
+        }
+        Response::Error { message } => Err(anyhow!("{message}")),
         _ => Err(anyhow!("unexpected response")),
     }
 }

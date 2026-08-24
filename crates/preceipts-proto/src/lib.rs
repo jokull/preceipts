@@ -48,6 +48,19 @@ pub enum Request {
     GetTask {
         name: String,
     },
+    /// Start a check run in the daemon and return at once.
+    ///
+    /// The daemon does not reimplement anything: it calls the same
+    /// `checks::run` the CLI calls, under the same run lock, and mints the
+    /// same receipts. What it adds is a process that outlives the caller —
+    /// which is what lets a window ask for a run without owning a `cargo
+    /// test`, and what lets a run survive the window closing.
+    Run {
+        /// `None` runs every check.
+        checks: Option<Vec<String>>,
+    },
+    /// Whether a run is in flight here, and what it is on.
+    Checks,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,10 +84,35 @@ pub enum Response {
     Task {
         task: ProcStatus,
     },
+    Checks {
+        state: ChecksState,
+    },
     Error {
         message: String,
     },
 }
+
+/// The daemon's view of check running. Deliberately thin: the *result* of a
+/// run is the receipts, which every surface already reads from git notes, so
+/// this says only what receipts cannot — whether one is happening now.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChecksState {
+    pub running: bool,
+    /// The check being executed, or the prepare step, right now.
+    pub current: Option<String>,
+    /// Seconds since the run started.
+    pub elapsed_secs: u64,
+    /// How the last finished run ended, for a surface that asked after it was
+    /// over. `None` until one has finished in this daemon's lifetime.
+    pub last: Option<String>,
+}
+
+/// The ring buffer a daemon-side check run streams into.
+///
+/// A reserved task id rather than a new instrument: `tail`, `since` and `grep`
+/// already read buffers by name, so a run's output is queryable by every
+/// surface the moment it exists, with no verb added anywhere.
+pub const CHECKS_LOG: &str = "checks";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcStatus {

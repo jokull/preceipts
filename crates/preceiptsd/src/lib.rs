@@ -12,6 +12,7 @@ pub mod acl;
 pub mod bridge;
 pub mod buffer;
 pub mod ca;
+pub mod checkrun;
 pub mod cli;
 pub mod client;
 pub mod commands;

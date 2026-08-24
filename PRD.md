@@ -648,3 +648,43 @@ docs/direction-2026-08.md.
     exists; painting it green is not a stale reading, it is a false claim
     at the exact moment someone is deciding whether to land.
 
+16. **Where a verb lives, and how the faces stay honest** (2026-08-24). The
+    app could not run checks; the CLI and MCP both could. "No UI-only
+    features" had been enforced in one direction only, and the asymmetry
+    was not a policy — nobody chose it.
+
+    The rule, stated in both directions now: **every verb has one
+    implementation, and the faces differ in presentation only.** Where that
+    implementation lives is decided by one question — does it start a
+    process that must outlive its caller?
+
+    - No: it lives in `preceipts-core` and every face links it. Diff,
+      status, highlight, tree hashing. Parity is free because there is
+      nothing to keep in step.
+    - Yes: it lives in `preceiptsd` and every face is a client of the
+      socket. Services, logs, the transcript — and now check runs.
+
+    `checks::run` stays in core and stays the only implementation. The
+    daemon's `Run` is a supervised wrapper around that same function, under
+    the same flock, minting the same receipts; what it adds is a lifetime
+    independent of whoever asked. That is what lets the app offer a Run
+    button without a GPUI window owning a `cargo test`, and what lets a run
+    survive the window closing. The CLI keeps calling core directly,
+    because a terminal has its own lifetime and `preceipts run` must work
+    at rung 0 with no daemon at all. Two doors, one implementation — and
+    the flock, which was already there, is what makes them safe to open at
+    once.
+
+    A run's output streams into the ring buffer under a reserved task id,
+    so `tail`, `since` and `grep` read it with no verb added anywhere. Its
+    *result* is not on the wire at all: that is the receipts, which every
+    surface already reads from git notes. The daemon reports only what
+    receipts cannot — that a run is happening right now.
+
+    **The parity rule is a test, not a promise.** An exhaustive match over
+    the wire vocabulary forces whoever adds a verb to write down which
+    faces offer it, and the test asserts those doors exist — against the
+    CLI's own parsed spec and the served MCP tool list, so neither can be
+    satisfied by a string in a doc. It checks reach, not behaviour; there
+    is no behaviour to check when there is one implementation.
+

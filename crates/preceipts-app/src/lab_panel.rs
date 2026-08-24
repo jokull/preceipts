@@ -49,6 +49,10 @@ enum Instrument {
 pub struct LabPanel {
     workspace: Workspace,
     socket: PathBuf,
+    /// The daemon's check-run state, refreshed on the same poll as everything
+    /// else. The pane's Run button reads it — a second poll for one boolean
+    /// would be a second thing to keep in step.
+    checks: preceipts_proto::ChecksState,
     /// `Err` is the ordinary state — most projects have no environment up.
     services: Result<Vec<ProcStatus>, String>,
     /// Whose output is in the lower half.
@@ -76,6 +80,7 @@ impl LabPanel {
         let this = Self {
             workspace,
             socket,
+            checks: Default::default(),
             services: Err("no daemon".to_string()),
             selected: None,
             lines: Vec::new(),
@@ -113,6 +118,14 @@ impl LabPanel {
                 })
                 .await;
 
+            let checks = cx
+                .background_executor()
+                .spawn({
+                    let socket = socket.clone();
+                    async move { daemon::call(&socket, &Request::Checks) }
+                })
+                .await;
+
             let instrument_result = match (instrument, selected) {
                 (Instrument::Output, Some(name)) => Some(
                     cx.background_executor()
@@ -144,6 +157,12 @@ impl LabPanel {
                         Ok(Response::Error { message }) => Err(message),
                         Ok(_) => Err("unexpected answer".to_string()),
                         Err(message) => Err(message),
+                    };
+                    // A daemon that is not there is not a run that stopped:
+                    // absence leaves the state default, which reads as idle.
+                    this.checks = match checks {
+                        Ok(Response::Checks { state }) => state,
+                        _ => Default::default(),
                     };
                     match instrument_result {
                         Some(Ok(Response::Lines { lines, next_cursor })) => {
@@ -193,6 +212,39 @@ impl LabPanel {
     /// Whether this workspace has an environment up at all. The pane uses it
     /// to decide whether to show the panel unasked — "x-ray into the sandbox
     /// when it's activated" reads as: when there is a sandbox, show it.
+    /// What the daemon says about check running here.
+    pub fn checks(&self) -> &preceipts_proto::ChecksState {
+        &self.checks
+    }
+
+    /// Ask the daemon to run the checks.
+    ///
+    /// The window never runs them itself. A `cargo test` owned by a GPUI
+    /// process dies or leaks when the window closes, and "processes must
+    /// outlive the window" is the reason the daemon exists at all. So this is
+    /// one socket call — the same one `preceipts run --detach` makes — and the
+    /// answer arrives the way every answer arrives: as receipts, which the
+    /// pane is already watching for.
+    pub fn run_checks(&self, cx: &mut Context<Self>) {
+        let socket = self.socket.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { daemon::call(&socket, &Request::Run { checks: None }) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(Response::Checks { state }) = result {
+                    // Paint it as running now rather than up to a poll later:
+                    // a button that looks inert for a second is a button
+                    // people press twice.
+                    this.checks = state;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn has_services(&self) -> bool {
         matches!(&self.services, Ok(procs) if !procs.is_empty())
     }
@@ -256,7 +308,12 @@ impl LabPanel {
              \x20 preceipts requests              every HTTP request the proxy carried\n\
              \x20 preceipts diff                  what has changed, against the base\n\
              \x20 preceipts run                   run the checks, mint receipts\n\
+             \x20 preceipts run --detach          the same, handed to the daemon\n\
+             \x20 preceipts checks                whether a run is happening now\n\
              \x20 preceipts status                the receipt table for this tree\n\
+             \nWhile an environment is up here, the daemon runs the checks itself \n\
+             whenever the worktree goes quiet — so `preceipts status` may already \n\
+             have your answer before you ask for a run.\n\
              \nOr wire them in at once: `claude mcp add preceipts -- preceipts mcp`.\n",
         );
         out

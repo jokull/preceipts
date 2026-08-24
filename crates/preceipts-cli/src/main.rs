@@ -84,6 +84,10 @@ enum Command {
     Run {
         /// Only these checks. Defaults to all of them.
         checks: Vec<String>,
+        /// Hand the run to the daemon and return at once. Same checks, same
+        /// lock, same receipts — it just does not hold this terminal.
+        #[usage(long)]
+        detach: bool,
         #[usage(long)]
         json: bool,
     },
@@ -134,6 +138,11 @@ enum Command {
         quiet: u64,
         /// Only these checks.
         checks: Vec<String>,
+    },
+    /// Whether the daemon is running checks here, and on what.
+    Checks {
+        #[usage(long)]
+        json: bool,
     },
     /// Serve the lab's instruments over MCP on stdio.
     Mcp,
@@ -310,7 +319,18 @@ fn run() -> Result<()> {
         Command::List { json } => list(&path, json),
         Command::Where { json } => locate(&path, json),
         Command::Diff { uncommitted, json } => diff(&path, uncommitted, json),
-        Command::Run { checks, json } => run_checks(&path, &checks, json),
+        Command::Run {
+            checks,
+            detach,
+            json,
+        } => {
+            if detach {
+                preceiptsd::commands::run_detached_cmd(path, checks)
+            } else {
+                run_checks(&path, &checks, json)
+            }
+        }
+        Command::Checks { json } => preceiptsd::commands::checks_cmd(path, json),
         Command::Status { r#ref, json } => show_status(&path, r#ref.as_deref(), json),
         Command::Land {
             branch,
@@ -1023,4 +1043,145 @@ fn as_json(workspace: &Workspace) -> serde_json::Value {
         "genesis": workspace.genesis,
         "primary": workspace.is_primary,
     })
+}
+
+/// The faces must not drift.
+///
+/// Nothing here checks that two implementations agree, because there are no
+/// two implementations: every read is `preceipts-core`, every environment fact
+/// is one socket, and a check run is `checks::run_with` wherever it is called
+/// from. What *can* drift is reach — a verb that exists on the wire and on one
+/// face only, which is exactly how the app ended up unable to run checks while
+/// both agent-facing surfaces could.
+///
+/// So this asserts reach, not behaviour. The `match` is the load-bearing part:
+/// it is exhaustive, so a new wire verb cannot be added without someone
+/// writing down which faces are supposed to offer it.
+#[cfg(test)]
+mod parity {
+    use preceiptsd::proto::Request;
+
+    enum Face {
+        /// Not something anyone asks for by name — plumbing between a client
+        /// and the daemon, with a verb of its own nowhere. The reason is the
+        /// point of the variant: it is read by whoever adds the next verb and
+        /// wonders why this one got a pass.
+        Internal(#[allow(dead_code)] &'static str),
+        Public {
+            cli: &'static str,
+            /// `None` records a deliberate absence: the CLI is the agent's
+            /// door for this one. It is not an oversight, and writing it down
+            /// is the difference between the two.
+            mcp: Option<&'static str>,
+        },
+    }
+
+    fn face(request: &Request) -> Face {
+        match request {
+            Request::Ping => Face::Internal("liveness"),
+            Request::GetTask { .. } => Face::Internal("the polling half of wait-for"),
+            Request::Status => Face::Public {
+                cli: "services",
+                mcp: Some("environment"),
+            },
+            Request::Stop => Face::Public {
+                cli: "down",
+                mcp: None,
+            },
+            Request::Tail { .. } | Request::Since { .. } => Face::Public {
+                cli: "proc",
+                mcp: None,
+            },
+            Request::Grep { .. } => Face::Public {
+                cli: "grep",
+                mcp: None,
+            },
+            Request::Signal { .. } => Face::Public {
+                cli: "proc",
+                mcp: None,
+            },
+            Request::Transcript { .. } => Face::Public {
+                cli: "requests",
+                mcp: Some("requests"),
+            },
+            Request::Run { .. } | Request::Checks => Face::Public {
+                cli: "checks",
+                mcp: Some("checks"),
+            },
+        }
+    }
+
+    /// One value per variant. It sits next to `face` on purpose: the match is
+    /// what forces the decision, and this is what makes the decision get run.
+    fn every_request() -> Vec<Request> {
+        vec![
+            Request::Ping,
+            Request::Status,
+            Request::Stop,
+            Request::GetTask {
+                name: String::new(),
+            },
+            Request::Tail {
+                name: String::new(),
+                lines: 0,
+            },
+            Request::Since {
+                name: String::new(),
+                cursor: 0,
+            },
+            Request::Grep {
+                name: None,
+                pattern: String::new(),
+                before: 0,
+                after: 0,
+            },
+            Request::Signal {
+                name: String::new(),
+                signal: String::new(),
+            },
+            Request::Transcript {
+                host: None,
+                since_secs: None,
+            },
+            Request::Run { checks: None },
+            Request::Checks,
+        ]
+    }
+
+    #[test]
+    fn every_public_wire_verb_has_a_cli_door() {
+        let spec = super::Cli::spec();
+        let verbs: Vec<&str> = spec
+            .root
+            .cmd
+            .subcommands
+            .iter()
+            .map(|command| command.name)
+            .collect();
+        for request in every_request() {
+            if let Face::Public { cli, .. } = face(&request) {
+                assert!(
+                    verbs.contains(&cli),
+                    "the daemon answers {request:?} but `preceipts {cli}` does not exist"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_declared_mcp_tool_exists() {
+        let tools = crate::mcp::tools(std::path::Path::new("."));
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        for request in every_request() {
+            if let Face::Public { mcp: Some(mcp), .. } = face(&request) {
+                assert!(
+                    names.contains(&mcp),
+                    "{request:?} is declared to have the MCP tool `{mcp}`, which is not served"
+                );
+            }
+        }
+    }
 }
